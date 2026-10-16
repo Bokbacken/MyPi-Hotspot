@@ -18,6 +18,7 @@
 static const char *TAG = "display_ui";
 
 #define UI_PERIOD_MS    2000
+#define UI_TICK_MS      200     // OTA view refresh (5 Hz); the status screen redraws every UI_PERIOD_MS
 #define UI_AREA_BOTTOM  160     // Rows 0..159 are owned (and cleared) by the status screen
 #define CHAR_W          6
 #define CHAR_H          8
@@ -197,12 +198,154 @@ static void draw_status(void)
     display_unlock();
 }
 
+// ---------------------------------------------------------------------------
+// OTA progress view (full screen while a P4 or C5 update runs)
+// ---------------------------------------------------------------------------
+
+#define OTA_BAR_X0  8
+#define OTA_BAR_X1  231
+#define OTA_BAR_Y0  112
+#define OTA_BAR_Y1  152
+#define OTA_MSG_Y   64      // Phase text: up to 3 lines of 40 characters
+#define OTA_PCT_Y   168
+#define OTA_KB_Y    216
+
+static struct {
+    ota_target_t target;
+    ota_phase_t phase;
+    uint32_t err_seq;
+    int bar_w;              // Filled bar width in px (-1 = redraw)
+    int pct;
+    uint32_t kb_done, kb_total;
+} s_ota_drawn;
+
+static uint16_t ota_phase_color(ota_phase_t p)
+{
+    switch (p) {
+    case OTA_PHASE_FAILED:   return COL_RED;
+    case OTA_PHASE_VERIFIED:
+    case OTA_PHASE_DONE:     return COL_GREEN;
+    case OTA_PHASE_VERIFYING: return COL_YELLOW;
+    default:                 return COL_CYAN;
+    }
+}
+
+/** Draw text centered horizontally, clearing the full-width band behind it. */
+static void draw_centered(int y, const char *s, uint16_t fg, int scale)
+{
+    int w = (int)strlen(s) * CHAR_W * scale;
+    if (w > LCD_H_RES) w = LCD_H_RES;
+    display_fill_rect(0, y, LCD_H_RES, y + CHAR_H * scale, COL_BLACK);
+    display_draw_str((LCD_H_RES - w) / 2, y, s, fg, COL_BLACK, scale);
+}
+
+/** Redraw only what changed since the last frame; each changed region is flushed on its own. */
+static void draw_ota(bool full)
+{
+    diag_ota_t o;
+    diag_get_ota(&o);
+    char buf[48];
+
+    display_lock();
+    if (full || o.target != s_ota_drawn.target) {
+        display_fill_screen(COL_BLACK);
+        snprintf(buf, sizeof(buf), "Firmware update (%s)", o.target == OTA_TARGET_C5 ? "C5" : "P4");
+        draw_centered(16, buf, COL_WHITE, 2);
+        draw_centered(LCD_V_RES - 24, "Do not power off", COL_GRAY, 1);
+        display_draw_rect_outline(OTA_BAR_X0 - 2, OTA_BAR_Y0 - 2, OTA_BAR_X1 + 2, OTA_BAR_Y1 + 2, COL_WHITE);
+        display_flush();
+        s_ota_drawn.target = o.target;
+        s_ota_drawn.phase = (ota_phase_t)-1;
+        s_ota_drawn.bar_w = -1;
+        s_ota_drawn.pct = -1;
+        s_ota_drawn.kb_done = s_ota_drawn.kb_total = UINT32_MAX;
+    }
+
+    uint16_t col = ota_phase_color(o.phase);
+    if (o.phase != s_ota_drawn.phase || (o.phase == OTA_PHASE_FAILED && o.seq != s_ota_drawn.err_seq)) {
+        display_fill_rect(0, OTA_MSG_Y, LCD_H_RES, OTA_MSG_Y + 3 * (CHAR_H + 2), COL_BLACK);
+        switch (o.phase) {
+        case OTA_PHASE_VERIFYING: draw_centered(OTA_MSG_Y, "Verifying image", col, 1); break;
+        case OTA_PHASE_VERIFIED:  draw_centered(OTA_MSG_Y, "Upload complete - verified", col, 1); break;
+        case OTA_PHASE_DONE:      draw_centered(OTA_MSG_Y, "Done - rebooting", col, 1); break;
+        case OTA_PHASE_FAILED: {
+            // "FAILED: <msg>" wrapped over up to 3 lines of 40 characters.
+            char msg[3 * 40 + 1];
+            snprintf(msg, sizeof(msg), "FAILED: %s", o.err);
+            size_t len = strlen(msg);
+            for (int line = 0; line < 3 && (size_t)line * 40 < len; line++) {
+                char part[41];
+                strlcpy(part, msg + line * 40, sizeof(part));
+                display_draw_str(0, OTA_MSG_Y + line * (CHAR_H + 2), part, col, COL_BLACK, 1);
+            }
+            break;
+        }
+        default:                  draw_centered(OTA_MSG_Y, "Receiving + writing flash", col, 1); break;
+        }
+        display_flush();
+        s_ota_drawn.bar_w = -1;     // Bar color follows the phase
+        s_ota_drawn.pct = -1;
+        s_ota_drawn.phase = o.phase;
+        s_ota_drawn.err_seq = o.seq;
+    }
+
+    // Progress bar: grow incrementally, full redraw on phase change.
+    const int bar_max = OTA_BAR_X1 - OTA_BAR_X0 + 1;
+    int pct = o.pct < 0 ? 0 : (o.pct > 100 ? 100 : o.pct);
+    int w = bar_max * pct / 100;
+    if (w != s_ota_drawn.bar_w) {
+        if (s_ota_drawn.bar_w < 0 || w < s_ota_drawn.bar_w) {
+            display_fill_rect(OTA_BAR_X0, OTA_BAR_Y0, OTA_BAR_X1 + 1, OTA_BAR_Y1 + 1, COL_BLACK);
+            s_ota_drawn.bar_w = 0;
+        }
+        if (w > s_ota_drawn.bar_w) {
+            display_fill_rect(OTA_BAR_X0 + s_ota_drawn.bar_w, OTA_BAR_Y0, OTA_BAR_X0 + w, OTA_BAR_Y1 + 1, col);
+        }
+        display_flush();
+        s_ota_drawn.bar_w = w;
+    }
+
+    if (pct != s_ota_drawn.pct) {
+        snprintf(buf, sizeof(buf), "%d%%", pct);
+        draw_centered(OTA_PCT_Y, buf, col, 4);
+        display_flush();
+        s_ota_drawn.pct = pct;
+    }
+
+    uint32_t kb_done = o.bytes_done / 1024, kb_total = o.bytes_total / 1024;
+    if (kb_done != s_ota_drawn.kb_done || kb_total != s_ota_drawn.kb_total) {
+        snprintf(buf, sizeof(buf), "%lu / %lu KB", (unsigned long)kb_done, (unsigned long)kb_total);
+        draw_centered(OTA_KB_Y, buf, COL_WHITE, 2);
+        display_flush();
+        s_ota_drawn.kb_done = kb_done;
+        s_ota_drawn.kb_total = kb_total;
+    }
+    display_unlock();
+}
+
 static void ui_task(void *arg)
 {
     TickType_t last = xTaskGetTickCount();
+    bool ota_shown = false;
+    int ticks = 0;
     while (!s_stop) {
-        draw_status();
-        vTaskDelayUntil(&last, pdMS_TO_TICKS(UI_PERIOD_MS));
+        if (diag_ota_ui_visible()) {
+            draw_ota(!ota_shown);
+            ota_shown = true;
+        } else {
+            if (ota_shown) {
+                // Leaving the OTA view: wipe it, then redraw the status screen right away.
+                display_lock();
+                display_fill_screen(COL_BLACK);
+                display_flush();
+                display_unlock();
+                ota_shown = false;
+                ticks = 0;
+            }
+            if (ticks == 0) draw_status();
+            if (++ticks >= UI_PERIOD_MS / UI_TICK_MS) ticks = 0;
+        }
+        vTaskDelayUntil(&last, pdMS_TO_TICKS(UI_TICK_MS));
     }
     s_task = NULL;
     vTaskDelete(NULL);

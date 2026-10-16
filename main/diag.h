@@ -45,6 +45,44 @@ typedef struct {
     char ota_status[DIAG_STR_LEN];
 } diag_status_t;
 
+// OTA progress shown on the LCD and reported in /api/status ("ota" object).
+typedef enum {
+    OTA_TARGET_P4 = 0,
+    OTA_TARGET_C5,
+} ota_target_t;
+
+typedef enum {
+    OTA_PHASE_IDLE = 0,
+    OTA_PHASE_WRITING,      // Receiving + writing flash
+    OTA_PHASE_VERIFYING,    // Image check (esp_ota_end / slave OTA end)
+    OTA_PHASE_VERIFIED,     // Upload complete, image verified
+    OTA_PHASE_DONE,         // Rebooting
+    OTA_PHASE_FAILED,
+} ota_phase_t;
+
+#define DIAG_OTA_FAIL_SHOW_MS 10000     // How long the LCD keeps showing a failure
+
+typedef struct {
+    bool active;            // Transfer/verify in progress or done-and-rebooting
+    ota_target_t target;
+    ota_phase_t phase;
+    int pct;
+    uint32_t bytes_done;
+    uint32_t bytes_total;
+    char err[64];
+    int64_t failed_at_us;   // esp_timer time of the failure (0 = none)
+    uint32_t seq;           // Bumped on every change
+} diag_ota_t;
+
+void diag_ota_begin(ota_target_t target, uint32_t bytes_total);
+void diag_ota_progress(uint32_t bytes_done);
+void diag_ota_phase(ota_phase_t phase);
+void diag_ota_fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void diag_get_ota(diag_ota_t *out);
+/** True while the LCD should show the OTA view (active, or failed less than DIAG_OTA_FAIL_SHOW_MS ago). */
+bool diag_ota_ui_visible(void);
+const char *diag_ota_phase_name(ota_phase_t p);
+
 /** Print the boot banner (firmware, chip, reset reason, flash, memory). */
 void diag_print_boot_banner(void);
 

@@ -126,6 +126,12 @@ void app_main(void)
             }
             continue;
         }
+        if (diag_ota_ui_visible()) {
+            // OTA view owns the panel: ignore touches (no drawing, no tap/drag events).
+            was_pressed = pt.pressed;
+            dragging = false;
+            continue;
+        }
 
         if (pt.pressed && !was_pressed) {
             // Finger down

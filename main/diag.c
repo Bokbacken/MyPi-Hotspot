@@ -50,6 +50,79 @@ void diag_set_touch_status(const char *fmt, ...)   { SET_STR_FIELD(touch_status)
 void diag_set_hosted_info(const char *fmt, ...)    { SET_STR_FIELD(hosted_info); }
 void diag_set_ota_status(const char *fmt, ...)     { SET_STR_FIELD(ota_status); }
 
+static diag_ota_t s_ota;
+
+void diag_ota_begin(ota_target_t target, uint32_t bytes_total)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_ota = (diag_ota_t){ .active = true, .target = target, .phase = OTA_PHASE_WRITING,
+                          .bytes_total = bytes_total, .seq = s_ota.seq + 1 };
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void diag_ota_progress(uint32_t bytes_done)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_ota.bytes_done = bytes_done;
+    s_ota.pct = s_ota.bytes_total ? (int)((uint64_t)bytes_done * 100 / s_ota.bytes_total) : 0;
+    s_ota.seq++;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void diag_ota_phase(ota_phase_t phase)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_ota.phase = phase;
+    if (phase >= OTA_PHASE_VERIFIED) s_ota.pct = 100;
+    s_ota.seq++;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void diag_ota_fail(const char *fmt, ...)
+{
+    char tmp[sizeof(s_ota.err)];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_lock);
+    strlcpy(s_ota.err, tmp, sizeof(s_ota.err));
+    s_ota.phase = OTA_PHASE_FAILED;
+    s_ota.active = false;
+    s_ota.failed_at_us = now ? now : 1;
+    s_ota.seq++;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void diag_get_ota(diag_ota_t *out)
+{
+    taskENTER_CRITICAL(&s_lock);
+    *out = s_ota;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+bool diag_ota_ui_visible(void)
+{
+    diag_ota_t o;
+    diag_get_ota(&o);
+    if (o.active) return true;
+    return o.phase == OTA_PHASE_FAILED && o.failed_at_us &&
+           esp_timer_get_time() - o.failed_at_us < (int64_t)DIAG_OTA_FAIL_SHOW_MS * 1000;
+}
+
+const char *diag_ota_phase_name(ota_phase_t p)
+{
+    switch (p) {
+    case OTA_PHASE_WRITING:   return "writing";
+    case OTA_PHASE_VERIFYING: return "verifying";
+    case OTA_PHASE_VERIFIED:  return "verified";
+    case OTA_PHASE_DONE:      return "done";
+    case OTA_PHASE_FAILED:    return "failed";
+    default:                  return "idle";
+    }
+}
+
 void diag_set_spi_clock(uint32_t hz)
 {
     s_st.spi_clock_hz = hz;

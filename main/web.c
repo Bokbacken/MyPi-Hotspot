@@ -222,13 +222,19 @@ static const char UPDATE_HTML[] =
 "<b>not</b> the merged full-flash image.</p>"
 "<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash</button>"
 "<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p><p><a href='/'>&larr; Status</a></p>"
-"<script>function up(){let f=document.getElementById('f').files[0];let s=document.getElementById('s');"
+"<script>"
+"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
+"let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
+"done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
+"if(o.phase=='done'||o.phase=='failed'){clearInterval(pt);pt=0}}).catch(()=>{pb=0;s.textContent='Device is rebooting...'})}"
+"function up(){let f=document.getElementById('f').files[0];let s=document.getElementById('s');"
 "if(!f){s.textContent='Choose a file first';return}"
 "let x=new XMLHttpRequest();x.open('POST','/update');x.setRequestHeader('Content-Type','application/octet-stream');"
 "x.upload.onprogress=e=>{if(e.lengthComputable){let q=Math.floor(e.loaded/e.total*100);document.getElementById('p').value=q;"
-"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes)...':'Upload sent, waiting for the device to verify the image...'}};"
+"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes)...':'Upload sent, waiting for the device to verify the image...';"
+"if(q>=100&&!pt)pt=setInterval(()=>poll('P4',s),500)}};"
 "x.timeout=180000;x.ontimeout=()=>s.textContent='No answer from the device within 3 min. Check /api/log, then power-cycle and retry (or flash via USB).';"
-"x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',15000)};"
+"x.onload=()=>{if(x.status!=200){clearInterval(pt);pt=0}s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',15000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
 "s.textContent='Uploading 0% ('+f.size+' bytes)...';x.send(f)}</script></body></html>";
 
@@ -248,6 +254,11 @@ static const char C5UPDATE_HTML[] =
 "<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash C5</button>"
 "<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p>"
 "<script>const $=i=>document.getElementById(i);"
+"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
+"let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
+"done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
+"if(o.phase=='done'||o.phase=='failed'){clearInterval(pt);pt=0}}).catch(()=>{pb=0;s.textContent='Device is rebooting...'})}"
+
 "fetch('/api/status').then(r=>r.json()).then(j=>{let c=j.coproc||{};let v=c.fw_valid?c.fw:'unknown';"
 "$('t').innerHTML='<tr><td>Chip</td><td>'+(c.target||'?')+' (id '+c.chip_id+')</td></tr>'"
 "+'<tr><td>Slave firmware</td><td>'+v+'</td></tr><tr><td>Host component</td><td>'+c.host+'</td></tr>'"
@@ -257,9 +268,10 @@ static const char C5UPDATE_HTML[] =
 "if(!confirm('Flash '+f.name+' to the C5 co-processor?'))return;"
 "let x=new XMLHttpRequest();x.open('POST','/api/c5update');x.setRequestHeader('Content-Type','application/octet-stream');"
 "x.upload.onprogress=e=>{if(e.lengthComputable){let q=Math.floor(e.loaded/e.total*100);$('p').value=q;"
-"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes, slow: ~1-3 min)...':'Upload sent, waiting for the C5 to verify the image...'}};"
+"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes, slow: ~1-3 min)...':'Upload sent, waiting for the C5 to verify the image...';"
+"if(q>=100&&!pt)pt=setInterval(()=>poll('C5',s),500)}};"
 "x.timeout=300000;x.ontimeout=()=>s.textContent='No answer from the device within 5 min. Check /api/log, then power-cycle and retry.';"
-"x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};"
+"x.onload=()=>{if(x.status!=200){clearInterval(pt);pt=0}s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
 "s.textContent='Uploading '+f.size+' bytes (slow: ~1-3 min)...';x.send(f)}</script></body></html>";
 
@@ -468,6 +480,16 @@ static esp_err_t status_get(httpd_req_t *req)
     add_eth_info(cJSON_AddObjectToObject(j, "eth"));
     add_coproc_info(cJSON_AddObjectToObject(j, "coproc"));
     cJSON_AddStringToObject(j, "c5_ota_status", s_c5_ota_status);
+    diag_ota_t ota;
+    diag_get_ota(&ota);
+    cJSON *oj = cJSON_AddObjectToObject(j, "ota");
+    cJSON_AddBoolToObject(oj, "active", ota.active);
+    cJSON_AddStringToObject(oj, "target", ota.target == OTA_TARGET_C5 ? "C5" : "P4");
+    cJSON_AddStringToObject(oj, "phase", diag_ota_phase_name(ota.phase));
+    cJSON_AddNumberToObject(oj, "pct", ota.pct);
+    cJSON_AddNumberToObject(oj, "bytes_done", ota.bytes_done);
+    cJSON_AddNumberToObject(oj, "bytes_total", ota.bytes_total);
+    cJSON_AddStringToObject(oj, "err", ota.err);
 
     char *out = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -495,7 +517,8 @@ static esp_err_t log_get(httpd_req_t *req)
 
 static void reboot_task(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    // >= 1.5 s: lets the HTTP response go out and the LCD draw "Done - rebooting".
+    vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_LOGW(TAG, "Rebooting into new firmware");
     esp_restart();
 }
@@ -508,6 +531,7 @@ static esp_err_t ota_fail(httpd_req_t *req, esp_ota_handle_t h, const char *stat
     if (h) esp_ota_abort(h);
     ESP_LOGE(TAG, "OTA failed: %s", msg);
     diag_set_ota_status("failed: %s", msg);
+    diag_ota_fail("%s", msg);
     s_ota_busy = false;
     httpd_resp_set_status(req, status);
     return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
@@ -520,6 +544,7 @@ static esp_err_t update_post(httpd_req_t *req)
         return httpd_resp_send(req, "Another update is in progress", HTTPD_RESP_USE_STRLEN);
     }
     s_ota_busy = true;
+    diag_ota_begin(OTA_TARGET_P4, (uint32_t)req->content_len);
 
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (!target) return ota_fail(req, 0, "500 Internal Server Error", "No OTA partition (wrong partition table?)");
@@ -584,6 +609,7 @@ static esp_err_t update_post(httpd_req_t *req)
             return ota_fail(req, h, "500 Internal Server Error", esp_err_to_name(err));
         }
         received += r;
+        diag_ota_progress((uint32_t)received);
         int pct = (int)(received * 100 / req->content_len);
         if (pct / 10 != last_pct / 10) {
             ESP_LOGI(TAG, "OTA %d%% (%u / %u)", pct, (unsigned)received, (unsigned)req->content_len);
@@ -593,6 +619,7 @@ static esp_err_t update_post(httpd_req_t *req)
     }
     free(buf);
 
+    diag_ota_phase(OTA_PHASE_VERIFYING);
     err = esp_ota_end(h);   // Verifies image integrity (checksum / SHA-256)
     if (err != ESP_OK) {
         return ota_fail(req, 0, "400 Bad Request",
@@ -604,7 +631,9 @@ static esp_err_t update_post(httpd_req_t *req)
     }
     ESP_LOGI(TAG, "OTA complete, boot partition set to %s", target->label);
     diag_set_ota_status("done, rebooting into %s", target->label);
+    diag_ota_phase(OTA_PHASE_VERIFIED);
     httpd_resp_sendstr(req, "OK - image verified, rebooting into the new firmware...");
+    diag_ota_phase(OTA_PHASE_DONE);
     xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
@@ -632,6 +661,7 @@ static esp_err_t c5_fail(httpd_req_t *req, bool locked, bool begun, const char *
     if (locked) wifi_rpc_unlock();
     ESP_LOGE(TAG, "C5 OTA failed: %s", msg);
     c5_status("failed: %s", msg);
+    diag_ota_fail("%s", msg);
     s_c5_ota_busy = false;
     httpd_resp_set_status(req, status);
     return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
@@ -651,6 +681,7 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
         return httpd_resp_send(req, "Another update is in progress", HTTPD_RESP_USE_STRLEN);
     }
     s_c5_ota_busy = true;
+    diag_ota_begin(OTA_TARGET_C5, (uint32_t)req->content_len);
     if (req->content_len < 1024 || req->content_len > C5_MAX_IMAGE) {
         return c5_fail(req, false, false, "400 Bad Request", "Image size is too small or larger than 4 MB");
     }
@@ -727,6 +758,7 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
             }
         }
         received += r;
+        diag_ota_progress((uint32_t)received);
         int pct = (int)(received * 100 / req->content_len);
         if (pct / 10 != last_pct / 10) {
             ESP_LOGI(TAG, "C5 OTA %d%% (%u / %u)", pct, (unsigned)received, (unsigned)req->content_len);
@@ -736,10 +768,12 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
     }
     free(buf);
 
+    diag_ota_phase(OTA_PHASE_VERIFYING);
     err = esp_hosted_slave_ota_end();   // C5 validates the image (checksum/SHA) and sets its boot partition
     if (err != ESP_OK) {
         return c5_fail(req, true, false, "400 Bad Request", "C5 rejected the image (validation failed)");
     }
+    diag_ota_phase(OTA_PHASE_VERIFIED);
     // ota_activate exists in slave firmware >= 2.6.0; older slaves reboot into the new image on their own.
     bool can_activate = cp.fw_valid && (cp.fw_major > 2 || (cp.fw_major == 2 && cp.fw_minor > 5));
     if (can_activate) {
@@ -753,6 +787,7 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
     snprintf(msg, sizeof(msg), "OK - C5 image '%s' verified and %s. Rebooting the P4 to resync with the co-processor...",
              newver, can_activate ? "activated" : "flashed");
     httpd_resp_sendstr(req, msg);
+    diag_ota_phase(OTA_PHASE_DONE);
     xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
