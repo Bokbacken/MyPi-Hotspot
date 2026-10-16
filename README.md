@@ -362,6 +362,7 @@ All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or 
 | `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
 | `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
 | `GET /api/eth` / `POST /api/eth` | link, speed, IP (WAN), active/saved mode, `bridged`, `bridge_drops` (LAN) / `{mode:"lan"\|"wan"}` |
+| `GET /api/radio` / `POST /api/radio` | active/saved width + protocols, what the C5 reports for STA/AP, upstream AP PHY / `{sta_bw:"auto\|20\|40\|80", ap_bw:"20\|40\|80", sta_proto, ap_proto:"default\|n\|ac\|ax"}` (reboot to apply) |
 | `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_mbps`/`tx_mbps` (Mbit/s, 2 decimals, 1 s window), `rx_mbps_peak`/`tx_mbps_peak`; plus `log_running`, `log_ever`, `log_samples`, `log_max` |
 | `POST /api/netstats/reset` | clear the peak rates → `{"ok":true}` |
 | `POST /api/netstats/log/start` / `stop` | start (clears old samples) / stop the traffic log → `{"ok":true,"running":…,"samples":N}` |
@@ -411,9 +412,10 @@ While the status screen runs, touch drawing is disabled (touch events still appe
 - **One radio, one channel.** STA and AP share the C5 radio, so the AP must use the STA's channel and
   airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
   When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.
-  Both interfaces advertise 802.11a/n/ac/ax only (no 11b/11g), and HT20 is no longer forced
-  (`MYPI_WIFI_BW_20`, default off), so the C5 can negotiate up to 80 MHz channel width with the
-  upstream AP on 5 GHz.
+  Channel width and protocols are runtime settings (web page section *Radio*, `GET/POST /api/radio`,
+  stored in NVS, applied after a reboot). Defaults: STA width auto / driver-default protocols, AP 20 MHz /
+  driver-default protocols. The page also shows what the C5 reports for STA and AP and the upstream AP's
+  PHY capabilities, so combinations can be compared without reflashing.
 - NAPT is enabled per interface with the lwIP call `ip_napt_enable_netif()` (instead of
   `esp_netif_napt_enable()`, which only allows one NAT interface). Wired LAN clients are NATed through the AP
   netif because Ethernet is bridged to it.

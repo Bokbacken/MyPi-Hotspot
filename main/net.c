@@ -139,6 +139,12 @@ static err_t hook_linkoutput(struct netif *n, struct pbuf *p)
         return ERR_OK;  // sent over the bridge only (destination is on Ethernet)
     }
     err_t err = s->orig_linkoutput(n, p);
+    // The STA uplink queue (ESP-Hosted -> C5) fills up during uploads; wait
+    // briefly instead of dropping (runs in the tcpip thread, so max ~3 ms).
+    for (int i = 0; err != ERR_OK && s == &s_if[NET_IF_STA] && i < 3; i++) {
+        vTaskDelay(1);
+        err = s->orig_linkoutput(n, p);
+    }
     if (err != ERR_OK) {
         portENTER_CRITICAL_SAFE(&s_mux);
         s->tx_drops++;

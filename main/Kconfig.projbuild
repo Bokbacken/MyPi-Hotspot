@@ -54,16 +54,6 @@ menu "MyPi-Hotspot"
                 If disabled, the AP only starts at boot when an AP profile has
                 "start at boot" set, or when started from the web UI.
 
-        config MYPI_WIFI_BW_20
-            bool "Force 20 MHz channel bandwidth (HT20) on STA and AP"
-            default n
-            help
-                Force 20 MHz channel bandwidth (HT20) on both STA and AP.
-                Disabled by default: on 5 GHz the radio auto-negotiates the
-                channel width (up to 80 MHz) with the upstream AP, which gives a
-                much higher PHY rate. Enable for debugging or crowded 2.4 GHz
-                setups. Applied before esp_wifi_start() (and when the AP is
-                started later).
     endmenu
 
     menu "Ethernet"

@@ -66,6 +66,14 @@ static const char INDEX_HTML[] =
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
+"<h2>Radio (channel width / protocols)</h2><table id='rd'></table>"
+"<p>STA width <select id='rsb'><option>auto</option><option>20</option><option>40</option><option>80</option></select> "
+"STA protocols <select id='rsp'><option>default</option><option>n</option><option>ac</option><option>ax</option></select> "
+"AP width <select id='rab'><option>20</option><option>40</option><option>80</option></select> "
+"AP protocols <select id='rap'><option>default</option><option>n</option><option>ac</option><option>ax</option></select> "
+"<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
+"<small>Width in MHz (auto = negotiated). Protocols: n = a/n (5 GHz), ac = a/n/ac, ax = a/n/ac/ax; 2.4 GHz keeps b/g. "
+"STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
@@ -100,6 +108,7 @@ static const char INDEX_HTML[] =
 "x.has_pass?'WPA2':'open',x.nat?'yes':'no',x.on_boot?'yes':'',"
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
+"let r=await (await fetch('/api/radio')).json();$('rsb').value=r.saved.sta_bw;$('rsp').value=r.saved.sta_proto;$('rab').value=r.saved.ap_bw;$('rap').value=r.saved.ap_proto;"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value='';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
 "$('sip').value=x.ip;$('smk').value=x.mask||'255.255.255.0';$('sgw').value=x.gw;$('sdn').value=x.dns}"
@@ -115,6 +124,7 @@ static const char INDEX_HTML[] =
 "async function disc(){await post('/api/disconnect');ld()}"
 "async function apStart(i){await post('/api/ap/start',{slot:i})}"
 "async function apStop(){await post('/api/ap/stop')}"
+"async function saveRadio(){await post('/api/radio',{sta_bw:$('rsb').value,sta_proto:$('rsp').value,ap_bw:$('rab').value,ap_proto:$('rap').value})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
 "async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
@@ -155,6 +165,12 @@ static const char INDEX_HTML[] =
 "let a=await (await fetch('/api/apstatus')).json();"
 "$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
+"let r=await (await fetch('/api/radio')).json();let rc=x=>'width '+x.sta_bw+'/'+x.ap_bw+', proto '+x.sta_proto+'/'+x.ap_proto;"
+"$('rd').innerHTML=tr(['','Width (C5)','Protocols (C5)','Setting (width / proto)'],1)+"
+"tr(['STA (ch '+r.sta_channel+')',r.sta_bw_mhz?r.sta_bw_mhz+' MHz':'?',r.sta_proto,r.active.sta_bw+' / '+r.active.sta_proto])+"
+"tr(['AP (ch '+r.ap_channel+')',r.ap_bw_mhz?r.ap_bw_mhz+' MHz':'-',r.ap_proto,r.active.ap_bw+' / '+r.active.ap_proto])+"
+"tr(['Upstream AP','2nd ch '+r.upstream_second,r.upstream_phy,''])+"
+"(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','','','STA/AP '+rc(r.saved)]):'');"
 "let p=await (await fetch('/api/iperf')).json();"
 "$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
 "if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
@@ -839,6 +855,55 @@ static esp_err_t api_eth_post(httpd_req_t *req)
     return send_result(req, err, "saved - reboot to apply", "mode must be \"lan\" or \"wan\"");
 }
 
+// --- Radio settings ---
+
+static void add_radio_cfg(cJSON *o, const wifi_radio_cfg_t *c)
+{
+    cJSON_AddStringToObject(o, "sta_bw", wifi_radio_bw_name(c->sta_bw));
+    cJSON_AddStringToObject(o, "ap_bw", wifi_radio_bw_name(c->ap_bw));
+    cJSON_AddStringToObject(o, "sta_proto", wifi_radio_proto_name(c->sta_proto));
+    cJSON_AddStringToObject(o, "ap_proto", wifi_radio_proto_name(c->ap_proto));
+}
+
+// GET /api/radio - active + saved settings and what the C5 reports for STA/AP
+static esp_err_t api_radio_get(httpd_req_t *req)
+{
+    wifi_radio_info_t r;
+    wifi_get_radio_info(&r);
+    cJSON *j = cJSON_CreateObject();
+    add_radio_cfg(cJSON_AddObjectToObject(j, "active"), &r.active);
+    add_radio_cfg(cJSON_AddObjectToObject(j, "saved"), &r.saved);
+    cJSON_AddBoolToObject(j, "reboot_pending", memcmp(&r.active, &r.saved, sizeof(r.active)) != 0);
+    cJSON_AddNumberToObject(j, "sta_channel", r.sta_channel);
+    cJSON_AddNumberToObject(j, "ap_channel", r.ap_channel);
+    cJSON_AddNumberToObject(j, "sta_bw_mhz", r.sta_bw_mhz);
+    cJSON_AddNumberToObject(j, "ap_bw_mhz", r.ap_bw_mhz);
+    cJSON_AddStringToObject(j, "sta_proto", r.sta_proto);
+    cJSON_AddStringToObject(j, "ap_proto", r.ap_proto);
+    cJSON_AddStringToObject(j, "upstream_second", r.up_second == 1 ? "above" : r.up_second == 2 ? "below" : "none");
+    cJSON_AddStringToObject(j, "upstream_phy", r.up_phy);
+    return send_json(req, j);
+}
+
+// POST /api/radio {sta_bw,ap_bw,sta_proto,ap_proto} - missing keys keep the saved value; applied after reboot
+static esp_err_t api_radio_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    wifi_radio_info_t r;
+    wifi_get_radio_info(&r);
+    wifi_radio_cfg_t c = r.saved;
+    bool ok = true;
+    const char *v;
+    int x;
+    if (*(v = jstr(j, "sta_bw"))) { x = wifi_radio_bw_parse(v); ok &= x >= 0; c.sta_bw = x; }
+    if (*(v = jstr(j, "ap_bw"))) { x = wifi_radio_bw_parse(v); ok &= x > 0; c.ap_bw = x; }
+    if (*(v = jstr(j, "sta_proto"))) { x = wifi_radio_proto_parse(v); ok &= x >= 0; c.sta_proto = x; }
+    if (*(v = jstr(j, "ap_proto"))) { x = wifi_radio_proto_parse(v); ok &= x >= 0; c.ap_proto = x; }
+    cJSON_Delete(j);
+    return send_result(req, ok ? wifi_radio_save(&c) : ESP_ERR_INVALID_ARG, "saved - reboot to apply",
+                       "sta_bw: auto|20|40|80, ap_bw: 20|40|80, *_proto: default|n|ac|ax");
+}
+
 // --- Traffic stats ---
 
 /** Round to 2 decimals so cJSON prints e.g. 8.37 instead of 8.3699998855590820. */
@@ -984,6 +1049,8 @@ esp_err_t web_start(void)
         { .uri = "/api/apstatus",       .method = HTTP_GET,  .handler = api_apstatus_get },
         { .uri = "/api/eth",            .method = HTTP_GET,  .handler = api_eth_get },
         { .uri = "/api/eth",            .method = HTTP_POST, .handler = api_eth_post },
+        { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
+        { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
         { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
         { .uri = "/api/netstats/reset", .method = HTTP_POST, .handler = api_netstats_reset },
         { .uri = "/api/netstats/log/start", .method = HTTP_POST, .handler = api_netlog_start },
