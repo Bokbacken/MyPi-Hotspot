@@ -287,10 +287,17 @@ Equivalent from a terminal: `curl --data-binary @build/mypi_hotspot.bin http://m
 ## Wi-Fi co-processor (ESP32-C5)
 
 Wi-Fi runs on the on-board ESP32-C5, which must run **ESP-Hosted slave firmware** compatible with
-the host component (v2.x, built with v2.13 here). The log prints both versions at startup and warns
-on mismatch. If Wi-Fi init fails or the version cannot be read, update the C5 firmware following
-the [ESP-Hosted-MCU](https://github.com/espressif/esp-hosted-mcu) instructions. The display and touch
-keep working without Wi-Fi.
+the host component (v3.x since v0.6.0, pinned to 3.0.9; v0.5.x used 2.13). 2.x and 3.x do not
+talk to each other. The log prints both versions at startup and warns on mismatch. If Wi-Fi init
+fails or the version cannot be read, update the C5 firmware (see `c5_slave/`). The display, touch,
+Ethernet and P4 `/update` keep working without Wi-Fi; the board never reboots on a C5 link failure.
+
+Safest upgrade order from v0.5.x (C5 on 2.x):
+1. P4 on v0.5.5 (host 2.13) – flash via `/update` or USB.
+2. C5 to 3.0.9 via `/c5update` (`c5-slave-esp-hosted-v3.0.9.bin`). Wi-Fi stops working afterwards.
+3. P4 v0.6.0 via `/update` over **Ethernet** (or USB).
+
+If P4 v0.6.0 is flashed first, flash the C5 over USB (`c5-slave-esp-hosted-v3.0.9-merged.bin`).
 
 ## Wi-Fi, AP & Ethernet
 

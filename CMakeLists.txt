@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Firmware version shown in the boot banner, web UI and OTA image header.
-set(PROJECT_VER "0.5.5")
+set(PROJECT_VER "0.6.0")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(mypi_hotspot)
