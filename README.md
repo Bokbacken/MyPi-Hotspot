@@ -90,7 +90,7 @@ Always confirm against the official Waveshare ESP32-P4-NANO schematic before con
 ```
 MyPi-Hotspot/
 ├── CMakeLists.txt        Top-level ESP-IDF project file
-├── sdkconfig.defaults    Target, CPU 360 MHz, PSRAM, 16 MB flash, 115200 console
+├── sdkconfig.defaults    Target, chip rev v3.x, CPU 400 MHz, PSRAM, 16 MB flash, 115200 console
 └── main/
     ├── CMakeLists.txt
     ├── main.c            app_main: init, touch loop, tap/drag logic
@@ -121,11 +121,18 @@ Alternative with Python only: `pip install esptool` then
 
 If the board will not connect: hold **BOOT**, tap **RESET**, release **BOOT**, then retry.
 
+If esptool-js fails with *"Serial data stream stopped: possible serial noise or corruption"*
+(seen with the on-board CH343 USB-UART, VID `0x1a86` / PID `0x55d3`): set **Baudrate** to
+**115200** *before* clicking Connect, connect directly (no USB hub), and try another data cable.
+
 ---
 
 ## Build & flash quick-start
 
-Requires **ESP-IDF v5.5** (tested to build with v5.5.1, target `esp32p4`).
+Requires **ESP-IDF v5.5.2 or newer** (tested with v5.5.6, target `esp32p4`). The board uses
+ESP32-P4 **rev v3.1** silicon; older IDF releases only support rev <3.0 and the bootloader will
+refuse to start. `sdkconfig.defaults` disables `CONFIG_ESP32P4_SELECTS_REV_LESS_V3` to target rev v3.x.
+If you change IDF version or `sdkconfig.defaults`, run `idf.py fullclean` (or delete `sdkconfig`) first.
 
 ```bash
 # 1. Load the ESP-IDF environment (path depends on where you installed it)

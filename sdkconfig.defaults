@@ -5,10 +5,16 @@
 
 CONFIG_IDF_TARGET="esp32p4"
 
+# --- Chip revision ---
+# The ESP32-P4-NANO-WIFI6-DB ships with ESP32-P4 rev v3.1 silicon.
+# Support for rev <3.0 and >=3.0 is mutually exclusive (requires ESP-IDF >= v5.5.2).
+# Disabling this targets rev v3.x; a rev <3.0 build is rejected by the v3.x bootloader.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+CONFIG_ESP32P4_REV_MIN_300=y
+
 # --- CPU ---
-# 360 MHz is the maximum offered by ESP-IDF v5.5 for ESP32-P4 (rev v1.x silicon).
-# (400 MHz requires rev v3.0+ silicon and a newer IDF.)
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+# Rev v3.x runs at 400 MHz (the 360 MHz option only exists for rev <3.0 builds).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
 
 # --- Flash ---
 # The board has 32 MB of flash. 16 MB is a safe, conservative setting
