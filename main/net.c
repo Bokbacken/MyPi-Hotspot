@@ -86,8 +86,8 @@ typedef struct {
     uint64_t rx_bytes, tx_bytes;
     uint32_t rx_pkts, tx_pkts;
     uint64_t last_rx, last_tx;
-    uint32_t rx_bps, tx_bps;
-    uint32_t rx_bps_peak, tx_bps_peak;
+    float rx_mbps, tx_mbps;             // Mbit/s over the last 1 s sample
+    float rx_mbps_peak, tx_mbps_peak;
     bool manual;                // counted by net_stats_add() (no lwIP netif, e.g. bridged ETH)
 } if_slot_t;
 
@@ -216,10 +216,10 @@ void net_stats_get(net_if_id_t id, net_if_stats_t *out)
     out->tx_bytes = s->tx_bytes;
     out->rx_pkts = s->rx_pkts;
     out->tx_pkts = s->tx_pkts;
-    out->rx_bps = s->rx_bps;
-    out->tx_bps = s->tx_bps;
-    out->rx_bps_peak = s->rx_bps_peak;
-    out->tx_bps_peak = s->tx_bps_peak;
+    out->rx_mbps = s->rx_mbps;
+    out->tx_mbps = s->tx_mbps;
+    out->rx_mbps_peak = s->rx_mbps_peak;
+    out->tx_mbps_peak = s->tx_mbps_peak;
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -227,8 +227,8 @@ void net_stats_reset_peaks(void)
 {
     portENTER_CRITICAL(&s_mux);
     for (int i = 0; i < NET_IF_COUNT; i++) {
-        s_if[i].rx_bps_peak = 0;
-        s_if[i].tx_bps_peak = 0;
+        s_if[i].rx_mbps_peak = 0.0f;
+        s_if[i].tx_mbps_peak = 0.0f;
     }
     portEXIT_CRITICAL(&s_mux);
 }
@@ -308,7 +308,7 @@ uint32_t net_log_sample_count(void)
     return n;
 }
 
-static void log_add(const uint32_t *rx, const uint32_t *tx)
+static void log_add(const float *rx, const float *tx)
 {
     // Never stall the sampler: if a CSV download holds the lock, drop this sample.
     if (!s_log_running || !log_lock_to(pdMS_TO_TICKS(20))) return;
@@ -321,8 +321,8 @@ static void log_add(const uint32_t *rx, const uint32_t *tx)
         }
         net_log_sample_t *e = &s_log[idx];
         e->ts = (uint32_t)((uint64_t)(xTaskGetTickCount() - s_log_t0) * portTICK_PERIOD_MS / 1000);
-        memcpy(e->rx_bps, rx, sizeof(e->rx_bps));
-        memcpy(e->tx_bps, tx, sizeof(e->tx_bps));
+        memcpy(e->rx_mbps, rx, sizeof(e->rx_mbps));
+        memcpy(e->tx_mbps, tx, sizeof(e->tx_mbps));
     }
     log_unlock();
 }
@@ -330,7 +330,7 @@ static void log_add(const uint32_t *rx, const uint32_t *tx)
 esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx)
 {
     if (!fn) return ESP_ERR_INVALID_ARG;
-    static const char header[] = "ts,sta_rx_bps,sta_tx_bps,ap_rx_bps,ap_tx_bps,eth_rx_bps,eth_tx_bps\n";
+    static const char header[] = "ts,sta_rx_mbps,sta_tx_mbps,ap_rx_mbps,ap_tx_mbps,eth_rx_mbps,eth_tx_mbps\n";
     if (!fn(header, sizeof(header) - 1, ctx)) return ESP_FAIL;
     if (!log_lock()) return ESP_ERR_NO_MEM;
     // Rows are batched into a chunk buffer; the lock is held while streaming so
@@ -341,10 +341,10 @@ esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx)
     for (uint32_t i = 0; i < s_log_count && s_log; i++) {
         const net_log_sample_t *e = &s_log[(s_log_head + i) % NET_LOG_MAX_SAMPLES];
         char row[96];
-        int n = snprintf(row, sizeof(row), "%lu,%lu,%lu,%lu,%lu,%lu,%lu\n", (unsigned long)e->ts,
-                         (unsigned long)e->rx_bps[NET_IF_STA], (unsigned long)e->tx_bps[NET_IF_STA],
-                         (unsigned long)e->rx_bps[NET_IF_AP], (unsigned long)e->tx_bps[NET_IF_AP],
-                         (unsigned long)e->rx_bps[NET_IF_ETH], (unsigned long)e->tx_bps[NET_IF_ETH]);
+        int n = snprintf(row, sizeof(row), "%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", (unsigned long)e->ts,
+                         (double)e->rx_mbps[NET_IF_STA], (double)e->tx_mbps[NET_IF_STA],
+                         (double)e->rx_mbps[NET_IF_AP], (double)e->tx_mbps[NET_IF_AP],
+                         (double)e->rx_mbps[NET_IF_ETH], (double)e->tx_mbps[NET_IF_ETH]);
         if (n <= 0) continue;
         if (used + (size_t)n > sizeof(buf)) {
             if (!fn(buf, used, ctx)) {
@@ -465,18 +465,18 @@ static void sampler_task(void *arg)
     while (true) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(1000));
         esp_netif_tcpip_exec(install_hooks_cb, NULL);
-        uint32_t rx[NET_IF_COUNT], tx[NET_IF_COUNT];
+        float rx[NET_IF_COUNT], tx[NET_IF_COUNT];
         portENTER_CRITICAL(&s_mux);
         for (int i = 0; i < NET_IF_COUNT; i++) {
             if_slot_t *s = &s_if[i];
-            s->rx_bps = (uint32_t)(s->rx_bytes - s->last_rx);
-            s->tx_bps = (uint32_t)(s->tx_bytes - s->last_tx);
+            s->rx_mbps = (float)(s->rx_bytes - s->last_rx) * 8.0f / 1e6f;
+            s->tx_mbps = (float)(s->tx_bytes - s->last_tx) * 8.0f / 1e6f;
             s->last_rx = s->rx_bytes;
             s->last_tx = s->tx_bytes;
-            if (s->rx_bps > s->rx_bps_peak) s->rx_bps_peak = s->rx_bps;
-            if (s->tx_bps > s->tx_bps_peak) s->tx_bps_peak = s->tx_bps;
-            rx[i] = s->rx_bps;
-            tx[i] = s->tx_bps;
+            if (s->rx_mbps > s->rx_mbps_peak) s->rx_mbps_peak = s->rx_mbps;
+            if (s->tx_mbps > s->tx_mbps_peak) s->tx_mbps_peak = s->tx_mbps;
+            rx[i] = s->rx_mbps;
+            tx[i] = s->tx_mbps;
         }
         portEXIT_CRITICAL(&s_mux);
         log_add(rx, tx);

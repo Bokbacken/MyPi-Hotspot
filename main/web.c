@@ -1,5 +1,6 @@
 #include "web.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -83,7 +84,7 @@ static const char INDEX_HTML[] =
 "function fmtUp(s){let h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h+'h '+m+'m '+(s%60)+'s'}"
 "function row(k,v,c){return '<tr><td>'+k+'</td><td'+(c?' class='+c:'')+'>'+v+'</td></tr>'}"
 "function tr(a,h){return '<tr>'+a.map(x=>(h?'<th>':'<td>')+x+(h?'</th>':'</td>')).join('')+'</tr>'}"
-"function mb(b){return (b*8/1e6).toFixed(2)}"
+"function mb(v){return (+v).toFixed(2)}"
 "async function post(u,b){try{let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});"
 "let j=await r.json();$('msg').textContent=u+': '+(j.ok?'OK':'ERROR')+(j.msg?' - '+j.msg:'')+(j.error?' - '+j.error:'');return j.ok}"
 "catch(e){$('msg').textContent=u+': '+e;return false}}"
@@ -147,7 +148,7 @@ static const char INDEX_HTML[] =
 "$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let n=await (await fetch('/api/netstats')).json();"
 "$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX peak','TX peak','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
-"i.present?mb(i.rx_bps):'-',i.present?mb(i.tx_bps):'-',i.present?mb(i.rx_bps_peak):'-',i.present?mb(i.tx_bps_peak):'-',"
+"i.present?mb(i.rx_mbps):'-',i.present?mb(i.tx_mbps):'-',i.present?mb(i.rx_mbps_peak):'-',i.present?mb(i.tx_mbps_peak):'-',"
 "(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
 "logRun=n.log_running;$('lb').textContent=logRun?'Stop log':'Start log';"
 "$('lst').textContent=n.log_ever?(logRun?'Logging: ':'Log stopped: ')+n.log_samples+'/'+n.log_max+' samples':'';"
@@ -839,6 +840,9 @@ static esp_err_t api_eth_post(httpd_req_t *req)
 
 // --- Traffic stats ---
 
+/** Round to 2 decimals so cJSON prints e.g. 8.37 instead of 8.3699998855590820. */
+static double mbps2(float v) { return round((double)v * 100.0) / 100.0; }
+
 static esp_err_t api_netstats_get(httpd_req_t *req)
 {
     cJSON *j = cJSON_CreateObject();
@@ -853,10 +857,10 @@ static esp_err_t api_netstats_get(httpd_req_t *req)
         cJSON_AddNumberToObject(o, "tx_bytes", (double)s.tx_bytes);
         cJSON_AddNumberToObject(o, "rx_pkts", s.rx_pkts);
         cJSON_AddNumberToObject(o, "tx_pkts", s.tx_pkts);
-        cJSON_AddNumberToObject(o, "rx_bps", s.rx_bps);   // bytes per second
-        cJSON_AddNumberToObject(o, "tx_bps", s.tx_bps);
-        cJSON_AddNumberToObject(o, "rx_bps_peak", s.rx_bps_peak);
-        cJSON_AddNumberToObject(o, "tx_bps_peak", s.tx_bps_peak);
+        cJSON_AddNumberToObject(o, "rx_mbps", mbps2(s.rx_mbps));   // Mbit/s, 2 decimals
+        cJSON_AddNumberToObject(o, "tx_mbps", mbps2(s.tx_mbps));
+        cJSON_AddNumberToObject(o, "rx_mbps_peak", mbps2(s.rx_mbps_peak));
+        cJSON_AddNumberToObject(o, "tx_mbps_peak", mbps2(s.tx_mbps_peak));
         cJSON_AddItemToArray(arr, o);
     }
     cJSON_AddBoolToObject(j, "log_running", net_log_is_running());

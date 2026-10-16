@@ -362,10 +362,10 @@ All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or 
 | `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
 | `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
 | `GET /api/eth` / `POST /api/eth` | link, speed, IP (WAN), active/saved mode, `bridged`, `bridge_drops` (LAN) / `{mode:"lan"\|"wan"}` |
-| `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_bps`/`tx_bps` (bytes/s, 1 s window), `rx_bps_peak`/`tx_bps_peak`; plus `log_running`, `log_ever`, `log_samples`, `log_max` |
+| `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_mbps`/`tx_mbps` (Mbit/s, 2 decimals, 1 s window), `rx_mbps_peak`/`tx_mbps_peak`; plus `log_running`, `log_ever`, `log_samples`, `log_max` |
 | `POST /api/netstats/reset` | clear the peak rates → `{"ok":true}` |
 | `POST /api/netstats/log/start` / `stop` | start (clears old samples) / stop the traffic log → `{"ok":true,"running":…,"samples":N}` |
-| `GET /api/netstats/log` | traffic log as CSV download (`hotspot_log.csv`): `ts,sta_rx_bps,sta_tx_bps,ap_rx_bps,ap_tx_bps,eth_rx_bps,eth_tx_bps` (bytes/s) |
+| `GET /api/netstats/log` | traffic log as CSV download (`hotspot_log.csv`): `ts,sta_rx_mbps,sta_tx_mbps,ap_rx_mbps,ap_tx_mbps,eth_rx_mbps,eth_tx_mbps` (Mbit/s, 2 decimals) |
 | `POST /api/iperf/start` / `stop`, `GET /api/iperf` | `{window_s}` / iperf server state and results |
 
 `/api/status` now also contains `uplink` (`sta`, `eth` or `none`), `sta_profile`, an `ap` object and an `eth` object.

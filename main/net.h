@@ -16,8 +16,8 @@ typedef struct {
     bool present;
     uint64_t rx_bytes, tx_bytes;
     uint32_t rx_pkts, tx_pkts;
-    uint32_t rx_bps, tx_bps;    // bytes per second over the last 1 s sample
-    uint32_t rx_bps_peak, tx_bps_peak;  // highest 1 s rate since boot / last reset
+    float rx_mbps, tx_mbps;     // Mbit/s over the last 1 s sample
+    float rx_mbps_peak, tx_mbps_peak;   // highest 1 s rate since boot / last reset (Mbit/s)
 } net_if_stats_t;
 
 /** Clear the peak rates of all interfaces. */
@@ -28,8 +28,8 @@ void net_stats_reset_peaks(void);
 
 typedef struct {
     uint32_t ts;                        // seconds since the log was started
-    uint32_t rx_bps[NET_IF_COUNT];
-    uint32_t tx_bps[NET_IF_COUNT];
+    float rx_mbps[NET_IF_COUNT];        // Mbit/s
+    float tx_mbps[NET_IF_COUNT];
 } net_log_sample_t;
 
 /** Start (or restart, clearing old samples) the traffic log. */

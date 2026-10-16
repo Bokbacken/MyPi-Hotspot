@@ -94,21 +94,19 @@ void display_draw_wifi_icon(int cx, int cy, uint16_t color)
 // Status screen
 // ---------------------------------------------------------------------------
 
-static float mbit(uint32_t bytes_per_s) { return (float)bytes_per_s * 8.0f / 1e6f; }
-
-/** "<label> v XX.X ^ XX.X Mbit/s" with the label white and values in val_color. */
-static void draw_rate_row(int y, const char *label, uint32_t rx, uint32_t tx, uint16_t val_color)
+/** "<label> v XXX.XX ^ XXX.XX Mbit/s" with the label white and values in val_color. */
+static void draw_rate_row(int y, const char *label, float rx_mbps, float tx_mbps, uint16_t val_color)
 {
     char v[16];
     char arrow[2] = {0, 0};
     int x = display_draw_str(0, y, label, COL_WHITE, COL_BLACK, 1);
     arrow[0] = DISPLAY_CH_DOWN;
     x = display_draw_str(x + CHAR_W, y, arrow, COL_WHITE, COL_BLACK, 1);
-    snprintf(v, sizeof(v), "%5.1f", mbit(rx));
+    snprintf(v, sizeof(v), "%6.2f", (double)rx_mbps);
     x = display_draw_str(x, y, v, val_color, COL_BLACK, 1);
     arrow[0] = DISPLAY_CH_UP;
     x = display_draw_str(x + CHAR_W, y, arrow, COL_WHITE, COL_BLACK, 1);
-    snprintf(v, sizeof(v), "%5.1f", mbit(tx));
+    snprintf(v, sizeof(v), "%6.2f", (double)tx_mbps);
     x = display_draw_str(x, y, v, val_color, COL_BLACK, 1);
     display_draw_str(x + CHAR_W, y, "Mbit/s", COL_WHITE, COL_BLACK, 1);
 }
@@ -181,8 +179,8 @@ static void draw_status(void)
     bool eth_up = strcmp(ex.uplink, "eth") == 0;
     net_if_stats_t ns;
     net_stats_get(eth_up ? NET_IF_ETH : NET_IF_STA, &ns);
-    draw_rate_row(108, eth_up ? "ETH " : "STA ", ns.rx_bps, ns.tx_bps, COL_CYAN);
-    draw_rate_row(124, "peak", ns.rx_bps_peak, ns.tx_bps_peak, COL_YELLOW);
+    draw_rate_row(108, eth_up ? "ETH " : "STA ", ns.rx_mbps, ns.tx_mbps, COL_CYAN);
+    draw_rate_row(124, "peak", ns.rx_mbps_peak, ns.tx_mbps_peak, COL_YELLOW);
 
     // Row 8: traffic log (only once it has been used).
     if (net_log_ever_started()) {
