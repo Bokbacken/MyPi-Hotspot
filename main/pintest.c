@@ -57,9 +57,10 @@ void pintest_boot_check(void)
     s_report_len = 0;
     report("Wiring check (internal pull-up vs pull-down, then drive each pin and watch the others)");
     report("  The Waveshare 2\" module routes every signal except LCD_BL through an on-board level");
-    report("  translator with pull-ups to the module VCC, so 'held HIGH' = wire reaches the module (OK),");
+    report("  translator with pull-ups to the module supply, so 'held HIGH' = wire reaches the module (OK),");
     report("  'floating' = wire probably broken. LCD_BL drives a transistor: 'held LOW' is OK there.");
-    report("  The pull-ups go to the module VCC: if VCC is on 5V these pins sit at 5V -> move VCC to 3V3!");
+    report("  Power the module from ONE supply pin only: with both VCC and 3V3 fed the screen stayed");
+    report("  dark and touch I2C timed out; leaving VCC unconnected fixed both.");
 
     // 1) Pull test
     int pu[NPINS] = {0}, pd[NPINS] = {0};

@@ -40,12 +40,20 @@ read the diagnostics remotely.
 > proposed pins avoid strapping pins (34–38), USB-JTAG (24/25) and the Wi-Fi co-processor.
 > Set a pin to `-1` in `pins.h` if you leave that wire unconnected.
 
+> ⚠️ **Power the module from ONE supply pin only.** With VCC connected (on top of the other wiring)
+> the screen stayed dark and the touch I2C bus timed out constantly; after disconnecting VCC the
+> display, touch dots and drag lines all worked immediately. The module has an on-board regulator
+> and a level translator whose pull-ups follow the module supply, so feeding VCC *and* the 3V3 pin
+> puts two regulators in parallel and can shift the logic levels away from the ESP32-P4's 3.3 V.
+> Never let the module pull the P4 pins up to 5 V — they are not 5 V tolerant.
+
 The display is SPI; only the touch controller (`TP_*`) is I2C. The SPI bus is shared between the
 LCD and the module's microSD slot (`SD_CS`), which is why `MISO` exists.
 
 | Module pin | Bus | Function | ESP32-P4 GPIO | Status |
 |---|---|---|---|---|
-| VCC | — | 3.3 V supply | 3V3 | — |
+| VCC | — | Supply input (3.3 V/5 V) to the module's on-board regulator | **leave unconnected** | confirmed |
+| 3V3 | — | Module 3.3 V rail (input, or output when VCC is fed) | 3V3 | to be confirmed |
 | GND | — | Ground | GND | — |
 | SCLK | SPI | SPI clock | **GPIO23** | proposed |
 | MOSI | SPI | Data to LCD / SD | **GPIO5** | proposed |
@@ -276,11 +284,12 @@ Check the serial log first — each display step is logged.
 
 | Symptom | Likely cause |
 |---|---|
+| Backlight on, screen dark **and** touch I2C timeouts | Module powered through both VCC and 3V3 — disconnect VCC (see [Wiring](#wiring-display-module--esp32-p4-nano)) |
 | Backlight off | `LCD_BL (GPIO22) -> 1` missing in log, or LCD_BL wire/VCC not connected |
 | Backlight on, screen stays black/white, log shows `[ OK ]` | Wrong SCLK/MOSI/LCD_CS/LCD_DC, or LCD_RESET stuck low — check `main/pins.h`; try `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ=1` |
 | `SPI color transfer timeout` | SPI/DMA problem — check wiring and lower the SPI clock |
 | `Panel ID reads all 0x00/0xFF` warning | Expected on the Waveshare 2" module: MISO serves the TF card, the panel is write-only. Not an error by itself |
-| `/pins`: every pin except LCD_BL "held HIGH" | Expected — the module's level translator pulls all signal lines up to the module VCC. Make sure VCC is on **3V3**, not 5V |
+| `/pins`: every pin except LCD_BL "held HIGH" | Expected — the module's level translator pulls all signal lines up to the module supply. Feed the module from one supply pin only |
 | `/pins`: a pin is "floating" | That wire probably does not reach the module |
 | Test pattern shows inverted colors | Toggle `CONFIG_MYPI_LCD_INVERT_COLOR` |
 | Red and blue swapped | Toggle `CONFIG_MYPI_LCD_BGR_ORDER` |
