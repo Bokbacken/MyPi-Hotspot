@@ -56,8 +56,10 @@ void pintest_boot_check(void)
 {
     s_report_len = 0;
     report("Wiring check (internal pull-up vs pull-down, then drive each pin and watch the others)");
-    report("  'floating' = normal for an input pin; 'held HIGH' = external pull-up (normal for");
-    report("  TP_SDA/TP_SCL/TP_INT/LCD_RESET on many modules) or short to VCC; 'held LOW' = short to GND?");
+    report("  The Waveshare 2\" module routes every signal except LCD_BL through an on-board level");
+    report("  translator with pull-ups to the module VCC, so 'held HIGH' = wire reaches the module (OK),");
+    report("  'floating' = wire probably broken. LCD_BL drives a transistor: 'held LOW' is OK there.");
+    report("  The pull-ups go to the module VCC: if VCC is on 5V these pins sit at 5V -> move VCC to 3V3!");
 
     // 1) Pull test
     int pu[NPINS] = {0}, pd[NPINS] = {0};

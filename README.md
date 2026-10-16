@@ -109,6 +109,7 @@ MyPi-Hotspot/
     ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
     ├── diag.h/.c         Boot banner, shared status struct, heartbeat task
     ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
+    ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
     ├── wifi.h/.c         Wi-Fi STA over ESP-Hosted, reconnect backoff, RSSI, mDNS
     └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload
 ```
@@ -205,7 +206,7 @@ Abbreviated; every init step is logged as `[ OK ]` or `[FAIL] <step>: <error>`.
 
 ```
 I (...) diag: ==================================================
-I (...) diag:  MyPi-Hotspot firmware 0.2.0-debug
+I (...) diag:  MyPi-Hotspot firmware 0.3.1
 I (...) diag:  Chip: esp32p4, 2 core(s), revision v3.1
 I (...) diag:  Reset reason: power-on (1)
 I (...) diag:  Running partition: ota_0 @ 0x020000 (6144 KB)
@@ -235,6 +236,7 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | `/api/status` | Same data as JSON |
 | `/api/log` | The RAM log buffer as plain text (boot log included, oldest first) |
 | `/update` | OTA upload form |
+| `/pins` | Wiring diagnostics: boot-time pin check (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
 
 ## OTA updates
 
@@ -277,7 +279,9 @@ Check the serial log first — each display step is logged.
 | Backlight off | `LCD_BL (GPIO22) -> 1` missing in log, or LCD_BL wire/VCC not connected |
 | Backlight on, screen stays black/white, log shows `[ OK ]` | Wrong SCLK/MOSI/LCD_CS/LCD_DC, or LCD_RESET stuck low — check `main/pins.h`; try `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ=1` |
 | `SPI color transfer timeout` | SPI/DMA problem — check wiring and lower the SPI clock |
-| `Panel ID reads all 0x00/0xFF` warning | Normal if the LCD SDO is not wired to MISO; not an error by itself |
+| `Panel ID reads all 0x00/0xFF` warning | Expected on the Waveshare 2" module: MISO serves the TF card, the panel is write-only. Not an error by itself |
+| `/pins`: every pin except LCD_BL "held HIGH" | Expected — the module's level translator pulls all signal lines up to the module VCC. Make sure VCC is on **3V3**, not 5V |
+| `/pins`: a pin is "floating" | That wire probably does not reach the module |
 | Test pattern shows inverted colors | Toggle `CONFIG_MYPI_LCD_INVERT_COLOR` |
 | Red and blue swapped | Toggle `CONFIG_MYPI_LCD_BGR_ORDER` |
 
