@@ -171,35 +171,107 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-static void log_hosted_info(void)
+// ESP-Hosted transport settings (Kconfig names differ between component versions)
+#if defined(CONFIG_ESP_HOSTED_SDIO_PIN_CLK)
+#define CP_SDIO_CLK CONFIG_ESP_HOSTED_SDIO_PIN_CLK
+#define CP_SDIO_CMD CONFIG_ESP_HOSTED_SDIO_PIN_CMD
+#define CP_SDIO_D0  CONFIG_ESP_HOSTED_SDIO_PIN_D0
+#define CP_SDIO_D1  CONFIG_ESP_HOSTED_SDIO_PIN_D1
+#define CP_SDIO_D2  CONFIG_ESP_HOSTED_SDIO_PIN_D2
+#define CP_SDIO_D3  CONFIG_ESP_HOSTED_SDIO_PIN_D3
+#else
+#define CP_SDIO_CLK -1
+#define CP_SDIO_CMD -1
+#define CP_SDIO_D0  -1
+#define CP_SDIO_D1  -1
+#define CP_SDIO_D2  -1
+#define CP_SDIO_D3  -1
+#endif
+#if defined(CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE)
+#define CP_RESET_GPIO CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE
+#elif defined(CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE)
+#define CP_RESET_GPIO CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
+#else
+#define CP_RESET_GPIO -1
+#endif
+#if defined(CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ)
+#define CP_SDIO_KHZ CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ
+#else
+#define CP_SDIO_KHZ 0
+#endif
+
+static wifi_coproc_info_t s_cp;
+
+bool wifi_rpc_lock(uint32_t timeout_ms)
 {
-    ESP_LOGI(TAG, "ESP-Hosted host component v%d.%d.%d, transport SDIO (CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d, slave reset GPIO%d)",
-             ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1, ESP_HOSTED_VERSION_PATCH_1,
-             CONFIG_ESP_HOSTED_SDIO_PIN_CLK, CONFIG_ESP_HOSTED_SDIO_PIN_CMD, CONFIG_ESP_HOSTED_SDIO_PIN_D0,
-             CONFIG_ESP_HOSTED_SDIO_PIN_D1, CONFIG_ESP_HOSTED_SDIO_PIN_D2, CONFIG_ESP_HOSTED_SDIO_PIN_D3,
-             CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE);
+    if (!s_lock) return true;
+    return xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void wifi_rpc_unlock(void)
+{
+    if (s_lock) xSemaphoreGiveRecursive(s_lock);
+}
+
+void wifi_coproc_refresh(void)
+{
+    wifi_coproc_info_t c = s_cp;
+    c.host_major = ESP_HOSTED_VERSION_MAJOR_1;
+    c.host_minor = ESP_HOSTED_VERSION_MINOR_1;
+    c.host_patch = ESP_HOSTED_VERSION_PATCH_1;
+    c.sdio_clk = CP_SDIO_CLK; c.sdio_cmd = CP_SDIO_CMD;
+    c.sdio_d0 = CP_SDIO_D0; c.sdio_d1 = CP_SDIO_D1; c.sdio_d2 = CP_SDIO_D2; c.sdio_d3 = CP_SDIO_D3;
+    c.reset_gpio = CP_RESET_GPIO;
+    c.sdio_freq_khz = CP_SDIO_KHZ;
 
     esp_hosted_coprocessor_fwver_t ver = {0};
     char target[16] = "?";
     uint32_t chip_id = 0;
     int r1 = esp_hosted_get_coprocessor_fwversion(&ver);
     int r2 = esp_hosted_get_cp_info(&chip_id, target, sizeof(target));
-    if (r1 == ESP_OK) {
-        ESP_LOGI(TAG, "Co-processor (%s) ESP-Hosted slave firmware v%lu.%lu.%lu",
-                 r2 == ESP_OK ? target : "?", (unsigned long)ver.major1, (unsigned long)ver.minor1,
-                 (unsigned long)ver.patch1);
-        diag_set_hosted_info("host v%d.%d.%d, slave %s v%lu.%lu.%lu",
-                             ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1, ESP_HOSTED_VERSION_PATCH_1,
-                             r2 == ESP_OK ? target : "?", (unsigned long)ver.major1,
-                             (unsigned long)ver.minor1, (unsigned long)ver.patch1);
-        if (ver.major1 != ESP_HOSTED_VERSION_MAJOR_1 || ver.minor1 != ESP_HOSTED_VERSION_MINOR_1) {
-            ESP_LOGW(TAG, "Host/slave ESP-Hosted version mismatch - Wi-Fi may misbehave; consider updating the C5 firmware");
+    c.fw_valid = r1 == ESP_OK;
+    if (c.fw_valid) {
+        c.fw_major = ver.major1;
+        c.fw_minor = ver.minor1;
+        c.fw_patch = ver.patch1;
+    }
+    c.cp_valid = r2 == ESP_OK;
+    if (c.cp_valid) {
+        c.chip_id = chip_id;
+        strlcpy(c.target, target, sizeof(c.target));
+    }
+    c.version_match = c.fw_valid && c.fw_major == (uint32_t)c.host_major && c.fw_minor == (uint32_t)c.host_minor;
+    if (c.wifi_init_ok) {
+        c.mac_valid = esp_wifi_get_mac(WIFI_IF_STA, c.sta_mac) == ESP_OK &&
+                      esp_wifi_get_mac(WIFI_IF_AP, c.ap_mac) == ESP_OK;
+    }
+    s_cp = c;
+
+    if (c.fw_valid) {
+        ESP_LOGI(TAG, "Co-processor (%s, chip id %lu) ESP-Hosted slave firmware v%lu.%lu.%lu", c.cp_valid ? c.target : "?",
+                 (unsigned long)c.chip_id, (unsigned long)c.fw_major, (unsigned long)c.fw_minor, (unsigned long)c.fw_patch);
+        diag_set_hosted_info("host v%d.%d.%d, slave %s v%lu.%lu.%lu", c.host_major, c.host_minor, c.host_patch,
+                             c.cp_valid ? c.target : "?", (unsigned long)c.fw_major, (unsigned long)c.fw_minor,
+                             (unsigned long)c.fw_patch);
+        if (!c.version_match) {
+            ESP_LOGW(TAG, "Host/slave ESP-Hosted version mismatch - update the C5 firmware at /c5update");
         }
     } else {
         ESP_LOGW(TAG, "Could not read co-processor firmware version (err %d)", r1);
-        diag_set_hosted_info("host v%d.%d.%d, slave version unknown (err %d)",
-                             ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1, ESP_HOSTED_VERSION_PATCH_1, r1);
+        diag_set_hosted_info("host v%d.%d.%d, slave version unknown (err %d)", c.host_major, c.host_minor,
+                             c.host_patch, r1);
     }
+}
+
+void wifi_get_coproc_info(wifi_coproc_info_t *out) { *out = s_cp; }
+
+static void log_hosted_info(void)
+{
+    ESP_LOGI(TAG, "ESP-Hosted host component v%d.%d.%d, transport SDIO (CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d, "
+             "slave reset GPIO%d, %d kHz)", ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1,
+             ESP_HOSTED_VERSION_PATCH_1, CP_SDIO_CLK, CP_SDIO_CMD, CP_SDIO_D0, CP_SDIO_D1, CP_SDIO_D2, CP_SDIO_D3,
+             CP_RESET_GPIO, CP_SDIO_KHZ);
+    wifi_coproc_refresh();
 }
 
 static void start_mdns(void)
@@ -548,13 +620,13 @@ const char *wifi_radio_bw_name(uint8_t v) { return v < 4 ? BW_NAMES[v] : "?"; }
 
 int wifi_radio_bw_parse(const char *s)
 {
-    for (int i = 0; i < 4; i++) if (strcmp(s, BW_NAMES[i]) == 0) return i;
+    for (int i = 0; i <= RADIO_BW_MAX; i++) if (strcmp(s, BW_NAMES[i]) == 0) return i;
     return -1;
 }
 
 static bool radio_cfg_valid(const wifi_radio_cfg_t *c)
 {
-    return c->sta_bw <= RADIO_BW_80 && c->ap_bw <= RADIO_BW_80 && !(c->sta_proto & ~RADIO_PROTO_ALL) &&
+    return c->sta_bw <= RADIO_BW_MAX && c->ap_bw <= RADIO_BW_MAX && !(c->sta_proto & ~RADIO_PROTO_ALL) &&
            !(c->ap_proto & ~RADIO_PROTO_ALL) && c->band_mode <= RADIO_BAND_5G &&
            (c->tx_power_dbm == 0 || (c->tx_power_dbm >= 2 && c->tx_power_dbm <= 21)) &&
            c->ap_beacon_interval_tu <= 10;
@@ -574,6 +646,13 @@ static void radio_load(void)
     size_t len = sizeof(c);
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         esp_err_t err = nvs_get_blob(h, NVS_KEY_RADIO, &c, &len);
+        if (err == ESP_OK && len == sizeof(c)) {
+            // v0.5.5: the C5 supports max 40 MHz and 11ax is disabled - migrate older settings
+            if (c.sta_bw > RADIO_BW_MAX) c.sta_bw = RADIO_BW_MAX;
+            if (c.ap_bw > RADIO_BW_MAX) c.ap_bw = RADIO_BW_MAX;
+            c.sta_proto &= ~RADIO_PROTO_AX;
+            c.ap_proto &= ~RADIO_PROTO_AX;
+        }
         if (err == ESP_OK && len == sizeof(c) && radio_cfg_valid(&c)) s_radio = c;
         else if (err == ESP_OK || err == ESP_ERR_NVS_INVALID_LENGTH)
             ESP_LOGW(TAG, "Radio settings in NVS have an old format or are invalid - using defaults");
@@ -605,6 +684,7 @@ esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
 static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
+    if (sel > RADIO_BW_MAX) sel = RADIO_BW_MAX;    // the C5 supports max 40 MHz
     if (sel == RADIO_BW_AUTO) {
         ESP_LOGI(TAG, "%s bandwidth: driver default (auto)", name);
         return;
@@ -627,9 +707,13 @@ static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 static void apply_proto(wifi_interface_t ifx, uint8_t mask)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
+    // 11ax is disabled until a fixed C5 radio firmware is available (ESP-IDF issue
+    // #19238: TX hang with 11ax + TCP upload). "Driver default" would include ax,
+    // so it is replaced by an explicit b/g/n (2.4 GHz) + a/n/ac (5 GHz) set.
+    mask &= ~RADIO_PROTO_AX;
     if (mask == 0) {
-        ESP_LOGI(TAG, "%s protocols: driver default", name);
-        return;
+        mask = RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N | RADIO_PROTO_A | RADIO_PROTO_AC;
+        ESP_LOGI(TAG, "%s protocols: default without 11ax", name);
     }
     uint16_t p2 = mask & (RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N | RADIO_PROTO_AX);
     uint16_t p5 = mask & (RADIO_PROTO_A | RADIO_PROTO_N | RADIO_PROTO_AC | RADIO_PROTO_AX);
@@ -797,8 +881,10 @@ static void wifi_task(void *arg)
 
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    TRY(esp_wifi_init(&cfg));
-    log_hosted_info();
+    esp_err_t init_err = esp_wifi_init(&cfg);
+    s_cp.wifi_init_ok = init_err == ESP_OK;
+    log_hosted_info();      // also on failure: the C5 OTA page (/c5update) uses this info
+    TRY(init_err);
 
     TRY(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
     TRY(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));

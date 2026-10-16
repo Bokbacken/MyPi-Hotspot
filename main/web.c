@@ -1,6 +1,8 @@
 #include "web.h"
 
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,8 +12,10 @@
 #include "esp_app_format.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "esp_hosted_ota.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -29,6 +33,8 @@ static const char *TAG = "web";
 
 static httpd_handle_t s_server;
 static volatile bool s_ota_busy;
+static volatile bool s_c5_ota_busy;
+static char s_c5_ota_status[64] = "idle";
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -45,7 +51,8 @@ static const char INDEX_HTML[] =
 "input,select,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}input{width:9em}"
 "fieldset{border:1px solid #444;margin:.5em 0}#msg{color:#fc6}"
 ".bad{color:#f66}.ok{color:#6f6}</style></head><body>"
-"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/pins'>Wiring diagnostics</a> | "
+"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/c5update'>C5 co-processor update</a> | "
+"<a href='/pins'>Wiring diagnostics</a> | "
 "<a href='/api/status'>/api/status</a> | <a href='/api/log'>/api/log</a></p>"
 "<p id='msg'></p>"
 "<table id='t'></table>"
@@ -67,15 +74,15 @@ static const char INDEX_HTML[] =
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
 "<h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
-"<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option><option value='3'>80</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option><option value='3'>80</option></select><br>"
-"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' onchange=protoHint()>ax</label> <span id='sta-proto-def'></span><br>"
-"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' onchange=protoHint()>ax</label> <span id='ap-proto-def'></span><br>"
+"<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
+"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
+"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
 "Band <select id='band-mode'><option value='0'>Auto (2.4+5 GHz)</option><option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select> "
 "Max TX power (dBm, 0=default) <input type=number id='tx-power' min=0 max=21 style='width:5em'><br>"
 "AP beacon interval (&times;100 TU, 0=default=100) <input type=number id='ap-beacon' min=0 max=10 style='width:5em'> "
 "AP DTIM period (0=default=1) <input type=number id='ap-dtim' min=0 max=255 style='width:5em'><br>"
 "<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
-"<small>Width in MHz (auto = driver default / negotiated). Protocols: none checked = driver default; 2.4 GHz uses b/g/n/ax, 5 GHz uses a/n/ac/ax. TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
+"<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
@@ -127,10 +134,10 @@ static const char INDEX_HTML[] =
 "async function disc(){await post('/api/disconnect');ld()}"
 "async function apStart(i){await post('/api/ap/start',{slot:i})}"
 "async function apStop(){await post('/api/ap/stop')}"
-"const PBITS={b:1,g:2,n:4,a:16,ac:32,ax:64};"
+"const PBITS={b:1,g:2,n:4,a:16,ac:32};"
 "function buildProtoMask(p){let m=0;for(let k in PBITS)if($(p+'-proto-'+k).checked)m|=PBITS[k];return m}"
 "function setProtoMask(p,m){for(let k in PBITS)$(p+'-proto-'+k).checked=!!(m&PBITS[k])}"
-"function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(driver default)'}"
+"function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(default, no ax)'}"
 "async function saveRadio(){await post('/api/radio',{sta_bw:+$('rsb').value,ap_bw:+$('rab').value,sta_proto:buildProtoMask('sta'),ap_proto:buildProtoMask('ap'),"
 "band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_beacon_tu:+$('ap-beacon').value,ap_dtim:+$('ap-dtim').value})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
@@ -155,6 +162,12 @@ static const char INDEX_HTML[] =
 "row('Ethernet',s.eth.initialized?(s.eth.mode=='lan'?'LAN (bridged to AP, '+lanNet(s)+', no own IP)'+(s.eth.bridged?'':' - bridge idle (AP off)'):'WAN'+(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:', no IP yet'))+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down'):"
 "'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
 "row('ESP-Hosted',s.hosted)+"
+"(s.coproc?row('Co-processor',(s.coproc.target||'?')+' (chip id '+s.coproc.chip_id+'), slave FW '+(s.coproc.fw_valid?s.coproc.fw:'unknown')+"
+"', host '+s.coproc.host+(s.coproc.version_match?'':' - <b>MISMATCH</b>, see <a href=/c5update>C5 update</a>')+"
+"(s.coproc.mac_valid?'<br>STA MAC '+s.coproc.sta_mac+', AP MAC '+s.coproc.ap_mac:'')+"
+"'<br>SDIO CLK '+s.coproc.sdio.clk+' CMD '+s.coproc.sdio.cmd+' D0-D3 '+s.coproc.sdio.d0+'/'+s.coproc.sdio.d1+'/'+s.coproc.sdio.d2+'/'+s.coproc.sdio.d3+"
+"', reset GPIO'+s.coproc.sdio.reset+', '+(s.coproc.sdio.freq_khz/1000)+' MHz'+(s.c5_ota_status!='idle'?'<br>C5 OTA: '+esc(s.c5_ota_status):''),"
+"s.coproc.version_match?'ok':'bad'):'')+"
 "row('Display',s.display_status,s.display_status.startsWith('ok')?'ok':'bad')+"
 "row('SPI clock',(s.spi_clock_hz/1e6)+' MHz')+row('LCD ID read',s.lcd_id)+"
 "row('Frames flushed',s.frames_flushed+' (errors '+s.flush_errors+')')+"
@@ -173,7 +186,7 @@ static const char INDEX_HTML[] =
 "let a=await (await fetch('/api/apstatus')).json();"
 "$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
-"let r=await (await fetch('/api/radio')).json(),f=r.info,BWN=['auto','20','40','80'],hx=m=>m?'0x'+m.toString(16):'default';"
+"let r=await (await fetch('/api/radio')).json(),f=r.info,BWN=['auto','20','40','40'],hx=m=>m?'0x'+m.toString(16):'default';"
 "let rc=x=>'width '+BWN[x.sta_bw]+'/'+BWN[x.ap_bw]+', proto '+hx(x.sta_proto)+'/'+hx(x.ap_proto)+', band '+x.band_mode+', tx '+(x.tx_power_dbm||'default');"
 "$('rd').innerHTML=tr(['','Width (C5)','Protocols (C5)','Setting (width / proto)'],1)+"
 "tr(['STA (ch '+r.sta_channel+')',f.sta_width,f.sta_proto_str,BWN[r.active.sta_bw]+' / '+hx(r.active.sta_proto)])+"
@@ -211,6 +224,34 @@ static const char UPDATE_HTML[] =
 "x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',15000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
 "s.textContent='Uploading '+f.size+' bytes...';x.send(f)}</script></body></html>";
+
+static const char C5UPDATE_HTML[] =
+"<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>MyPi-Hotspot C5 update</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
+"a{color:#6cf}progress{width:100%;height:1.5em}td{padding:2px 10px 2px 0}td:first-child{color:#999}"
+".bad{color:#f66}.ok{color:#6f6}.warn{color:#fc6}</style></head><body>"
+"<h1 style='font-size:1.3em'>Co-processor (ESP32-C5) firmware update</h1><p><a href='/'>&larr; Status</a></p>"
+"<table id='t'></table>"
+"<p>Upload the ESP-Hosted <b>slave</b> app image for the C5: <code>network_adapter.bin</code> "
+"(a.k.a. <code>c5-slave-esp-hosted-*.bin</code>). Not the P4 firmware, not a merged image.</p>"
+"<p class='warn'><b>Important:</b> ESP-Hosted 3.x slave firmware does not talk to a 2.x host (and vice versa). "
+"After flashing C5 v3.x, Wi-Fi on this P4 firmware stops working until the P4 is updated to a matching host build "
+"(v0.6.0+). Make sure you can reach this board over <b>Ethernet</b> (or USB) to do the P4 OTA afterwards.</p>"
+"<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash C5</button>"
+"<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p>"
+"<script>const $=i=>document.getElementById(i);"
+"fetch('/api/status').then(r=>r.json()).then(j=>{let c=j.coproc||{};let v=c.fw_valid?c.fw:'unknown';"
+"$('t').innerHTML='<tr><td>Chip</td><td>'+(c.target||'?')+' (id '+c.chip_id+')</td></tr>'"
+"+'<tr><td>Slave firmware</td><td>'+v+'</td></tr><tr><td>Host component</td><td>'+c.host+'</td></tr>'"
+"+'<tr><td>Match</td><td class='+(c.version_match?'ok':'bad')+'>'+(c.version_match?'yes':'NO')+'</td></tr>'"
+"+'<tr><td>OTA</td><td>'+(j.c5_ota_status||'-')+'</td></tr>'});"
+"function up(){let f=$('f').files[0];let s=$('s');if(!f){s.textContent='Choose a file first';return}"
+"if(!confirm('Flash '+f.name+' to the C5 co-processor?'))return;"
+"let x=new XMLHttpRequest();x.open('POST','/api/c5update');x.setRequestHeader('Content-Type','application/octet-stream');"
+"x.upload.onprogress=e=>{if(e.lengthComputable)$('p').value=e.loaded/e.total*100};"
+"x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};"
+"x.onerror=()=>s.textContent='Upload failed (connection error)';"
+"s.textContent='Uploading '+f.size+' bytes (slow: ~1-3 min)...';x.send(f)}</script></body></html>";
 
 static const char PINS_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -287,6 +328,40 @@ static esp_err_t api_pin_get(httpd_req_t *req)
 static void reboot_task(void *arg);
 static void add_ap_info(cJSON *o, const wifi_ap_info_t *a);
 static void add_eth_info(cJSON *o);
+
+static void add_coproc_info(cJSON *o)
+{
+    wifi_coproc_info_t c;
+    wifi_get_coproc_info(&c);
+    char s[24];
+    cJSON_AddBoolToObject(o, "fw_valid", c.fw_valid);
+    snprintf(s, sizeof(s), "%lu.%lu.%lu", (unsigned long)c.fw_major, (unsigned long)c.fw_minor, (unsigned long)c.fw_patch);
+    cJSON_AddStringToObject(o, "fw", c.fw_valid ? s : "");
+    cJSON_AddBoolToObject(o, "cp_valid", c.cp_valid);
+    cJSON_AddNumberToObject(o, "chip_id", c.chip_id);
+    cJSON_AddStringToObject(o, "target", c.cp_valid ? c.target : "");
+    snprintf(s, sizeof(s), "%d.%d.%d", c.host_major, c.host_minor, c.host_patch);
+    cJSON_AddStringToObject(o, "host", s);
+    cJSON_AddBoolToObject(o, "version_match", c.version_match);
+    cJSON_AddBoolToObject(o, "wifi_init_ok", c.wifi_init_ok);
+    cJSON_AddBoolToObject(o, "mac_valid", c.mac_valid);
+    if (c.mac_valid) {
+        snprintf(s, sizeof(s), MACSTR, MAC2STR(c.sta_mac));
+        cJSON_AddStringToObject(o, "sta_mac", s);
+        snprintf(s, sizeof(s), MACSTR, MAC2STR(c.ap_mac));
+        cJSON_AddStringToObject(o, "ap_mac", s);
+    }
+    cJSON *sd = cJSON_AddObjectToObject(o, "sdio");
+    cJSON_AddNumberToObject(sd, "clk", c.sdio_clk);
+    cJSON_AddNumberToObject(sd, "cmd", c.sdio_cmd);
+    cJSON_AddNumberToObject(sd, "d0", c.sdio_d0);
+    cJSON_AddNumberToObject(sd, "d1", c.sdio_d1);
+    cJSON_AddNumberToObject(sd, "d2", c.sdio_d2);
+    cJSON_AddNumberToObject(sd, "d3", c.sdio_d3);
+    cJSON_AddNumberToObject(sd, "reset", c.reset_gpio);
+    cJSON_AddNumberToObject(sd, "freq_khz", c.sdio_freq_khz);
+    cJSON_AddBoolToObject(o, "ota_busy", s_c5_ota_busy);
+}
 
 // POST /api/debug?on=1|0 - switch debug mode (saved in NVS, survives reboot).
 static esp_err_t api_debug_post(httpd_req_t *req)
@@ -379,6 +454,8 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "ap_channel", ap.channel);
     cJSON_AddNumberToObject(j, "sta_channel", ap.sta_channel);
     add_eth_info(cJSON_AddObjectToObject(j, "eth"));
+    add_coproc_info(cJSON_AddObjectToObject(j, "coproc"));
+    cJSON_AddStringToObject(j, "c5_ota_status", s_c5_ota_status);
 
     char *out = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -505,6 +582,146 @@ static esp_err_t update_post(httpd_req_t *req)
     ESP_LOGI(TAG, "OTA complete, boot partition set to %s", target->label);
     diag_set_ota_status("done, rebooting into %s", target->label);
     httpd_resp_sendstr(req, "OK - image verified, rebooting into the new firmware...");
+    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Co-processor (ESP32-C5) OTA via ESP-Hosted RPC (v0.5.5+)
+// ---------------------------------------------------------------------------
+
+#define C5_CHIP_ID      23          // ESP_CHIP_ID_ESP32C5
+#define C5_MAX_IMAGE    (4 * 1024 * 1024)
+#define C5_CHUNK        1480        // per-RPC payload, as in the ESP-Hosted host_performs_slave_ota example
+
+static void c5_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void c5_status(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_c5_ota_status, sizeof(s_c5_ota_status), fmt, ap);
+    va_end(ap);
+}
+
+static esp_err_t c5_fail(httpd_req_t *req, bool locked, bool begun, const char *status, const char *msg)
+{
+    if (begun) esp_hosted_slave_ota_end();      // Close the session; an incomplete image fails validation on the C5
+    if (locked) wifi_rpc_unlock();
+    ESP_LOGE(TAG, "C5 OTA failed: %s", msg);
+    c5_status("failed: %s", msg);
+    s_c5_ota_busy = false;
+    httpd_resp_set_status(req, status);
+    return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t c5update_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, C5UPDATE_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /api/c5update - body = ESP-Hosted slave app image (network_adapter.bin) for the ESP32-C5.
+static esp_err_t api_c5update_post(httpd_req_t *req)
+{
+    if (s_c5_ota_busy || s_ota_busy) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Another update is in progress", HTTPD_RESP_USE_STRLEN);
+    }
+    s_c5_ota_busy = true;
+    if (req->content_len < 1024 || req->content_len > C5_MAX_IMAGE) {
+        return c5_fail(req, false, false, "400 Bad Request", "Image size is too small or larger than 4 MB");
+    }
+    wifi_coproc_info_t cp;
+    wifi_get_coproc_info(&cp);
+    if (cp.cp_valid && cp.chip_id != C5_CHIP_ID) {
+        return c5_fail(req, false, false, "400 Bad Request", "Co-processor is not an ESP32-C5");
+    }
+    // Hold the RPC lock for the whole transfer so scans/reconfig don't interleave with OTA RPCs.
+    if (!wifi_rpc_lock(10000)) {
+        return c5_fail(req, false, false, "503 Service Unavailable", "Co-processor busy (RPC lock timeout)");
+    }
+    ESP_LOGI(TAG, "C5 OTA start: %u bytes (slave FW now %s%lu.%lu.%lu)", (unsigned)req->content_len,
+             cp.fw_valid ? "v" : "unknown ", (unsigned long)cp.fw_major, (unsigned long)cp.fw_minor,
+             (unsigned long)cp.fw_patch);
+    c5_status("receiving %u bytes", (unsigned)req->content_len);
+
+    const size_t bufsize = 4096;
+    uint8_t *buf = malloc(bufsize);
+    if (!buf) return c5_fail(req, true, false, "500 Internal Server Error", "Out of memory");
+
+    size_t received = 0;
+    bool begun = false;
+    int last_pct = -1;
+    esp_err_t err;
+    char newver[32] = "?";
+
+    while (received < req->content_len) {
+        int r = httpd_req_recv(req, (char *)buf, bufsize);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            free(buf);
+            return c5_fail(req, true, begun, "400 Bad Request", "Connection closed during upload");
+        }
+        if (!begun) {
+            const size_t need = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
+            const esp_image_header_t *hdr = (const esp_image_header_t *)buf;
+            const esp_app_desc_t *desc = (const esp_app_desc_t *)(buf + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t));
+            if ((size_t)r < need || buf[0] != ESP_IMAGE_HEADER_MAGIC || desc->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+                free(buf);
+                return c5_fail(req, true, false, "400 Bad Request",
+                               "Not an ESP app image (use network_adapter.bin, not a merged/bootloader image)");
+            }
+            if (hdr->chip_id != C5_CHIP_ID) {
+                bool is_p4 = hdr->chip_id == CONFIG_IDF_FIRMWARE_CHIP_ID;
+                free(buf);
+                return c5_fail(req, true, false, "400 Bad Request",
+                               is_p4 ? "This is a P4 image - use /update for it" : "Image is not built for the ESP32-C5");
+            }
+            strlcpy(newver, desc->version, sizeof(newver));
+            ESP_LOGI(TAG, "C5 image: project '%s' version '%s' built %s %s, IDF %s",
+                     desc->project_name, desc->version, desc->date, desc->time, desc->idf_ver);
+            err = esp_hosted_slave_ota_begin();
+            if (err != ESP_OK) {
+                free(buf);
+                return c5_fail(req, true, false, "500 Internal Server Error", "esp_hosted_slave_ota_begin failed");
+            }
+            begun = true;
+        }
+        for (int off = 0; off < r; off += C5_CHUNK) {
+            uint32_t n = (uint32_t)((r - off) > C5_CHUNK ? C5_CHUNK : (r - off));
+            err = esp_hosted_slave_ota_write(buf + off, n);
+            if (err != ESP_OK) {
+                free(buf);
+                return c5_fail(req, true, begun, "500 Internal Server Error", "esp_hosted_slave_ota_write failed");
+            }
+        }
+        received += r;
+        int pct = (int)(received * 100 / req->content_len);
+        if (pct / 10 != last_pct / 10) {
+            ESP_LOGI(TAG, "C5 OTA %d%% (%u / %u)", pct, (unsigned)received, (unsigned)req->content_len);
+            c5_status("writing %d%%", pct);
+            last_pct = pct;
+        }
+    }
+    free(buf);
+
+    err = esp_hosted_slave_ota_end();   // C5 validates the image (checksum/SHA) and sets its boot partition
+    if (err != ESP_OK) {
+        return c5_fail(req, true, false, "400 Bad Request", "C5 rejected the image (validation failed)");
+    }
+    // ota_activate exists in slave firmware >= 2.6.0; older slaves reboot into the new image on their own.
+    bool can_activate = cp.fw_valid && (cp.fw_major > 2 || (cp.fw_major == 2 && cp.fw_minor > 5));
+    if (can_activate) {
+        err = esp_hosted_slave_ota_activate();
+        ESP_LOGI(TAG, "C5 OTA activate: %s", esp_err_to_name(err));
+    }
+    wifi_rpc_unlock();
+    ESP_LOGW(TAG, "C5 OTA complete (new slave FW '%s'), restarting P4 to resync", newver);
+    c5_status("done (%s), rebooting", newver);
+    char msg[160];
+    snprintf(msg, sizeof(msg), "OK - C5 image '%s' verified and %s. Rebooting the P4 to resync with the co-processor...",
+             newver, can_activate ? "activated" : "flashed");
+    httpd_resp_sendstr(req, msg);
     xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
@@ -930,17 +1147,19 @@ static esp_err_t api_radio_post(httpd_req_t *req)
     wifi_get_radio_info(&r);
     wifi_radio_cfg_t c = r.saved;
     bool ok = true;
-    radio_field(j, "sta_bw", RADIO_BW_AUTO, RADIO_BW_80, &c.sta_bw, &ok);
-    radio_field(j, "ap_bw", RADIO_BW_AUTO, RADIO_BW_80, &c.ap_bw, &ok);
+    radio_field(j, "sta_bw", RADIO_BW_AUTO, RADIO_BW_MAX, &c.sta_bw, &ok);
+    radio_field(j, "ap_bw", RADIO_BW_AUTO, RADIO_BW_MAX, &c.ap_bw, &ok);
     radio_field(j, "sta_proto", 0, RADIO_PROTO_ALL, &c.sta_proto, &ok);
     radio_field(j, "ap_proto", 0, RADIO_PROTO_ALL, &c.ap_proto, &ok);
+    c.sta_proto &= RADIO_PROTO_ALLOWED;     // 11ax is stripped (ESP-IDF issue #19238)
+    c.ap_proto &= RADIO_PROTO_ALLOWED;
     radio_field(j, "band_mode", RADIO_BAND_AUTO, RADIO_BAND_5G, &c.band_mode, &ok);
     radio_field(j, "tx_power_dbm", 0, 21, &c.tx_power_dbm, &ok);
     radio_field(j, "ap_beacon_tu", 0, 10, &c.ap_beacon_interval_tu, &ok);
     radio_field(j, "ap_dtim", 0, 255, &c.ap_dtim, &ok);
     cJSON_Delete(j);
     return send_result(req, ok ? wifi_radio_save(&c) : ESP_ERR_INVALID_ARG, "saved - reboot to apply",
-                       "*_bw: 0-3, *_proto: bitmask b=1 g=2 n=4 a=16 ac=32 ax=64, band_mode: 0-2, "
+                       "*_bw: 0-2 (auto/20/40), *_proto: bitmask b=1 g=2 n=4 a=16 ac=32 (ax=64 is stripped), band_mode: 0-2, "
                        "tx_power_dbm: 0 or 2-21, ap_beacon_tu: 0-10, ap_dtim: 0-255");
 }
 
@@ -1070,6 +1289,8 @@ esp_err_t web_start(void)
         { .uri = "/api/log",    .method = HTTP_GET,  .handler = log_get },
         { .uri = "/update",     .method = HTTP_GET,  .handler = update_get },
         { .uri = "/update",     .method = HTTP_POST, .handler = update_post },
+        { .uri = "/c5update",   .method = HTTP_GET,  .handler = c5update_get },
+        { .uri = "/api/c5update", .method = HTTP_POST, .handler = api_c5update_post },
         { .uri = "/pins",       .method = HTTP_GET,  .handler = pins_get },
         { .uri = "/api/pins",   .method = HTTP_GET,  .handler = api_pins_get },
         { .uri = "/api/pin",    .method = HTTP_GET,  .handler = api_pin_get },

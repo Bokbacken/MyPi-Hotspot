@@ -67,6 +67,7 @@ void wifi_get_sta_extra(wifi_sta_extra_t *out);
 
 // --- Radio settings (stored in NVS, applied at boot) ---
 enum { RADIO_BW_AUTO = 0, RADIO_BW_20 = 1, RADIO_BW_40 = 2, RADIO_BW_80 = 3 };    // == WIFI_BW20/40/80
+#define RADIO_BW_MAX RADIO_BW_40     // the C5 supports max 40 MHz; RADIO_BW_80 kept for NVS compat
 enum { RADIO_BAND_AUTO = 0, RADIO_BAND_2G = 1, RADIO_BAND_5G = 2 };
 
 // Protocol bitmask (same bits as WIFI_PROTOCOL_*); 0 = driver default
@@ -77,6 +78,7 @@ enum { RADIO_BAND_AUTO = 0, RADIO_BAND_2G = 1, RADIO_BAND_5G = 2 };
 #define RADIO_PROTO_AC  0x20
 #define RADIO_PROTO_AX  0x40
 #define RADIO_PROTO_ALL 0x77
+#define RADIO_PROTO_ALLOWED 0x37      // 11ax disabled (ESP-IDF issue #19238)
 
 typedef struct {
     uint8_t sta_bw;                 // RADIO_BW_* (auto = driver default / negotiated)
@@ -108,3 +110,29 @@ int wifi_radio_bw_parse(const char *s);
 /** Save radio settings to NVS; they take effect after a reboot. */
 esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c);
 void wifi_get_radio_info(wifi_radio_info_t *out);
+
+// --- Co-processor (ESP32-C5 running ESP-Hosted slave firmware) ---
+typedef struct {
+    bool fw_valid;              // slave firmware version could be read
+    uint32_t fw_major, fw_minor, fw_patch;
+    bool cp_valid;              // chip id / target name could be read
+    uint32_t chip_id;           // esp_chip_id_t of the co-processor (ESP32-C5 = 23)
+    char target[16];            // e.g. "esp32c5"
+    int host_major, host_minor, host_patch;     // ESP-Hosted host component version
+    bool version_match;         // host and slave major.minor equal
+    bool wifi_init_ok;          // esp_wifi_init() succeeded
+    uint8_t sta_mac[6], ap_mac[6];
+    bool mac_valid;
+    int sdio_clk, sdio_cmd, sdio_d0, sdio_d1, sdio_d2, sdio_d3, reset_gpio;
+    int sdio_freq_khz;
+} wifi_coproc_info_t;
+
+void wifi_get_coproc_info(wifi_coproc_info_t *out);
+/** Re-read the slave firmware version / chip info (RPC). */
+void wifi_coproc_refresh(void);
+/**
+ * Serialize co-processor RPCs (shared with scan/config/connect). Works before
+ * Wi-Fi init too (returns true if no lock exists yet). Timeout in ms.
+ */
+bool wifi_rpc_lock(uint32_t timeout_ms);
+void wifi_rpc_unlock(void);
