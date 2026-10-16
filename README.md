@@ -3,7 +3,7 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Current version: **0.5.1** — an **LCD status screen**, Wi-Fi uplink + own access point
+Current version: **0.6.3** — an **LCD status screen** with an OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
 a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
@@ -284,6 +284,14 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 
 Equivalent from a terminal: `curl --data-binary @build/mypi_hotspot.bin http://mypi-hotspot.local/update`.
 
+**Progress on the LCD (v0.6.3).** While a P4 (`/update`) or C5 (`/c5update`) update runs, the LCD shows a
+full-screen view refreshed at 5 Hz: *Firmware update (P4)* / *(C5)*, the phase (*Receiving + writing flash*,
+*Verifying image*, *Upload complete - verified*, *Done - rebooting* or *FAILED: <reason>*), a progress bar with
+percentage and KB done / total. Touch is ignored meanwhile. A failure stays on screen for about 10 s, then
+the status screen returns; on success the board reboots 2 s after *Done - rebooting*. The same state is in
+`/api/status` as `ota` (`active`, `target`, `phase`, `pct`, `bytes_done`, `bytes_total`, `err`), and the
+upload pages poll it after 100 % to show verifying / done / failed. *Not yet verified on hardware.*
+
 ## Wi-Fi co-processor (ESP32-C5)
 
 Wi-Fi runs on the on-board ESP32-C5, which must run **ESP-Hosted slave firmware** compatible with
@@ -298,6 +306,12 @@ Safest upgrade order from v0.5.x (C5 on 2.x):
 3. P4 v0.6.0 via `/update` over **Ethernet** (or USB).
 
 If P4 v0.6.0 is flashed first, flash the C5 over USB (`c5-slave-esp-hosted-v3.0.9-merged.bin`).
+
+**Buffer tuning (v0.6.3).** The P4 host uses 4 SDIO RX staging slots (default 2); the SDIO clock stays at
+40 MHz. The C5 slave defaults (`c5_slave/sdkconfig.defaults.esp32c5`) raise the Wi-Fi buffers to static RX 16,
+dynamic RX 64, dynamic TX 64, A-MPDU TX/RX with BA window 32, and the C5 SDIO TX/RX queues to 40. This build is
+published as `c5-slave-esp-hosted-v3.0.9-tuned.bin` (OTA via `/c5update`) and `...-tuned-merged.bin` (USB).
+It still reports slave version 3.0.9, so it stays compatible with the 3.0.9 host. *Not yet verified on hardware.*
 
 ## Wi-Fi, AP & Ethernet
 
