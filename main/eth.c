@@ -353,8 +353,11 @@ void eth_get_info(eth_info_t *o)
     o->link_up = s_link;
     o->has_ip = s_has_ip;
     strlcpy(o->error, s_err, sizeof(o->error));
-    strcpy(o->ip, "0.0.0.0");
-    strcpy(o->gw, "0.0.0.0");
+    // LAN mode is a pure L2 bridge port: no IP/gateway of its own (device IP is on the AP netif).
+    if (s_mode == ETH_MODE_WAN) {
+        strcpy(o->ip, "0.0.0.0");
+        strcpy(o->gw, "0.0.0.0");
+    }
     if (!s_init) return;
     if (s_link) {
         eth_speed_t sp;
@@ -369,7 +372,7 @@ void eth_get_info(eth_info_t *o)
     o->bridged = s_bridge_on;
     o->bridge_drops = s_br_drop;
     esp_netif_ip_info_t ip;
-    if (s_netif && esp_netif_get_ip_info(s_netif, &ip) == ESP_OK) {
+    if (s_mode == ETH_MODE_WAN && s_netif && esp_netif_get_ip_info(s_netif, &ip) == ESP_OK) {
         snprintf(o->ip, sizeof(o->ip), IPSTR, IP2STR(&ip.ip));
         snprintf(o->gw, sizeof(o->gw), IPSTR, IP2STR(&ip.gw));
     }

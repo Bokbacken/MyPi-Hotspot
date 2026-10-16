@@ -75,6 +75,11 @@ static const char INDEX_HTML[] =
 "<pre id='log'></pre><script>"
 "function $(i){return document.getElementById(i)}"
 "function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
+"function band(c){return c>14?'5 GHz':'2.4 GHz'}"
+"function chText(a){if(a.dual_band)return 'AP on '+band(a.ap_channel)+' ch '+a.ap_channel+', STA on '+band(a.sta_channel)+' ch '+a.sta_channel+' (dual-band: no shared airtime)';"
+"if(a.sta_channel&&a.sta_channel==a.ap_channel)return 'ch '+a.ap_channel+' (shared with STA)';"
+"return 'ch '+a.ap_channel+' ('+band(a.ap_channel)+')'+(a.sta_channel?', STA ch '+a.sta_channel:'')}"
+"function lanNet(s){return s.ap&&s.ap.running?s.ap.ip.replace(/\\.1$/,'.0/24'):'192.168.4.0/24'}"
 "function fmtUp(s){let h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h+'h '+m+'m '+(s%60)+'s'}"
 "function row(k,v,c){return '<tr><td>'+k+'</td><td'+(c?' class='+c:'')+'>'+v+'</td></tr>'}"
 "function tr(a,h){return '<tr>'+a.map(x=>(h?'<th>':'<td>')+x+(h?'</th>':'</td>')).join('')+'</tr>'}"
@@ -126,9 +131,9 @@ static const char INDEX_HTML[] =
 "row('Uplink',s.uplink,s.uplink=='none'?'bad':'ok')+"
 "row('Wi-Fi STA',s.wifi_state+' (SSID '+esc(s.ssid)+', profile '+s.sta_profile+', retries '+s.wifi_retries+')',s.wifi_state=='connected'?'ok':'bad')+"
 "row('STA IP',s.ip)+row('RSSI',s.rssi+' dBm')+"
-"row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', ch '+s.ap.channel+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
+"row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', '+chText(s.ap)+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
 "(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
-"row('Ethernet',s.eth.initialized?s.eth.mode+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down')+(s.eth.mode=='lan'?(s.eth.bridged?', bridged to AP':', bridge idle (AP off)'):(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip:'')):"
+"row('Ethernet',s.eth.initialized?(s.eth.mode=='lan'?'LAN (bridged to AP, '+lanNet(s)+', no own IP)'+(s.eth.bridged?'':' - bridge idle (AP off)'):'WAN'+(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:', no IP yet'))+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down'):"
 "'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
 "row('ESP-Hosted',s.hosted)+"
 "row('Display',s.display_status,s.display_status.startsWith('ok')?'ok':'bad')+"
@@ -138,13 +143,13 @@ static const char INDEX_HTML[] =
 "row('OTA',s.ota_status)+"
 "row('Debug mode',(s.debug?'ON':'off')+' <button onclick=dbg('+(s.debug?0:1)+')>'+(s.debug?'Turn off':'Turn on')+"
 "'</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>');"
-"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?', bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops:(s.eth.gw?', GW '+s.eth.gw:''));"
+"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?' - LAN (bridged to AP, '+lanNet(s)+'), no own IP, bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops:(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:''));"
 "$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let n=await (await fetch('/api/netstats')).json();"
 "$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
 "i.present?mb(i.rx_bps):'-',i.present?mb(i.tx_bps):'-',(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
 "let a=await (await fetch('/api/apstatus')).json();"
-"$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', channel '+a.channel+' (follows the STA channel)':'AP stopped';"
+"$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
 "let p=await (await fetch('/api/iperf')).json();"
 "$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
@@ -337,6 +342,9 @@ static esp_err_t status_get(httpd_req_t *req)
     wifi_ap_info_t ap;
     wifi_get_ap_info(&ap);
     add_ap_info(cJSON_AddObjectToObject(j, "ap"), &ap);
+    cJSON_AddNumberToObject(j, "ap_channel", ap.channel);
+    cJSON_AddNumberToObject(j, "sta_channel", ap.sta_channel);
+    cJSON_AddBoolToObject(j, "dual_band", ap.dual_band);
     add_eth_info(cJSON_AddObjectToObject(j, "eth"));
 
     char *out = cJSON_PrintUnformatted(j);
@@ -753,6 +761,9 @@ static void add_ap_info(cJSON *o, const wifi_ap_info_t *a)
     cJSON_AddStringToObject(o, "ip", a->ip);
     cJSON_AddBoolToObject(o, "nat", a->nat);
     cJSON_AddNumberToObject(o, "channel", a->channel);
+    cJSON_AddNumberToObject(o, "ap_channel", a->channel);
+    cJSON_AddNumberToObject(o, "sta_channel", a->sta_channel);
+    cJSON_AddBoolToObject(o, "dual_band", a->dual_band);
     cJSON_AddNumberToObject(o, "clients", a->clients);
     cJSON_AddNumberToObject(o, "max_clients", a->max_clients);
 }

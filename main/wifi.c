@@ -54,6 +54,7 @@ static int s_ap_slot = -1;
 static ap_profile_t s_ap_cur;
 static volatile int s_ap_clients;
 static uint8_t s_ap_channel;
+static void apply_bw20(wifi_interface_t ifx);
 
 static bool lock(void) { return xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(LOCK_TIMEOUT_MS)) == pdTRUE; }
 static void unlock(void) { xSemaphoreGiveRecursive(s_lock); }
@@ -108,11 +109,6 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             wifi_event_sta_connected_t *ev = data;
             s_sta_channel = ev->channel;
             ESP_LOGI(TAG, "Associated with \"%.*s\" on channel %d", ev->ssid_len, (const char *)ev->ssid, ev->channel);
-            if (s_ap_running && s_ap_channel && s_ap_channel != ev->channel) {
-                ESP_LOGW(TAG, "AP moves from channel %d to %d (single radio: AP follows the STA channel)",
-                         s_ap_channel, ev->channel);
-            }
-            s_ap_channel = ev->channel;
             diag_set_wifi(WIFI_STATE_CONNECTED, NULL, 0);
             if (s_cur.valid && !s_cur.dhcp) apply_static_ip();
             break;
@@ -462,6 +458,7 @@ esp_err_t wifi_ap_start(int slot)
             s_apsta_ok = true;
         }
     }
+    if (err == ESP_OK && mode != WIFI_MODE_APSTA) apply_bw20(WIFI_IF_AP);
     if (err == ESP_OK) err = ap_configure(slot);
     unlock();
     return err;
@@ -496,7 +493,9 @@ void wifi_get_ap_info(wifi_ap_info_t *o)
     strlcpy(o->ssid, s_ap_cur.ssid, sizeof(o->ssid));
     o->open = !s_ap_cur.pass[0];
     o->nat = s_ap_cur.nat;
-    o->channel = s_sta_channel ? s_sta_channel : s_ap_channel;
+    o->channel = s_ap_channel;
+    o->sta_channel = s_sta_channel;
+    o->dual_band = s_ap_channel && s_sta_channel && ((s_ap_channel > 14) != (s_sta_channel > 14));
     o->clients = s_ap_clients;
     const uint8_t *sn = AP_SUBNET_BASE[s_ap_cur.subnet % AP_SUBNET_COUNT];
     snprintf(o->ip, sizeof(o->ip), "%d.%d.%d.1", sn[0], sn[1], sn[2]);
@@ -524,6 +523,41 @@ int wifi_ap_clients(wifi_client_t *out, int max)
     free(list);
     free(ipl);
     return n;
+}
+
+// Force HT20 on an interface. esp_wifi_set_bandwidth() is rejected while the
+// C5 runs in dual-band (2.4 + 5 GHz auto) mode, so fall back to
+// esp_wifi_set_bandwidths() for both bands.
+static void apply_bw20(wifi_interface_t ifx)
+{
+#if CONFIG_MYPI_WIFI_BW_20
+    const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
+    esp_err_t err = esp_wifi_set_bandwidth(ifx, WIFI_BW20);
+    ESP_LOGI(TAG, "esp_wifi_set_bandwidth(%s, HT20): %s", name, esp_err_to_name(err));
+    if (err != ESP_OK) {
+        wifi_bandwidths_t bw = {.ghz_2g = WIFI_BW20, .ghz_5g = WIFI_BW20};
+        err = esp_wifi_set_bandwidths(ifx, &bw);
+        ESP_LOGI(TAG, "esp_wifi_set_bandwidths(%s, 2.4G HT20 / 5G HT20): %s", name, esp_err_to_name(err));
+    }
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not force HT20 on %s - radio keeps its default bandwidth", name);
+#endif
+}
+
+static inline const char *band_of(int ch) { return ch > 14 ? "5 GHz" : "2.4 GHz"; }
+
+// Read the channel the AP actually uses from the co-processor (the C5 may run
+// the AP on another band than the STA).
+static void refresh_ap_channel(void)
+{
+    if (!s_ap_running) return;
+    wifi_config_t c = {0};
+    if (esp_wifi_get_config(WIFI_IF_AP, &c) == ESP_OK && c.ap.channel) {
+        if (c.ap.channel != s_ap_channel) {
+            ESP_LOGI(TAG, "AP channel %d (%s), STA channel %d (%s)", c.ap.channel, band_of(c.ap.channel),
+                     s_sta_channel, s_sta_channel ? band_of(s_sta_channel) : "-");
+        }
+        s_ap_channel = c.ap.channel;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +627,9 @@ static void wifi_task(void *arg)
     } else {
         TRY(esp_wifi_set_mode(WIFI_MODE_STA));
     }
+    // Channel width must be set before the radio starts.
+    apply_bw20(WIFI_IF_STA);
+    if (s_apsta_ok && want_ap) apply_bw20(WIFI_IF_AP);
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect
 
     // Main loop: connect requests, reconnect with exponential back-off, RSSI refresh.
@@ -635,6 +672,10 @@ static void wifi_task(void *arg)
                     }
                 }
             }
+        }
+        if (s_ap_running && lock()) {
+            refresh_ap_channel();
+            unlock();
         }
     }
 }
