@@ -3,7 +3,9 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Current version: **0.6.3** — an **LCD status screen** with an OTA progress view, Wi-Fi uplink + own access point
+Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+
+Current version: **0.7.0** — an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an **LCD status screen** with an OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
 a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
