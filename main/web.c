@@ -78,9 +78,7 @@ static const char INDEX_HTML[] =
 "function $(i){return document.getElementById(i)}"
 "function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
 "function band(c){return c>14?'5 GHz':'2.4 GHz'}"
-"function chText(a){if(a.dual_band)return 'AP on '+band(a.ap_channel)+' ch '+a.ap_channel+', STA on '+band(a.sta_channel)+' ch '+a.sta_channel+' (dual-band: no shared airtime)';"
-"if(a.sta_channel&&a.sta_channel==a.ap_channel)return 'ch '+a.ap_channel+' (shared with STA)';"
-"return 'ch '+a.ap_channel+' ('+band(a.ap_channel)+')'+(a.sta_channel?', STA ch '+a.sta_channel:'')}"
+"function chText(a){return 'ch '+a.ap_channel+' ('+band(a.ap_channel)+')'+(a.sta_channel?', shared with STA':'')}"
 "function lanNet(s){return s.ap&&s.ap.running?s.ap.ip.replace(/\\.1$/,'.0/24'):'192.168.4.0/24'}"
 "function fmtUp(s){let h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h+'h '+m+'m '+(s%60)+'s'}"
 "function row(k,v,c){return '<tr><td>'+k+'</td><td'+(c?' class='+c:'')+'>'+v+'</td></tr>'}"
@@ -353,7 +351,6 @@ static esp_err_t status_get(httpd_req_t *req)
     add_ap_info(cJSON_AddObjectToObject(j, "ap"), &ap);
     cJSON_AddNumberToObject(j, "ap_channel", ap.channel);
     cJSON_AddNumberToObject(j, "sta_channel", ap.sta_channel);
-    cJSON_AddBoolToObject(j, "dual_band", ap.dual_band);
     add_eth_info(cJSON_AddObjectToObject(j, "eth"));
 
     char *out = cJSON_PrintUnformatted(j);
@@ -772,7 +769,6 @@ static void add_ap_info(cJSON *o, const wifi_ap_info_t *a)
     cJSON_AddNumberToObject(o, "channel", a->channel);
     cJSON_AddNumberToObject(o, "ap_channel", a->channel);
     cJSON_AddNumberToObject(o, "sta_channel", a->sta_channel);
-    cJSON_AddBoolToObject(o, "dual_band", a->dual_band);
     cJSON_AddNumberToObject(o, "clients", a->clients);
     cJSON_AddNumberToObject(o, "max_clients", a->max_clients);
 }

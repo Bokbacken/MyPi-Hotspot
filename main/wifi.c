@@ -495,7 +495,6 @@ void wifi_get_ap_info(wifi_ap_info_t *o)
     o->nat = s_ap_cur.nat;
     o->channel = s_ap_channel;
     o->sta_channel = s_sta_channel;
-    o->dual_band = s_ap_channel && s_sta_channel && ((s_ap_channel > 14) != (s_sta_channel > 14));
     o->clients = s_ap_clients;
     const uint8_t *sn = AP_SUBNET_BASE[s_ap_cur.subnet % AP_SUBNET_COUNT];
     snprintf(o->ip, sizeof(o->ip), "%d.%d.%d.1", sn[0], sn[1], sn[2]);
@@ -525,9 +524,8 @@ int wifi_ap_clients(wifi_client_t *out, int max)
     return n;
 }
 
-// Force HT20 on an interface. esp_wifi_set_bandwidth() is rejected while the
-// C5 runs in dual-band (2.4 + 5 GHz auto) mode, so fall back to
-// esp_wifi_set_bandwidths() for both bands.
+// Force HT20 on an interface. If esp_wifi_set_bandwidth() is rejected (band
+// mode "auto"), fall back to esp_wifi_set_bandwidths() for both bands.
 static void apply_bw20(wifi_interface_t ifx)
 {
 #if CONFIG_MYPI_WIFI_BW_20
@@ -545,8 +543,8 @@ static void apply_bw20(wifi_interface_t ifx)
 
 static inline const char *band_of(int ch) { return ch > 14 ? "5 GHz" : "2.4 GHz"; }
 
-// Read the channel the AP actually uses from the co-processor (the C5 may run
-// the AP on another band than the STA).
+// Read the channel the AP actually uses from the co-processor. The C5 has one
+// radio: in APSTA the AP always runs on the STA's channel.
 static void refresh_ap_channel(void)
 {
     if (!s_ap_running) return;

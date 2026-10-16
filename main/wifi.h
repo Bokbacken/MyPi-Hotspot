@@ -39,7 +39,6 @@ typedef struct {
     bool nat;
     int channel;            // channel the AP actually uses (read from the C5)
     int sta_channel;        // STA uplink channel, 0 if not connected
-    bool dual_band;         // AP and STA on different bands (2.4 / 5 GHz)
     int clients;
     int max_clients;
 } wifi_ap_info_t;
