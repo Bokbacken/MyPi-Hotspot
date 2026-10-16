@@ -124,7 +124,7 @@ MyPi-Hotspot/
     ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
     ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
     ├── net.h/.c          NAPT, DHCP server setup, per-interface traffic counters, iperf server
-    ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (DHCP server + NAT) or WAN (uplink)
+    ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (L2 bridge to the AP) or WAN (uplink)
     └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload, network API
 ```
 
@@ -304,9 +304,18 @@ access point on the same radio) and the P4 routes between the interfaces with lw
    │  ESP32-P4 lwIP + NAPT  │
    │                        │
    │ AP 192.168.4.1/24      │  Wi-Fi clients (DHCP, NAT to the uplink)
-   │ ETH-LAN 192.168.5.1/24 │  wired client (DHCP, NAT to the uplink)
+   │   ║ L2 bridge          │
+   │ ETH-LAN (no own IP)    │  wired clients, same 192.168.4.0/24 subnet
    └────────────────────────┘
 ```
+
+In **LAN mode** Ethernet is bridged at layer 2 to the access point (same idea as Waveshare's
+`08_eth2ap` example): Ethernet frames are forwarded raw to the Wi-Fi AP and back, so wired and
+wireless clients are on **one subnet** (the AP profile's subnet, default `192.168.4.0/24`), get their
+address from the AP's DHCP server, can reach each other directly, and share the uplink through the
+AP's NAT. The Ethernet port has no IP of its own; the device is reached at `192.168.4.1` from both
+sides. The bridge forwards only while the AP is running (it starts/stops with the AP). A small MAC
+learning table keeps unicast traffic on the side where the destination lives.
 
 ### Defaults and subnets
 
@@ -315,7 +324,7 @@ access point on the same radio) and the P4 routes between the interfaces with lw
 | STA (uplink) | Saved STA profiles (10 slots); fallback `CONFIG_MYPI_WIFI_SSID` / `_PASSWORD` (`TOFTA` / `bokbacken`) | Auto-connect picks the visible saved network with the best RSSI; DHCP or static IP per profile |
 | AP | `MyPi-Hotspot` / `mypi1234`, `192.168.4.1/24`, NAT on | Started at boot (`CONFIG_MYPI_AP_AUTOSTART`) or with the AP profile flagged *start at boot* |
 | AP profile subnets | `192.168.4.0/24`, `192.168.42.0/24`, `10.11.0.0/24`, `172.16.4.0/24` | AP is always `.1/24` with a DHCP server; DNS `8.8.8.8` is offered to clients |
-| Ethernet LAN (default) | `192.168.5.1/24`, DHCP server, NAT to the Wi-Fi uplink | Connect a PC/switch to the RJ45 port |
+| Ethernet LAN (default) | L2 bridge to the AP — wired clients share the AP subnet (`192.168.4.0/24` by default) | Connect a PC/switch to the RJ45 port; needs the AP running |
 | Ethernet WAN | DHCP client | Becomes the default route (uplink) while it has an IP; AP clients are NATed out over Ethernet |
 
 | Limit | Value |
@@ -350,7 +359,7 @@ All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or 
 | `POST /api/approfile/del` | `{slot}` |
 | `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
 | `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
-| `GET /api/eth` / `POST /api/eth` | link, speed, IP, active/saved mode / `{mode:"lan"\|"wan"}` |
+| `GET /api/eth` / `POST /api/eth` | link, speed, IP (WAN), active/saved mode, `bridged`, `bridge_drops` (LAN) / `{mode:"lan"\|"wan"}` |
 | `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_bps`/`tx_bps` (bytes/s, 1 s window) |
 | `POST /api/iperf/start` / `stop`, `GET /api/iperf` | `{window_s}` / iperf server state and results |
 
@@ -363,15 +372,14 @@ window 300 s). The device runs an iperf2-compatible **TCP server on port 5001** 
 test until the window expires. From a PC (iperf **2**, not iperf3):
 
 ```bash
-iperf -c 192.168.4.1 -t 10 -i 1     # PC on the AP
-iperf -c 192.168.5.1 -t 10 -i 1     # PC on Ethernet LAN
+iperf -c 192.168.4.1 -t 10 -i 1     # PC on the AP or on Ethernet LAN (bridged, same subnet)
 iperf -c <STA IP> -t 10 -i 1        # PC on the upstream network (tests the STA link)
 ```
 
 The page shows the live and average Mbit/s; the *Network traffic* table shows per-interface rates.
 This measures the radio/cable link to the P4, not the router path.
 
-**2. NAT path (the real hotspot use case).** Connect a phone or laptop to the AP (or to Ethernet LAN)
+**2. NAT path (the real hotspot use case).** Connect a phone or laptop to the AP (or a PC to Ethernet LAN)
 and run an internet speed test (e.g. fast.com / speedtest.net). Watch *Network traffic*: the AP RX/TX
 should mirror the STA TX/RX. The result is limited by the slowest of: uplink signal, shared radio airtime
 (see below), SDIO to the C5, and NAPT forwarding on the P4.
@@ -385,7 +393,12 @@ should mirror the STA TX/RX. The result is limited by the slowest of: uplink sig
   airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
   When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.
 - NAPT is enabled per interface with the lwIP call `ip_napt_enable_netif()` (instead of
-  `esp_netif_napt_enable()`, which only allows one NAT interface), so AP and Ethernet LAN can be NATed together.
+  `esp_netif_napt_enable()`, which only allows one NAT interface). Wired LAN clients are NATed through the AP
+  netif because Ethernet is bridged to it.
+- **LAN bridge throughput** is bounded by the Wi-Fi side (shared airtime + SDIO to the C5). Ethernet → Wi-Fi
+  frames are retried briefly when the ESP-Hosted queue is full and then dropped (`bridge_drops`); TCP backs off.
+  If the AP is stopped (or the C5 fails), wired LAN clients get no DHCP and cannot reach the device —
+  switch Ethernet to WAN mode or start the AP.
 - Ethernet uses the internal EMAC + generic PHY driver (IP101 on the NANO); mode changes need a reboot.
 - 802.11 throughput tuning (larger lwIP/Wi-Fi buffers, BA windows) is in `sdkconfig.defaults`;
   values on the C5 side are fixed by its ESP-Hosted slave firmware.

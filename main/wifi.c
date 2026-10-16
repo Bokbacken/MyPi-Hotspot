@@ -134,10 +134,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             ESP_LOGI(TAG, "AP \"%s\" started", s_ap_cur.ssid);
             s_ap_clients = 0;
             if (s_ap_cur.nat) net_napt(s_ap, true);
+            eth_bridge_start();     // LAN mode: wired clients join the AP subnet
             break;
         case WIFI_EVENT_AP_STOP:
             ESP_LOGI(TAG, "AP stopped");
             s_ap_clients = 0;
+            eth_bridge_stop();
             break;
         case WIFI_EVENT_AP_STACONNECTED: {
             wifi_event_ap_staconnected_t *ev = data;
@@ -438,6 +440,7 @@ static esp_err_t ap_configure(int slot)
     s_ap_running = true;
     // If the AP was already up the AP_START event may not fire again.
     net_napt(s_ap, p.nat);
+    eth_bridge_start();
     ESP_LOGI(TAG, "AP \"%s\" (%s) on %d.%d.%d.1/24, channel %d, NAT %s, max %d clients", p.ssid,
              p.pass[0] ? "WPA2" : "open", sn[0], sn[1], sn[2], c.ap.channel, p.nat ? "on" : "off",
              CONFIG_MYPI_AP_MAX_CONN);
@@ -468,6 +471,7 @@ esp_err_t wifi_ap_stop(void)
 {
     if (!s_lock || !lock()) return ESP_ERR_TIMEOUT;
     if (s_ap_running) net_napt(s_ap, false);
+    eth_bridge_stop();
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err == ESP_OK) {
         s_ap_running = false;

@@ -2,7 +2,8 @@
 
 // On-board Ethernet (internal EMAC + IP101 RMII PHY on the ESP32-P4-NANO).
 // Mode is stored in NVS and applied at boot:
-//   LAN (default): static 192.168.5.1/24 with DHCP server, NATed out via the Wi-Fi uplink
+//   LAN (default): transparent L2 bridge to the Wi-Fi AP. Wired clients share the
+//                  AP subnet (e.g. 192.168.4.0/24); the AP netif provides IP, DHCP and NAT.
 //   WAN:           DHCP client, becomes the default route (uplink) while it has an IP
 
 #include <stdbool.h>
@@ -24,7 +25,14 @@ typedef struct {
     char gw[16];
     char mac[18];
     char error[64];
+    bool bridged;               // LAN mode: bridge to the AP is forwarding
+    uint32_t bridge_drops;      // frames dropped by the bridge (queue full etc.)
 } eth_info_t;
+
+/** LAN mode: start/stop forwarding between Ethernet and the Wi-Fi AP (call on AP start/stop). */
+void eth_bridge_start(void);
+void eth_bridge_stop(void);
+bool eth_bridge_active(void);
 
 /** Initialize Ethernet (needs esp_netif_init + default event loop). Never aborts. */
 esp_err_t eth_init(void);

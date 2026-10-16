@@ -84,9 +84,11 @@ typedef struct {
     uint32_t rx_pkts, tx_pkts;
     uint64_t last_rx, last_tx;
     uint32_t rx_bps, tx_bps;
+    bool manual;                // counted by net_stats_add() (no lwIP netif, e.g. bridged ETH)
 } if_slot_t;
 
 static if_slot_t s_if[NET_IF_COUNT];
+static volatile net_tap_fn s_ap_tap;    // L2 bridge tap on the AP netif
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *IF_NAMES[NET_IF_COUNT] = {"sta", "ap", "eth"};
 
@@ -111,6 +113,11 @@ static err_t hook_input(struct pbuf *p, struct netif *inp)
     s->rx_bytes += p->tot_len;
     s->rx_pkts++;
     portEXIT_CRITICAL_SAFE(&s_mux);
+    net_tap_fn tap = s_ap_tap;
+    if (tap && s == &s_if[NET_IF_AP] && tap(p, inp, true)) {
+        pbuf_free(p);   // consumed by the bridge (not addressed to this host)
+        return ERR_OK;
+    }
     return s->orig_input(p, inp);
 }
 
@@ -122,6 +129,10 @@ static err_t hook_linkoutput(struct netif *n, struct pbuf *p)
     s->tx_bytes += p->tot_len;
     s->tx_pkts++;
     portEXIT_CRITICAL_SAFE(&s_mux);
+    net_tap_fn tap = s_ap_tap;
+    if (tap && s == &s_if[NET_IF_AP] && tap(p, n, false)) {
+        return ERR_OK;  // sent over the bridge only (destination is on Ethernet)
+    }
     return s->orig_linkoutput(n, p);
 }
 
@@ -152,13 +163,51 @@ void net_stats_register(net_if_id_t id, esp_netif_t *nif)
     esp_netif_tcpip_exec(install_hooks_cb, NULL);
 }
 
+void net_set_ap_tap(net_tap_fn tap)
+{
+    s_ap_tap = tap;
+}
+
+esp_err_t net_ap_inject(const uint8_t *frame, size_t len)
+{
+    if_slot_t *s = &s_if[NET_IF_AP];
+    struct netif *n = s->lwip;
+    if (!n || !s->orig_input || len == 0 || len > 1600) return ESP_ERR_INVALID_STATE;
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_RAM);
+    if (!p) return ESP_ERR_NO_MEM;
+    pbuf_take(p, frame, (u16_t)len);
+    // orig_input is tcpip_input (thread-safe); bypasses the tap so frames do not loop.
+    if (s->orig_input(p, n) != ERR_OK) {
+        pbuf_free(p);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void net_stats_add(net_if_id_t id, uint32_t rx_bytes, uint32_t tx_bytes)
+{
+    if (id >= NET_IF_COUNT) return;
+    portENTER_CRITICAL_SAFE(&s_mux);
+    if_slot_t *s = &s_if[id];
+    s->manual = true;
+    if (rx_bytes) {
+        s->rx_bytes += rx_bytes;
+        s->rx_pkts++;
+    }
+    if (tx_bytes) {
+        s->tx_bytes += tx_bytes;
+        s->tx_pkts++;
+    }
+    portEXIT_CRITICAL_SAFE(&s_mux);
+}
+
 void net_stats_get(net_if_id_t id, net_if_stats_t *out)
 {
     memset(out, 0, sizeof(*out));
     if (id >= NET_IF_COUNT) return;
     portENTER_CRITICAL(&s_mux);
     const if_slot_t *s = &s_if[id];
-    out->present = s->nif != NULL && s->lwip != NULL;
+    out->present = (s->nif != NULL && s->lwip != NULL) || s->manual;
     out->rx_bytes = s->rx_bytes;
     out->tx_bytes = s->tx_bytes;
     out->rx_pkts = s->rx_pkts;

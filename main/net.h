@@ -4,6 +4,7 @@
 // counters (/api/netstats) and the iperf throughput test server.
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -24,6 +25,21 @@ void net_stats_start(void);
 void net_stats_register(net_if_id_t id, esp_netif_t *nif);
 void net_stats_get(net_if_id_t id, net_if_stats_t *out);
 const char *net_if_name(net_if_id_t id);
+/** Count traffic for an interface without an lwIP netif (bridged Ethernet in LAN mode). */
+void net_stats_add(net_if_id_t id, uint32_t rx_bytes, uint32_t tx_bytes);
+
+// --- L2 bridge support (Ethernet LAN <-> Wi-Fi AP) ---
+struct pbuf;
+struct netif;
+/**
+ * Tap on the AP lwIP netif. rx=true: frame received from a Wi-Fi client (before
+ * lwIP); rx=false: frame lwIP is about to send to Wi-Fi. Return true to consume
+ * the frame (rx: not passed to lwIP, tx: not sent over Wi-Fi).
+ */
+typedef bool (*net_tap_fn)(struct pbuf *p, struct netif *n, bool rx);
+void net_set_ap_tap(net_tap_fn tap);
+/** Hand an Ethernet frame to the AP lwIP netif as if it came from a Wi-Fi client. */
+esp_err_t net_ap_inject(const uint8_t *frame, size_t len);
 
 /**
  * Enable/disable NAPT on an (inbound) interface. Unlike esp_netif_napt_enable()

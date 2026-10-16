@@ -63,7 +63,7 @@ static const char INDEX_HTML[] =
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
-"<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (192.168.5.1/24, DHCP server, NAT to Wi-Fi)</option>"
+"<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
 "<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
@@ -128,7 +128,7 @@ static const char INDEX_HTML[] =
 "row('STA IP',s.ip)+row('RSSI',s.rssi+' dBm')+"
 "row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', ch '+s.ap.channel+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
 "(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
-"row('Ethernet',s.eth.initialized?s.eth.mode+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down')+(s.eth.ip?', IP '+s.eth.ip:''):"
+"row('Ethernet',s.eth.initialized?s.eth.mode+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down')+(s.eth.mode=='lan'?(s.eth.bridged?', bridged to AP':', bridge idle (AP off)'):(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip:'')):"
 "'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
 "row('ESP-Hosted',s.hosted)+"
 "row('Display',s.display_status,s.display_status.startsWith('ok')?'ok':'bad')+"
@@ -138,7 +138,7 @@ static const char INDEX_HTML[] =
 "row('OTA',s.ota_status)+"
 "row('Debug mode',(s.debug?'ON':'off')+' <button onclick=dbg('+(s.debug?0:1)+')>'+(s.debug?'Turn off':'Turn on')+"
 "'</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>');"
-"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.gw?', GW '+s.eth.gw:'');"
+"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?', bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops:(s.eth.gw?', GW '+s.eth.gw:''));"
 "$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let n=await (await fetch('/api/netstats')).json();"
 "$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
@@ -798,6 +798,8 @@ static void add_eth_info(cJSON *o)
     cJSON_AddStringToObject(o, "gw", e.gw);
     cJSON_AddStringToObject(o, "mac", e.mac);
     cJSON_AddStringToObject(o, "error", e.error);
+    cJSON_AddBoolToObject(o, "bridged", e.bridged);
+    cJSON_AddNumberToObject(o, "bridge_drops", e.bridge_drops);
 }
 
 static esp_err_t api_eth_get(httpd_req_t *req)
