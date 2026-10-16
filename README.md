@@ -293,7 +293,7 @@ full-screen view refreshed at 5 Hz: *Firmware update (P4)* / *(C5)*, the phase (
 percentage and KB done / total. Touch is ignored meanwhile. A failure stays on screen for about 10 s, then
 the status screen returns; on success the board reboots 2 s after *Done - rebooting*. The same state is in
 `/api/status` as `ota` (`active`, `target`, `phase`, `pct`, `bytes_done`, `bytes_total`, `err`), and the
-upload pages poll it after 100 % to show verifying / done / failed. *Not yet verified on hardware.*
+upload pages poll it after 100 % to show verifying / done / failed.
 
 ## Wi-Fi co-processor (ESP32-C5)
 
@@ -314,7 +314,7 @@ If P4 v0.6.0 is flashed first, flash the C5 over USB (`c5-slave-esp-hosted-v3.0.
 40 MHz. The C5 slave defaults (`c5_slave/sdkconfig.defaults.esp32c5`) raise the Wi-Fi buffers to static RX 16,
 dynamic RX 64, dynamic TX 64, A-MPDU TX/RX with BA window 32, and the C5 SDIO TX/RX queues to 40. This build is
 published as `c5-slave-esp-hosted-v3.0.9-tuned.bin` (OTA via `/c5update`) and `...-tuned-merged.bin` (USB).
-It still reports slave version 3.0.9, so it stays compatible with the 3.0.9 host. *Not yet verified on hardware.*
+It still reports slave version 3.0.9, so it stays compatible with the 3.0.9 host.
 
 ## Wi-Fi, AP & Ethernet
 
@@ -426,7 +426,6 @@ After boot the panel shows a status screen, refreshed every 2 s: title (Wi-Fi ic
 uplink IP (green, or red *No uplink*), uplink SSID + channel, AP clients + channel and SSID, Ethernet state,
 uplink throughput (live in cyan, peak in yellow, Mbit/s) and the traffic log state once it has been used.
 While the status screen runs, touch drawing is disabled (touch events still appear in the web UI).
-*Not yet verified on hardware.*
 
 ### Emergency mode (Ethernet rescue, v0.7.0)
 
@@ -470,9 +469,9 @@ LCD and give the laptop a static `192.168.4.x/24` (not .1 or .32).
 
 ### Known limitations (read this)
 
-- **Not verified on hardware yet.** APSTA on the ESP32-C5 through ESP-Hosted (esp_wifi_remote) builds and
-  follows the documented APIs, but has not been tested on the board. If the C5 firmware rejects APSTA,
-  the device falls back to STA only and the page shows *AP unavailable (APSTA rejected)*.
+- **APSTA fallback.** APSTA on the ESP32-C5 through ESP-Hosted (esp_wifi_remote) runs on the board
+  (all builds up to v0.7.0 hardware-tested). If a C5 firmware ever rejects APSTA, the device falls back
+  to STA only and the page shows *AP unavailable (APSTA rejected)*.
 - **One radio, one channel.** STA and AP share the C5 radio, so the AP must use the STA's channel and
   airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
   When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.

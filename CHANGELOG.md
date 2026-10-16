@@ -3,8 +3,9 @@
 All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 `PROJECT_VER` in `CMakeLists.txt`. "HW-tested" means the change has run on the real
 board; "untested" means it builds cleanly but has not been verified on hardware.
+All versions up to and including 0.7.0 have been run on the hardware.
 
-## 0.7.0 — Ethernet emergency mode (untested)
+## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the
   ESP32-C5 / ESP-Hosted link is dead.
 - Manual trigger: swipe down (>= 60 px, coordinate based so it respects 180° rotation)
@@ -19,7 +20,7 @@ board; "untested" means it builds cleanly but has not been verified on hardware.
 - `/api/status` exposes `eth.rescue`; the status page shows an "EMERGENCY MODE" row.
 - Runtime only: nothing is written to NVS, a reboot returns to normal operation.
 
-## 0.6.3 — OTA progress view and buffer tuning (untested)
+## 0.6.3 — OTA progress view and buffer tuning (HW-tested)
 - Full-screen OTA progress on the LCD (phase, bar, %, KB) for P4 and C5 updates;
   touch is ignored while it is shown.
 - `/update` and `/c5update` poll `/api/status` after upload and show the phase/errors.
@@ -46,36 +47,36 @@ board; "untested" means it builds cleanly but has not been verified on hardware.
 - Bandwidth clamped to 40 MHz and 11ax disabled (ESP-IDF #19238), with NVS migration.
 - `c5_slave/`: ESP-Hosted 3.0.9 slave project with a 2.x-compatible partition layout.
 
-## 0.5.4 — Radio settings
+## 0.5.4 — Radio settings (HW-tested)
 - Protocol bitmask with checkboxes, band lock, TX power, beacon interval / DTIM.
 - Deeper Wi-Fi/SDIO/TCP buffers on the P4.
 
-## 0.5.3 — Runtime radio configuration
+## 0.5.3 — Runtime radio configuration (HW-tested)
 - Bandwidth/protocol at runtime, negotiated PHY info, STA TX retry.
 - Baseline throughput (ch36 STA, ch1 AP, 20 MHz/ac): STA RX 16.32 / TX 20.76 Mbit/s,
   AP RX 20.61 / TX 16.26 Mbit/s (peak).
 
-## 0.5.2 — Ethernet performance
+## 0.5.2 — Ethernet performance (HW-tested)
 - Backpressure ETH→host, deeper EMAC/hosted queues, TX drop counters.
 
-## 0.5.1 — Statistics and LCD status
+## 0.5.1 — Statistics and LCD status (HW-tested)
 - Peak throughput (Mbit/s, 2 decimals), PSRAM traffic log (CSV), LCD status screen.
 - Dropped the dual-band assumption: C5 AP and STA always share one channel.
 
-## 0.5.0 — Hotspot
+## 0.5.0 — Hotspot (HW-tested)
 - Wi-Fi APSTA via ESP-Hosted with NAPT; 10 STA and 4 AP profiles in NVS.
 - Ethernet (EMAC + IP101): LAN = L2 bridge to the AP subnet, or WAN = DHCP uplink.
 - Per-interface traffic counters, iperf2 TCP server on port 5001, web UI + JSON API.
 
-## 0.4.0 — Display performance
+## 0.4.0 — Display performance (HW-tested)
 - LCD SPI 40 MHz, touch I2C 400 kHz, ping-pong DMA flush.
 - Quiet logs by default; runtime debug mode (NVS) re-enables wiring diagnostics.
 
-## 0.3.x — ESP-IDF v6.1 and wiring diagnostics
+## 0.3.x — ESP-IDF v6.1 and wiring diagnostics (HW-tested)
 - Moved to ESP-IDF v6.1. Boot pin check and `/pins` page, touch INT wait, I2C bus recovery.
 - Documented: power the LCD module from the 3V3 pin only.
 
-## 0.2.0-debug — Foundations
+## 0.2.0-debug — Foundations (HW-tested)
 - Diagnostics/heartbeat, RAM log buffer (`/api/log`), Wi-Fi STA over the C5,
   web status page, OTA upload with rollback, custom partition table.
 
