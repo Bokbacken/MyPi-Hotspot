@@ -66,14 +66,16 @@ static const char INDEX_HTML[] =
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
-"<h2>Radio (channel width / protocols)</h2><table id='rd'></table>"
-"<p>STA width <select id='rsb'><option>auto</option><option>20</option><option>40</option><option>80</option></select> "
-"STA protocols <select id='rsp'><option>default</option><option>n</option><option>ac</option><option>ax</option></select> "
-"AP width <select id='rab'><option>20</option><option>40</option><option>80</option></select> "
-"AP protocols <select id='rap'><option>default</option><option>n</option><option>ac</option><option>ax</option></select> "
+"<h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
+"<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option><option value='3'>80</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option><option value='3'>80</option></select><br>"
+"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' onchange=protoHint()>ax</label> <span id='sta-proto-def'></span><br>"
+"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' onchange=protoHint()>ax</label> <span id='ap-proto-def'></span><br>"
+"Band <select id='band-mode'><option value='0'>Auto (2.4+5 GHz)</option><option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select> "
+"Max TX power (dBm, 0=default) <input type=number id='tx-power' min=0 max=21 style='width:5em'><br>"
+"AP beacon interval (&times;100 TU, 0=default=100) <input type=number id='ap-beacon' min=0 max=10 style='width:5em'> "
+"AP DTIM period (0=default=1) <input type=number id='ap-dtim' min=0 max=255 style='width:5em'><br>"
 "<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
-"<small>Width in MHz (auto = negotiated). Protocols: n = a/n (5 GHz), ac = a/n/ac, ax = a/n/ac/ax; 2.4 GHz keeps b/g. "
-"STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
+"<small>Width in MHz (auto = driver default / negotiated). Protocols: none checked = driver default; 2.4 GHz uses b/g/n/ax, 5 GHz uses a/n/ac/ax. TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
@@ -108,7 +110,8 @@ static const char INDEX_HTML[] =
 "x.has_pass?'WPA2':'open',x.nat?'yes':'no',x.on_boot?'yes':'',"
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
-"let r=await (await fetch('/api/radio')).json();$('rsb').value=r.saved.sta_bw;$('rsp').value=r.saved.sta_proto;$('rab').value=r.saved.ap_bw;$('rap').value=r.saved.ap_proto;"
+"let r=await (await fetch('/api/radio')).json();$('rsb').value=r.sta_bw;$('rab').value=r.ap_bw;setProtoMask('sta',r.sta_proto);setProtoMask('ap',r.ap_proto);"
+"$('band-mode').value=r.band_mode;$('tx-power').value=r.tx_power_dbm;$('ap-beacon').value=r.ap_beacon_tu;$('ap-dtim').value=r.ap_dtim;protoHint();"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value='';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
 "$('sip').value=x.ip;$('smk').value=x.mask||'255.255.255.0';$('sgw').value=x.gw;$('sdn').value=x.dns}"
@@ -124,7 +127,12 @@ static const char INDEX_HTML[] =
 "async function disc(){await post('/api/disconnect');ld()}"
 "async function apStart(i){await post('/api/ap/start',{slot:i})}"
 "async function apStop(){await post('/api/ap/stop')}"
-"async function saveRadio(){await post('/api/radio',{sta_bw:$('rsb').value,sta_proto:$('rsp').value,ap_bw:$('rab').value,ap_proto:$('rap').value})}"
+"const PBITS={b:1,g:2,n:4,a:16,ac:32,ax:64};"
+"function buildProtoMask(p){let m=0;for(let k in PBITS)if($(p+'-proto-'+k).checked)m|=PBITS[k];return m}"
+"function setProtoMask(p,m){for(let k in PBITS)$(p+'-proto-'+k).checked=!!(m&PBITS[k])}"
+"function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(driver default)'}"
+"async function saveRadio(){await post('/api/radio',{sta_bw:+$('rsb').value,ap_bw:+$('rab').value,sta_proto:buildProtoMask('sta'),ap_proto:buildProtoMask('ap'),"
+"band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_beacon_tu:+$('ap-beacon').value,ap_dtim:+$('ap-dtim').value})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
 "async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
@@ -165,12 +173,14 @@ static const char INDEX_HTML[] =
 "let a=await (await fetch('/api/apstatus')).json();"
 "$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
-"let r=await (await fetch('/api/radio')).json();let rc=x=>'width '+x.sta_bw+'/'+x.ap_bw+', proto '+x.sta_proto+'/'+x.ap_proto;"
+"let r=await (await fetch('/api/radio')).json(),f=r.info,BWN=['auto','20','40','80'],hx=m=>m?'0x'+m.toString(16):'default';"
+"let rc=x=>'width '+BWN[x.sta_bw]+'/'+BWN[x.ap_bw]+', proto '+hx(x.sta_proto)+'/'+hx(x.ap_proto)+', band '+x.band_mode+', tx '+(x.tx_power_dbm||'default');"
 "$('rd').innerHTML=tr(['','Width (C5)','Protocols (C5)','Setting (width / proto)'],1)+"
-"tr(['STA (ch '+r.sta_channel+')',r.sta_bw_mhz?r.sta_bw_mhz+' MHz':'?',r.sta_proto,r.active.sta_bw+' / '+r.active.sta_proto])+"
-"tr(['AP (ch '+r.ap_channel+')',r.ap_bw_mhz?r.ap_bw_mhz+' MHz':'-',r.ap_proto,r.active.ap_bw+' / '+r.active.ap_proto])+"
-"tr(['Upstream AP','2nd ch '+r.upstream_second,r.upstream_phy,''])+"
-"(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','','','STA/AP '+rc(r.saved)]):'');"
+"tr(['STA (ch '+r.sta_channel+')',f.sta_width,f.sta_proto_str,BWN[r.active.sta_bw]+' / '+hx(r.active.sta_proto)])+"
+"tr(['AP (ch '+r.ap_channel+')',f.ap_width,f.ap_proto_str,BWN[r.active.ap_bw]+' / '+hx(r.active.ap_proto)])+"
+"tr(['Upstream AP','2nd ch '+f.upstream_second,f.upstream_phy,''])+"
+"tr(['TX power',f.tx_power_dbm?f.tx_power_dbm+' dBm':'?','',r.active.tx_power_dbm?r.active.tx_power_dbm+' dBm':'default'])+"
+"(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','','',rc(r.saved)]):'');"
 "let p=await (await fetch('/api/iperf')).json();"
 "$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
 "if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
@@ -859,33 +869,60 @@ static esp_err_t api_eth_post(httpd_req_t *req)
 
 static void add_radio_cfg(cJSON *o, const wifi_radio_cfg_t *c)
 {
-    cJSON_AddStringToObject(o, "sta_bw", wifi_radio_bw_name(c->sta_bw));
-    cJSON_AddStringToObject(o, "ap_bw", wifi_radio_bw_name(c->ap_bw));
-    cJSON_AddStringToObject(o, "sta_proto", wifi_radio_proto_name(c->sta_proto));
-    cJSON_AddStringToObject(o, "ap_proto", wifi_radio_proto_name(c->ap_proto));
+    cJSON_AddNumberToObject(o, "sta_bw", c->sta_bw);
+    cJSON_AddNumberToObject(o, "ap_bw", c->ap_bw);
+    cJSON_AddNumberToObject(o, "sta_proto", c->sta_proto);
+    cJSON_AddNumberToObject(o, "ap_proto", c->ap_proto);
+    cJSON_AddNumberToObject(o, "band_mode", c->band_mode);
+    cJSON_AddNumberToObject(o, "tx_power_dbm", c->tx_power_dbm);
+    cJSON_AddNumberToObject(o, "ap_beacon_tu", c->ap_beacon_interval_tu);
+    cJSON_AddNumberToObject(o, "ap_dtim", c->ap_dtim);
 }
 
-// GET /api/radio - active + saved settings and what the C5 reports for STA/AP
+static void add_width(cJSON *o, const char *k, int mhz, bool known)
+{
+    char b[16];
+    if (mhz) snprintf(b, sizeof(b), "%d MHz", mhz);
+    else strlcpy(b, known ? "?" : "-", sizeof(b));
+    cJSON_AddStringToObject(o, k, b);
+}
+
+// GET /api/radio - saved settings (top level), active/saved objects and what the C5 reports (info)
 static esp_err_t api_radio_get(httpd_req_t *req)
 {
     wifi_radio_info_t r;
     wifi_get_radio_info(&r);
     cJSON *j = cJSON_CreateObject();
+    add_radio_cfg(j, &r.saved);
     add_radio_cfg(cJSON_AddObjectToObject(j, "active"), &r.active);
     add_radio_cfg(cJSON_AddObjectToObject(j, "saved"), &r.saved);
     cJSON_AddBoolToObject(j, "reboot_pending", memcmp(&r.active, &r.saved, sizeof(r.active)) != 0);
     cJSON_AddNumberToObject(j, "sta_channel", r.sta_channel);
     cJSON_AddNumberToObject(j, "ap_channel", r.ap_channel);
-    cJSON_AddNumberToObject(j, "sta_bw_mhz", r.sta_bw_mhz);
-    cJSON_AddNumberToObject(j, "ap_bw_mhz", r.ap_bw_mhz);
-    cJSON_AddStringToObject(j, "sta_proto", r.sta_proto);
-    cJSON_AddStringToObject(j, "ap_proto", r.ap_proto);
-    cJSON_AddStringToObject(j, "upstream_second", r.up_second == 1 ? "above" : r.up_second == 2 ? "below" : "none");
-    cJSON_AddStringToObject(j, "upstream_phy", r.up_phy);
+    cJSON *f = cJSON_AddObjectToObject(j, "info");
+    add_width(f, "sta_width", r.sta_bw_mhz, true);
+    cJSON_AddStringToObject(f, "sta_proto_str", r.sta_proto);
+    cJSON_AddNumberToObject(f, "sta_proto_actual", r.sta_proto_actual);
+    add_width(f, "ap_width", r.ap_bw_mhz, false);
+    cJSON_AddStringToObject(f, "ap_proto_str", r.ap_proto);
+    cJSON_AddNumberToObject(f, "ap_proto_actual", r.ap_proto_actual);
+    cJSON_AddStringToObject(f, "upstream_second", r.up_second == 1 ? "above" : r.up_second == 2 ? "below" : "none");
+    cJSON_AddStringToObject(f, "upstream_phy", r.up_phy);
+    cJSON_AddNumberToObject(f, "tx_power_dbm", r.tx_power_dbm);
     return send_json(req, j);
 }
 
-// POST /api/radio {sta_bw,ap_bw,sta_proto,ap_proto} - missing keys keep the saved value; applied after reboot
+// Read an optional numeric field into *dst if present; clears *ok if out of [lo, hi].
+static void radio_field(const cJSON *j, const char *k, int lo, int hi, uint8_t *dst, bool *ok)
+{
+    if (!cJSON_GetObjectItemCaseSensitive(j, k)) return;
+    int x = jint(j, k, -1);
+    if (x < lo || x > hi) { *ok = false; return; }
+    *dst = (uint8_t)x;
+}
+
+// POST /api/radio {sta_bw,ap_bw (0-3), sta_proto,ap_proto (bitmask), band_mode, tx_power_dbm,
+// ap_beacon_tu, ap_dtim} - missing keys keep the saved value; applied after reboot
 static esp_err_t api_radio_post(httpd_req_t *req)
 {
     READ_BODY_OR_400(j);
@@ -893,15 +930,18 @@ static esp_err_t api_radio_post(httpd_req_t *req)
     wifi_get_radio_info(&r);
     wifi_radio_cfg_t c = r.saved;
     bool ok = true;
-    const char *v;
-    int x;
-    if (*(v = jstr(j, "sta_bw"))) { x = wifi_radio_bw_parse(v); ok &= x >= 0; c.sta_bw = x; }
-    if (*(v = jstr(j, "ap_bw"))) { x = wifi_radio_bw_parse(v); ok &= x > 0; c.ap_bw = x; }
-    if (*(v = jstr(j, "sta_proto"))) { x = wifi_radio_proto_parse(v); ok &= x >= 0; c.sta_proto = x; }
-    if (*(v = jstr(j, "ap_proto"))) { x = wifi_radio_proto_parse(v); ok &= x >= 0; c.ap_proto = x; }
+    radio_field(j, "sta_bw", RADIO_BW_AUTO, RADIO_BW_80, &c.sta_bw, &ok);
+    radio_field(j, "ap_bw", RADIO_BW_AUTO, RADIO_BW_80, &c.ap_bw, &ok);
+    radio_field(j, "sta_proto", 0, RADIO_PROTO_ALL, &c.sta_proto, &ok);
+    radio_field(j, "ap_proto", 0, RADIO_PROTO_ALL, &c.ap_proto, &ok);
+    radio_field(j, "band_mode", RADIO_BAND_AUTO, RADIO_BAND_5G, &c.band_mode, &ok);
+    radio_field(j, "tx_power_dbm", 0, 21, &c.tx_power_dbm, &ok);
+    radio_field(j, "ap_beacon_tu", 0, 10, &c.ap_beacon_interval_tu, &ok);
+    radio_field(j, "ap_dtim", 0, 255, &c.ap_dtim, &ok);
     cJSON_Delete(j);
     return send_result(req, ok ? wifi_radio_save(&c) : ESP_ERR_INVALID_ARG, "saved - reboot to apply",
-                       "sta_bw: auto|20|40|80, ap_bw: 20|40|80, *_proto: default|n|ac|ax");
+                       "*_bw: 0-3, *_proto: bitmask b=1 g=2 n=4 a=16 ac=32 ax=64, band_mode: 0-2, "
+                       "tx_power_dbm: 0 or 2-21, ap_beacon_tu: 0-10, ap_dtim: 0-255");
 }
 
 // --- Traffic stats ---

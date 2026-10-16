@@ -56,7 +56,7 @@ static ap_profile_t s_ap_cur;
 static volatile int s_ap_clients;
 static uint8_t s_ap_channel;
 static void apply_bw(wifi_interface_t ifx, uint8_t sel);
-static void apply_proto(wifi_interface_t ifx, uint8_t sel);
+static void apply_proto(wifi_interface_t ifx, uint8_t mask);
 static wifi_radio_cfg_t s_radio;
 
 static bool lock(void) { return xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(LOCK_TIMEOUT_MS)) == pdTRUE; }
@@ -428,6 +428,8 @@ static esp_err_t ap_configure(int slot)
     c.ap.max_connection = CONFIG_MYPI_AP_MAX_CONN;
     c.ap.channel = s_sta_channel ? s_sta_channel : (s_ap_channel ? s_ap_channel : 1);
     c.ap.pmf_cfg.required = false;
+    if (s_radio.ap_beacon_interval_tu > 0) c.ap.beacon_interval = s_radio.ap_beacon_interval_tu * 100;
+    if (s_radio.ap_dtim > 0) c.ap.dtim_period = s_radio.ap_dtim > 10 ? 10 : s_radio.ap_dtim;   // driver range 1..10
     s_ap_cur = p;   // read by the AP_START handler (NAT)
     esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &c);
     if (err != ESP_OK) {
@@ -537,16 +539,12 @@ int wifi_ap_clients(wifi_client_t *out, int max)
 #define NVS_NS          "mypi"
 #define NVS_KEY_RADIO   "radio"
 
-static wifi_radio_cfg_t s_radio = {
-    .sta_bw = RADIO_BW_AUTO, .ap_bw = RADIO_BW_20, .sta_proto = RADIO_PROTO_DEFAULT, .ap_proto = RADIO_PROTO_DEFAULT,
-};
+static wifi_radio_cfg_t s_radio;          // all zeros = driver defaults
 static wifi_radio_cfg_t s_radio_saved;
 
 static const char *const BW_NAMES[] = {"auto", "20", "40", "80"};
-static const char *const PROTO_NAMES[] = {"default", "n", "ac", "ax"};
 
 const char *wifi_radio_bw_name(uint8_t v) { return v < 4 ? BW_NAMES[v] : "?"; }
-const char *wifi_radio_proto_name(uint8_t v) { return v < 4 ? PROTO_NAMES[v] : "?"; }
 
 int wifi_radio_bw_parse(const char *s)
 {
@@ -554,16 +552,19 @@ int wifi_radio_bw_parse(const char *s)
     return -1;
 }
 
-int wifi_radio_proto_parse(const char *s)
-{
-    for (int i = 0; i < 4; i++) if (strcmp(s, PROTO_NAMES[i]) == 0) return i;
-    return -1;
-}
-
 static bool radio_cfg_valid(const wifi_radio_cfg_t *c)
 {
-    return c->sta_bw <= RADIO_BW_80 && c->ap_bw >= RADIO_BW_20 && c->ap_bw <= RADIO_BW_80 &&
-           c->sta_proto <= RADIO_PROTO_AX && c->ap_proto <= RADIO_PROTO_AX;
+    return c->sta_bw <= RADIO_BW_80 && c->ap_bw <= RADIO_BW_80 && !(c->sta_proto & ~RADIO_PROTO_ALL) &&
+           !(c->ap_proto & ~RADIO_PROTO_ALL) && c->band_mode <= RADIO_BAND_5G &&
+           (c->tx_power_dbm == 0 || (c->tx_power_dbm >= 2 && c->tx_power_dbm <= 21)) &&
+           c->ap_beacon_interval_tu <= 10;
+}
+
+static void radio_log(const char *what, const wifi_radio_cfg_t *c)
+{
+    ESP_LOGI(TAG, "%s: STA bw %s proto 0x%02x, AP bw %s proto 0x%02x, band %d, tx %d dBm, beacon %d, dtim %d", what,
+             wifi_radio_bw_name(c->sta_bw), c->sta_proto, wifi_radio_bw_name(c->ap_bw), c->ap_proto, c->band_mode,
+             c->tx_power_dbm, c->ap_beacon_interval_tu, c->ap_dtim);
 }
 
 static void radio_load(void)
@@ -572,13 +573,14 @@ static void radio_load(void)
     wifi_radio_cfg_t c;
     size_t len = sizeof(c);
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        if (nvs_get_blob(h, NVS_KEY_RADIO, &c, &len) == ESP_OK && len == sizeof(c) && radio_cfg_valid(&c)) s_radio = c;
+        esp_err_t err = nvs_get_blob(h, NVS_KEY_RADIO, &c, &len);
+        if (err == ESP_OK && len == sizeof(c) && radio_cfg_valid(&c)) s_radio = c;
+        else if (err == ESP_OK || err == ESP_ERR_NVS_INVALID_LENGTH)
+            ESP_LOGW(TAG, "Radio settings in NVS have an old format or are invalid - using defaults");
         nvs_close(h);
     }
     s_radio_saved = s_radio;
-    ESP_LOGI(TAG, "Radio settings: STA bw %s proto %s, AP bw %s proto %s", wifi_radio_bw_name(s_radio.sta_bw),
-             wifi_radio_proto_name(s_radio.sta_proto), wifi_radio_bw_name(s_radio.ap_bw),
-             wifi_radio_proto_name(s_radio.ap_proto));
+    radio_log("Radio settings", &s_radio);
 }
 
 esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
@@ -592,9 +594,7 @@ esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
     nvs_close(h);
     if (err == ESP_OK) {
         s_radio_saved = *c;
-        ESP_LOGI(TAG, "Radio settings saved (applied after reboot): STA bw %s proto %s, AP bw %s proto %s",
-                 wifi_radio_bw_name(c->sta_bw), wifi_radio_proto_name(c->sta_proto), wifi_radio_bw_name(c->ap_bw),
-                 wifi_radio_proto_name(c->ap_proto));
+        radio_log("Radio settings saved (applied after reboot)", c);
     }
     return err;
 }
@@ -621,30 +621,45 @@ static void apply_bw(wifi_interface_t ifx, uint8_t sel)
     if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s bandwidth - radio keeps its default", name);
 }
 
-// Set the protocol set of an interface. "default" leaves the driver default.
-// 2.4 GHz always keeps 11b/g for compatibility; 11ax is added on 2.4 GHz with "ax".
-static void apply_proto(wifi_interface_t ifx, uint8_t sel)
+// Set the protocol bitmask of an interface (0 = driver default). The bits are
+// split per band: 2.4 GHz takes b/g/n/ax, 5 GHz takes a/n/ac/ax. Falls back to
+// the single-band esp_wifi_set_protocol() if the per-band call is rejected.
+static void apply_proto(wifi_interface_t ifx, uint8_t mask)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
-    if (sel == RADIO_PROTO_DEFAULT) {
+    if (mask == 0) {
         ESP_LOGI(TAG, "%s protocols: driver default", name);
         return;
     }
-    uint16_t p5 = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N;
-    uint16_t p2 = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
-    if (sel >= RADIO_PROTO_AC) p5 |= WIFI_PROTOCOL_11AC;
-    if (sel >= RADIO_PROTO_AX) {
-        p5 |= WIFI_PROTOCOL_11AX;
-        p2 |= WIFI_PROTOCOL_11AX;
-    }
+    uint16_t p2 = mask & (RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N | RADIO_PROTO_AX);
+    uint16_t p5 = mask & (RADIO_PROTO_A | RADIO_PROTO_N | RADIO_PROTO_AC | RADIO_PROTO_AX);
     wifi_protocols_t p = {.ghz_2g = p2, .ghz_5g = p5};
     esp_err_t err = esp_wifi_set_protocols(ifx, &p);
     ESP_LOGI(TAG, "esp_wifi_set_protocols(%s, 2.4G 0x%02x / 5G 0x%02x): %s", name, p2, p5, esp_err_to_name(err));
     if (err != ESP_OK) {
-        err = esp_wifi_set_protocol(ifx, (uint8_t)p5);
-        ESP_LOGI(TAG, "esp_wifi_set_protocol(%s, 0x%02x): %s", name, p5, esp_err_to_name(err));
+        err = esp_wifi_set_protocol(ifx, mask);
+        ESP_LOGI(TAG, "esp_wifi_set_protocol(%s, 0x%02x): %s", name, mask, esp_err_to_name(err));
     }
     if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s protocols - radio uses its default", name);
+}
+
+// Lock the radio to 2.4 GHz, 5 GHz or both (auto). Must run before esp_wifi_start().
+static void apply_band_mode(uint8_t mode)
+{
+    wifi_band_mode_t m = mode == RADIO_BAND_2G ? WIFI_BAND_MODE_2G_ONLY
+                         : mode == RADIO_BAND_5G ? WIFI_BAND_MODE_5G_ONLY : WIFI_BAND_MODE_AUTO;
+    esp_err_t err = esp_wifi_set_band_mode(m);
+    ESP_LOGI(TAG, "esp_wifi_set_band_mode(%d): %s", (int)m, esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set band mode - radio keeps its default");
+}
+
+// Cap the TX power (dBm, 0 = driver default). The driver takes 0.25 dBm units.
+static void apply_tx_power(uint8_t dbm)
+{
+    if (dbm == 0) return;
+    esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(dbm * 4));
+    ESP_LOGI(TAG, "esp_wifi_set_max_tx_power(%d dBm): %s", dbm, esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set TX power - radio keeps its default");
 }
 
 static void proto_str(uint16_t p, char *out, size_t n)
@@ -668,7 +683,7 @@ static int bw_mhz(wifi_bandwidth_t b)
 
 // Read the configured width/protocols of an interface from the C5 for the band
 // of channel ch (single-band getters first, then the per-band getters).
-static void read_if_phy(wifi_interface_t ifx, int ch, int *mhz, char *proto, size_t n)
+static void read_if_phy(wifi_interface_t ifx, int ch, int *mhz, char *proto, size_t n, uint8_t *actual)
 {
     bool five = ch > 14;
     wifi_bandwidth_t bw = 0;
@@ -678,13 +693,16 @@ static void read_if_phy(wifi_interface_t ifx, int ch, int *mhz, char *proto, siz
         wifi_bandwidths_t b = {0};
         *mhz = esp_wifi_get_bandwidths(ifx, &b) == ESP_OK ? bw_mhz(five ? b.ghz_5g : b.ghz_2g) : 0;
     }
+    wifi_protocols_t p = {0};
     uint8_t p8 = 0;
-    if (esp_wifi_get_protocol(ifx, &p8) == ESP_OK) {
+    if (esp_wifi_get_protocols(ifx, &p) == ESP_OK) {
+        *actual = (uint8_t)(five ? p.ghz_5g : p.ghz_2g);
+        proto_str(*actual, proto, n);
+    } else if (esp_wifi_get_protocol(ifx, &p8) == ESP_OK) {
+        *actual = p8;
         proto_str(p8, proto, n);
     } else {
-        wifi_protocols_t p = {0};
-        if (esp_wifi_get_protocols(ifx, &p) == ESP_OK) proto_str(five ? p.ghz_5g : p.ghz_2g, proto, n);
-        else strlcpy(proto, "?", n);
+        strlcpy(proto, "?", n);
     }
 }
 
@@ -704,8 +722,11 @@ void wifi_get_radio_info(wifi_radio_info_t *o)
     o->ap_channel = s_ap_channel;
     if (!s_lock || !lock()) return;
     int ch = s_sta_channel ? s_sta_channel : s_ap_channel;
-    read_if_phy(WIFI_IF_STA, ch, &o->sta_bw_mhz, o->sta_proto, sizeof(o->sta_proto));
-    if (s_ap_running) read_if_phy(WIFI_IF_AP, ch, &o->ap_bw_mhz, o->ap_proto, sizeof(o->ap_proto));
+    read_if_phy(WIFI_IF_STA, ch, &o->sta_bw_mhz, o->sta_proto, sizeof(o->sta_proto), &o->sta_proto_actual);
+    if (s_ap_running)
+        read_if_phy(WIFI_IF_AP, ch, &o->ap_bw_mhz, o->ap_proto, sizeof(o->ap_proto), &o->ap_proto_actual);
+    int8_t q = 0;
+    if (esp_wifi_get_max_tx_power(&q) == ESP_OK) o->tx_power_dbm = q / 4;
     unlock();
     if (s_sta_channel) {
         o->up_second = s_up_second;
@@ -798,13 +819,19 @@ static void wifi_task(void *arg)
     } else {
         TRY(esp_wifi_set_mode(WIFI_MODE_STA));
     }
-    // Protocols and channel width are set before the radio starts, so the first
-    // STA connect (triggered by STA_START) already uses them.
+    // Band, protocols and channel width are set before the radio starts, so the
+    // first STA connect (triggered by STA_START) already uses them.
+    apply_band_mode(s_radio.band_mode);
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
     apply_bw(WIFI_IF_STA, s_radio.sta_bw);
     if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, s_radio.ap_bw);
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect
+    // TX power needs a started radio; protocols are re-applied in case the
+    // driver reset them on start.
+    apply_tx_power(s_radio.tx_power_dbm);
+    apply_proto(WIFI_IF_STA, s_radio.sta_proto);
+    if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
 
     // Main loop: connect requests, reconnect with exponential back-off, RSSI refresh.
     uint32_t backoff_s = 1;

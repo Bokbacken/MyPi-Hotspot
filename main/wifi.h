@@ -67,13 +67,27 @@ void wifi_get_sta_extra(wifi_sta_extra_t *out);
 
 // --- Radio settings (stored in NVS, applied at boot) ---
 enum { RADIO_BW_AUTO = 0, RADIO_BW_20 = 1, RADIO_BW_40 = 2, RADIO_BW_80 = 3 };    // == WIFI_BW20/40/80
-enum { RADIO_PROTO_DEFAULT = 0, RADIO_PROTO_N = 1, RADIO_PROTO_AC = 2, RADIO_PROTO_AX = 3 };
+enum { RADIO_BAND_AUTO = 0, RADIO_BAND_2G = 1, RADIO_BAND_5G = 2 };
+
+// Protocol bitmask (same bits as WIFI_PROTOCOL_*); 0 = driver default
+#define RADIO_PROTO_B   0x01
+#define RADIO_PROTO_G   0x02
+#define RADIO_PROTO_N   0x04
+#define RADIO_PROTO_A   0x10
+#define RADIO_PROTO_AC  0x20
+#define RADIO_PROTO_AX  0x40
+#define RADIO_PROTO_ALL 0x77
 
 typedef struct {
-    uint8_t sta_bw;         // RADIO_BW_* (auto = driver default / negotiated)
-    uint8_t ap_bw;          // RADIO_BW_20..80
-    uint8_t sta_proto;      // RADIO_PROTO_*
-    uint8_t ap_proto;       // RADIO_PROTO_*
+    uint8_t sta_bw;                 // RADIO_BW_* (auto = driver default / negotiated)
+    uint8_t ap_bw;                  // RADIO_BW_*
+    uint8_t sta_proto;              // RADIO_PROTO_* bitmask, 0 = driver default
+    uint8_t ap_proto;               // RADIO_PROTO_* bitmask, 0 = driver default
+    uint8_t band_mode;              // RADIO_BAND_*
+    uint8_t tx_power_dbm;           // 0 = driver default, 2..21 dBm
+    uint8_t ap_beacon_interval_tu;  // 0 = default (100 TU), else N x 100 TU (1..10)
+    uint8_t ap_dtim;                // 0 = default (1), else 1..255 (driver caps at 10)
+    uint8_t _pad[8];
 } wifi_radio_cfg_t;
 
 typedef struct {
@@ -82,15 +96,15 @@ typedef struct {
     int sta_channel, ap_channel;
     int sta_bw_mhz, ap_bw_mhz;  // width configured on the C5 for the current band (0 = unknown)
     char sta_proto[16], ap_proto[16];
+    uint8_t sta_proto_actual, ap_proto_actual;  // WIFI_PROTOCOL_* bits for the current band
+    int tx_power_dbm;           // max TX power reported by the driver (0 = unknown)
     int up_second;              // upstream AP secondary channel: 0 none, 1 above, 2 below
     char up_phy[16];            // upstream AP PHY capabilities (from its beacon)
 } wifi_radio_info_t;
 
 const char *wifi_radio_bw_name(uint8_t v);
-const char *wifi_radio_proto_name(uint8_t v);
-/** Parse "auto"/"20"/"40"/"80" resp. "default"/"n"/"ac"/"ax"; -1 if invalid. */
+/** Parse "auto"/"20"/"40"/"80"; -1 if invalid. */
 int wifi_radio_bw_parse(const char *s);
-int wifi_radio_proto_parse(const char *s);
 /** Save radio settings to NVS; they take effect after a reboot. */
 esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c);
 void wifi_get_radio_info(wifi_radio_info_t *out);
