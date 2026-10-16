@@ -104,6 +104,25 @@ copied through a small internal DMA buffer in 40-row bands.
 
 ---
 
+## Flash a prebuilt binary (no ESP-IDF needed)
+
+Every push is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)).
+
+1. Open the repo's **Actions** tab → latest **Build firmware** run → download the
+   `mypi-hotspot-firmware-<sha>` artifact (zip) and unzip it.
+   Tagged versions (`v*`) also attach the files to a GitHub Release.
+2. Connect the board with a USB-C data cable.
+3. In **Chrome or Edge** open <https://espressif.github.io/esptool-js/>, click **Connect**, pick the
+   serial port, add `mypi-hotspot-merged.bin` at address **`0x0`**, and click **Program**.
+4. Press **RESET** on the board. Use the page's **Console** tab (115200 baud) to see the log.
+
+Alternative with Python only: `pip install esptool` then
+`esptool.py --chip esp32p4 -p <PORT> write_flash 0x0 mypi-hotspot-merged.bin`.
+
+If the board will not connect: hold **BOOT**, tap **RESET**, release **BOOT**, then retry.
+
+---
+
 ## Build & flash quick-start
 
 Requires **ESP-IDF v5.5** (tested to build with v5.5.1, target `esp32p4`).
