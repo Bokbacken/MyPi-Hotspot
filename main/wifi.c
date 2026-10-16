@@ -55,6 +55,7 @@ static ap_profile_t s_ap_cur;
 static volatile int s_ap_clients;
 static uint8_t s_ap_channel;
 static void apply_bw20(wifi_interface_t ifx);
+static void apply_protocols(wifi_interface_t ifx);
 
 static bool lock(void) { return xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(LOCK_TIMEOUT_MS)) == pdTRUE; }
 static void unlock(void) { xSemaphoreGiveRecursive(s_lock); }
@@ -458,7 +459,10 @@ esp_err_t wifi_ap_start(int slot)
             s_apsta_ok = true;
         }
     }
-    if (err == ESP_OK && mode != WIFI_MODE_APSTA) apply_bw20(WIFI_IF_AP);
+    if (err == ESP_OK && mode != WIFI_MODE_APSTA) {
+        apply_protocols(WIFI_IF_AP);
+        apply_bw20(WIFI_IF_AP);
+    }
     if (err == ESP_OK) err = ap_configure(slot);
     unlock();
     return err;
@@ -539,6 +543,30 @@ static void apply_bw20(wifi_interface_t ifx)
     }
     if (err != ESP_OK) ESP_LOGW(TAG, "Could not force HT20 on %s - radio keeps its default bandwidth", name);
 #endif
+}
+
+// Advertise 802.11a/n/ac/ax only (no 11b/11g). esp_wifi_set_protocol() returns
+// ESP_ERR_NOT_SUPPORTED in 2.4+5 GHz auto band mode; then esp_wifi_set_protocols()
+// is used (5 GHz A+N+AC+AX, 2.4 GHz N+AX; if the C5 rejects that, 2.4 GHz keeps
+// its default B+G+N+AX).
+static void apply_protocols(wifi_interface_t ifx)
+{
+    const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
+    const uint16_t proto_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX;
+    esp_err_t err = esp_wifi_set_protocol(ifx, (uint8_t)proto_5g);
+    ESP_LOGI(TAG, "esp_wifi_set_protocol(%s, A+N+AC+AX): %s", name, esp_err_to_name(err));
+    if (err != ESP_OK) {
+        wifi_protocols_t p = {.ghz_2g = WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX, .ghz_5g = proto_5g};
+        err = esp_wifi_set_protocols(ifx, &p);
+        ESP_LOGI(TAG, "esp_wifi_set_protocols(%s, 2.4G N+AX / 5G A+N+AC+AX): %s", name, esp_err_to_name(err));
+        if (err != ESP_OK) {
+            p.ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX;
+            err = esp_wifi_set_protocols(ifx, &p);
+            ESP_LOGI(TAG, "esp_wifi_set_protocols(%s, 2.4G B+G+N+AX / 5G A+N+AC+AX): %s", name,
+                     esp_err_to_name(err));
+        }
+    }
+    if (err != ESP_OK) ESP_LOGW(TAG, "Protocol set failed on %s - radio uses default", name);
 }
 
 static inline const char *band_of(int ch) { return ch > 14 ? "5 GHz" : "2.4 GHz"; }
@@ -625,7 +653,10 @@ static void wifi_task(void *arg)
     } else {
         TRY(esp_wifi_set_mode(WIFI_MODE_STA));
     }
-    // Channel width must be set before the radio starts.
+    // Protocols and channel width are set before the radio starts, so the first
+    // STA connect (triggered by STA_START) already uses them.
+    apply_protocols(WIFI_IF_STA);
+    if (s_apsta_ok && want_ap) apply_protocols(WIFI_IF_AP);
     apply_bw20(WIFI_IF_STA);
     if (s_apsta_ok && want_ap) apply_bw20(WIFI_IF_AP);
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect

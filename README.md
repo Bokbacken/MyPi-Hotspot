@@ -411,6 +411,9 @@ While the status screen runs, touch drawing is disabled (touch events still appe
 - **One radio, one channel.** STA and AP share the C5 radio, so the AP must use the STA's channel and
   airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
   When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.
+  Both interfaces advertise 802.11a/n/ac/ax only (no 11b/11g), and HT20 is no longer forced
+  (`MYPI_WIFI_BW_20`, default off), so the C5 can negotiate up to 80 MHz channel width with the
+  upstream AP on 5 GHz.
 - NAPT is enabled per interface with the lwIP call `ip_napt_enable_netif()` (instead of
   `esp_netif_napt_enable()`, which only allows one NAT interface). Wired LAN clients are NATed through the AP
   netif because Ethernet is bridged to it.
