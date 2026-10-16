@@ -127,6 +127,7 @@ static portMUX_TYPE s_fdb_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_bridge_on;
 static uint8_t s_ap_mac[6];
 static volatile uint32_t s_br_drop;
+static volatile uint32_t s_br_inject_drop;   // ETH -> host (lwIP tcpip mbox full)
 
 static inline bool is_mcast(const uint8_t *mac) { return mac[0] & 1; }
 
@@ -238,7 +239,20 @@ static esp_err_t eth_bridge_input(esp_eth_handle_t h, uint8_t *buf, uint32_t len
         }
         if (r != 0) s_br_drop++;
     }
-    if (to_host && net_ap_inject(buf, len) != ESP_OK) s_br_drop++;
+    if (to_host) {
+        // 100 Mbit Ethernet can burst faster than lwIP forwards to the Wi-Fi uplink.
+        // Hold the EMAC rx task briefly instead of dropping at once, so the EMAC DMA
+        // ring absorbs the burst (backpressure) rather than losing TCP segments.
+        esp_err_t r = net_ap_inject(buf, len);
+        for (int i = 0; r != ESP_OK && i < 5; i++) {
+            vTaskDelay(1);
+            r = net_ap_inject(buf, len);
+        }
+        if (r != ESP_OK) {
+            s_br_drop++;
+            s_br_inject_drop++;
+        }
+    }
     free(buf);
     return ESP_OK;
 }
@@ -371,6 +385,7 @@ void eth_get_info(eth_info_t *o)
     }
     o->bridged = s_bridge_on;
     o->bridge_drops = s_br_drop;
+    o->bridge_inject_drops = s_br_inject_drop;
     esp_netif_ip_info_t ip;
     if (s_mode == ETH_MODE_WAN && s_netif && esp_netif_get_ip_info(s_netif, &ip) == ESP_OK) {
         snprintf(o->ip, sizeof(o->ip), IPSTR, IP2STR(&ip.ip));

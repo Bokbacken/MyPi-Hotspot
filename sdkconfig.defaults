@@ -72,6 +72,11 @@ CONFIG_LWIP_DHCPS_MAX_STATION_NUM=24
 # --- Ethernet: on-board IP101 RMII PHY (internal EMAC) ---
 CONFIG_ETH_ENABLED=y
 CONFIG_ETH_USE_ESP32_EMAC=y
+# Deeper EMAC rx ring: one full-size frame per descriptor, 30 frames (was ~6 x 1.5 KB
+# with 20 x 512 B). Absorbs 100 Mbit bursts from LAN clients while the uplink drains.
+CONFIG_ETH_DMA_BUFFER_SIZE=1536
+CONFIG_ETH_DMA_RX_BUFFER_NUM=30
+CONFIG_ETH_DMA_TX_BUFFER_NUM=20
 
 # --- Throughput tuning (lwIP + Wi-Fi remote buffers) ---
 # Allow lwIP / Wi-Fi buffers in PSRAM so the larger windows do not exhaust internal RAM.
@@ -86,3 +91,6 @@ CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=64
 CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=64
 CONFIG_WIFI_RMT_TX_BA_WIN=32
 CONFIG_WIFI_RMT_RX_BA_WIN=32
+# Host-side ESP-Hosted SDIO queues (default 20): more room for uplink bursts.
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=40
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=40

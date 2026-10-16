@@ -88,6 +88,7 @@ typedef struct {
     uint64_t last_rx, last_tx;
     float rx_mbps, tx_mbps;             // Mbit/s over the last 1 s sample
     float rx_mbps_peak, tx_mbps_peak;
+    uint32_t tx_drops;          // orig_linkoutput() != ERR_OK
     bool manual;                // counted by net_stats_add() (no lwIP netif, e.g. bridged ETH)
 } if_slot_t;
 
@@ -137,7 +138,13 @@ static err_t hook_linkoutput(struct netif *n, struct pbuf *p)
     if (tap && s == &s_if[NET_IF_AP] && tap(p, n, false)) {
         return ERR_OK;  // sent over the bridge only (destination is on Ethernet)
     }
-    return s->orig_linkoutput(n, p);
+    err_t err = s->orig_linkoutput(n, p);
+    if (err != ERR_OK) {
+        portENTER_CRITICAL_SAFE(&s_mux);
+        s->tx_drops++;
+        portEXIT_CRITICAL_SAFE(&s_mux);
+    }
+    return err;
 }
 
 static esp_err_t install_hooks_cb(void *ctx)
@@ -220,6 +227,7 @@ void net_stats_get(net_if_id_t id, net_if_stats_t *out)
     out->tx_mbps = s->tx_mbps;
     out->rx_mbps_peak = s->rx_mbps_peak;
     out->tx_mbps_peak = s->tx_mbps_peak;
+    out->tx_drops = s->tx_drops;
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -229,6 +237,7 @@ void net_stats_reset_peaks(void)
     for (int i = 0; i < NET_IF_COUNT; i++) {
         s_if[i].rx_mbps_peak = 0.0f;
         s_if[i].tx_mbps_peak = 0.0f;
+        s_if[i].tx_drops = 0;
     }
     portEXIT_CRITICAL(&s_mux);
 }

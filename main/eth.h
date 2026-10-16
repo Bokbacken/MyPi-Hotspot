@@ -27,6 +27,7 @@ typedef struct {
     char error[64];
     bool bridged;               // LAN mode: bridge to the AP is forwarding
     uint32_t bridge_drops;      // frames dropped by the bridge (queue full etc.)
+    uint32_t bridge_inject_drops;   // subset: ETH -> host (lwIP) drops
 } eth_info_t;
 
 /** LAN mode: start/stop forwarding between Ethernet and the Wi-Fi AP (call on AP start/stop). */

@@ -18,6 +18,7 @@ typedef struct {
     uint32_t rx_pkts, tx_pkts;
     float rx_mbps, tx_mbps;     // Mbit/s over the last 1 s sample
     float rx_mbps_peak, tx_mbps_peak;   // highest 1 s rate since boot / last reset (Mbit/s)
+    uint32_t tx_drops;          // frames the driver refused on transmit (queue full / error)
 } net_if_stats_t;
 
 /** Clear the peak rates of all interfaces. */

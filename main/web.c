@@ -144,12 +144,12 @@ static const char INDEX_HTML[] =
 "row('OTA',s.ota_status)+"
 "row('Debug mode',(s.debug?'ON':'off')+' <button onclick=dbg('+(s.debug?0:1)+')>'+(s.debug?'Turn off':'Turn on')+"
 "'</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>');"
-"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?' - LAN (bridged to AP, '+lanNet(s)+'), no own IP, bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops:(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:''));"
+"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?' - LAN (bridged to AP, '+lanNet(s)+'), no own IP, bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops+' (to host '+s.eth.bridge_inject_drops+')':(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:''));"
 "$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let n=await (await fetch('/api/netstats')).json();"
-"$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX peak','TX peak','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
+"$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX peak','TX peak','RX total MB','TX total MB','RX/TX pkts','TX drops'],1)+n.interfaces.map(i=>tr([i.name,"
 "i.present?mb(i.rx_mbps):'-',i.present?mb(i.tx_mbps):'-',i.present?mb(i.rx_mbps_peak):'-',i.present?mb(i.tx_mbps_peak):'-',"
-"(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
+"(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts,i.tx_drops])).join('');"
 "logRun=n.log_running;$('lb').textContent=logRun?'Stop log':'Start log';"
 "$('lst').textContent=n.log_ever?(logRun?'Logging: ':'Log stopped: ')+n.log_samples+'/'+n.log_max+' samples':'';"
 "let a=await (await fetch('/api/apstatus')).json();"
@@ -817,6 +817,7 @@ static void add_eth_info(cJSON *o)
     cJSON_AddStringToObject(o, "error", e.error);
     cJSON_AddBoolToObject(o, "bridged", e.bridged);
     cJSON_AddNumberToObject(o, "bridge_drops", e.bridge_drops);
+    cJSON_AddNumberToObject(o, "bridge_inject_drops", e.bridge_inject_drops);
 }
 
 static esp_err_t api_eth_get(httpd_req_t *req)
@@ -861,6 +862,7 @@ static esp_err_t api_netstats_get(httpd_req_t *req)
         cJSON_AddNumberToObject(o, "tx_mbps", mbps2(s.tx_mbps));
         cJSON_AddNumberToObject(o, "rx_mbps_peak", mbps2(s.rx_mbps_peak));
         cJSON_AddNumberToObject(o, "tx_mbps_peak", mbps2(s.tx_mbps_peak));
+        cJSON_AddNumberToObject(o, "tx_drops", s.tx_drops);
         cJSON_AddItemToArray(arr, o);
     }
     cJSON_AddBoolToObject(j, "log_running", net_log_is_running());
