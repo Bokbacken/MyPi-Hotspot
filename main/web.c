@@ -220,10 +220,12 @@ static const char UPDATE_HTML[] =
 "<script>function up(){let f=document.getElementById('f').files[0];let s=document.getElementById('s');"
 "if(!f){s.textContent='Choose a file first';return}"
 "let x=new XMLHttpRequest();x.open('POST','/update');x.setRequestHeader('Content-Type','application/octet-stream');"
-"x.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('p').value=e.loaded/e.total*100};"
+"x.upload.onprogress=e=>{if(e.lengthComputable){let q=Math.floor(e.loaded/e.total*100);document.getElementById('p').value=q;"
+"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes)...':'Upload sent, waiting for the device to verify the image...'}};"
+"x.timeout=180000;x.ontimeout=()=>s.textContent='No answer from the device within 3 min. Check /api/log, then power-cycle and retry (or flash via USB).';"
 "x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',15000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
-"s.textContent='Uploading '+f.size+' bytes...';x.send(f)}</script></body></html>";
+"s.textContent='Uploading 0% ('+f.size+' bytes)...';x.send(f)}</script></body></html>";
 
 static const char C5UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -248,7 +250,9 @@ static const char C5UPDATE_HTML[] =
 "function up(){let f=$('f').files[0];let s=$('s');if(!f){s.textContent='Choose a file first';return}"
 "if(!confirm('Flash '+f.name+' to the C5 co-processor?'))return;"
 "let x=new XMLHttpRequest();x.open('POST','/api/c5update');x.setRequestHeader('Content-Type','application/octet-stream');"
-"x.upload.onprogress=e=>{if(e.lengthComputable)$('p').value=e.loaded/e.total*100};"
+"x.upload.onprogress=e=>{if(e.lengthComputable){let q=Math.floor(e.loaded/e.total*100);$('p').value=q;"
+"s.textContent=q<100?'Uploading '+q+'% ('+e.loaded+' / '+e.total+' bytes, slow: ~1-3 min)...':'Upload sent, waiting for the C5 to verify the image...'}};"
+"x.timeout=300000;x.ontimeout=()=>s.textContent='No answer from the device within 5 min. Check /api/log, then power-cycle and retry.';"
 "x.onload=()=>{s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
 "s.textContent='Uploading '+f.size+' bytes (slow: ~1-3 min)...';x.send(f)}</script></body></html>";
@@ -488,6 +492,9 @@ static void reboot_task(void *arg)
     esp_restart();
 }
 
+#define UPLOAD_RECV_TIMEOUT_S 15    // must match cfg.recv_wait_timeout
+#define UPLOAD_IDLE_MAX       3     // give up after 3 consecutive receive timeouts (45 s without data)
+
 static esp_err_t ota_fail(httpd_req_t *req, esp_ota_handle_t h, const char *status, const char *msg)
 {
     if (h) esp_ota_abort(h);
@@ -525,9 +532,17 @@ static esp_err_t update_post(httpd_req_t *req)
     int last_pct = -1;
     esp_err_t err;
 
+    int idle = 0;
     while (received < req->content_len) {
         int r = httpd_req_recv(req, buf, bufsize);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "OTA: no data for %d s (%u / %u bytes)", (idle + 1) * UPLOAD_RECV_TIMEOUT_S,
+                     (unsigned)received, (unsigned)req->content_len);
+            if (++idle < UPLOAD_IDLE_MAX) continue;
+            free(buf);
+            return ota_fail(req, h, "408 Request Timeout", "Upload stalled (no data received for 45 s)");
+        }
+        idle = 0;
         if (r <= 0) {
             free(buf);
             return ota_fail(req, h, "400 Bad Request", "Connection closed during upload");
@@ -655,9 +670,17 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
     esp_err_t err;
     char newver[32] = "?";
 
+    int idle = 0;
     while (received < req->content_len) {
         int r = httpd_req_recv(req, (char *)buf, bufsize);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "C5 OTA: no data for %d s (%u / %u bytes)", (idle + 1) * UPLOAD_RECV_TIMEOUT_S,
+                     (unsigned)received, (unsigned)req->content_len);
+            if (++idle < UPLOAD_IDLE_MAX) continue;
+            free(buf);
+            return c5_fail(req, true, begun, "408 Request Timeout", "Upload stalled (no data received for 45 s)");
+        }
+        idle = 0;
         if (r <= 0) {
             free(buf);
             return c5_fail(req, true, begun, "400 Bad Request", "Connection closed during upload");
@@ -1275,7 +1298,7 @@ esp_err_t web_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 10240;
-    cfg.recv_wait_timeout = 15;
+    cfg.recv_wait_timeout = UPLOAD_RECV_TIMEOUT_S;
     cfg.lru_purge_enable = true;
     cfg.max_uri_handlers = 48;
     esp_err_t err = httpd_start(&s_server, &cfg);
