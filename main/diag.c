@@ -194,7 +194,7 @@ static volatile bool s_debug;
 
 // App log tags switched between INFO and DEBUG. (main/CMakeLists.txt compiles this
 // component with LOG_LOCAL_LEVEL=DEBUG so the ESP_LOGD calls exist in the binary.)
-static const char *const DEBUG_TAGS[] = { "main", "display", "touch", "pintest", "wifi", "web", "diag" };
+static const char *const DEBUG_TAGS[] = { "main", "display", "touch", "pintest", "wifi", "web", "diag", "net", "eth" };
 
 static void apply_debug_levels(void)
 {

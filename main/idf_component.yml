@@ -14,3 +14,5 @@ dependencies:
     version: "^1.8"
   espressif/cjson:
     version: "^1.7"
+  espressif/iperf:
+    version: "^1.0"

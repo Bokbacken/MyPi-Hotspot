@@ -3,8 +3,9 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Current version: **0.4.0** — the display/touch **hello world** plus Wi-Fi, a web status page and
-over-the-air (OTA) updates. Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
+Current version: **0.5.0** — the display/touch **hello world**, Wi-Fi uplink + own access point
+(APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats and an iperf throughput test,
+a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
@@ -112,7 +113,7 @@ MyPi-Hotspot/
 └── main/
     ├── CMakeLists.txt
     ├── Kconfig.projbuild Project options (menuconfig → "MyPi-Hotspot")
-    ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns
+    ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns, iperf
     ├── main.c            app_main: init, touch loop, tap/drag logic, OTA rollback confirm
     ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
     ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
@@ -120,8 +121,11 @@ MyPi-Hotspot/
     ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
     ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
     ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
-    ├── wifi.h/.c         Wi-Fi STA over ESP-Hosted, reconnect backoff, RSSI, mDNS
-    └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload
+    ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
+    ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
+    ├── net.h/.c          NAPT, DHCP server setup, per-interface traffic counters, iperf server
+    ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (DHCP server + NAT) or WAN (uplink)
+    └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload, network API
 ```
 
 The framebuffer (150 KB) lives in PSRAM. Only the changed ("dirty") rectangle is sent to the panel,
@@ -171,7 +175,10 @@ Wi-Fi credentials, hostname, LCD SPI clock / color options and diagnostics are s
 
 | Option | Default | Notes |
 |---|---|---|
-| `CONFIG_MYPI_WIFI_SSID` / `CONFIG_MYPI_WIFI_PASSWORD` | `TOFTA` / `bokbacken` | Station mode |
+| `CONFIG_MYPI_WIFI_SSID` / `CONFIG_MYPI_WIFI_PASSWORD` | `TOFTA` / `bokbacken` | Station fallback when no STA profile is saved |
+| `CONFIG_MYPI_AP_SSID` / `CONFIG_MYPI_AP_PASSWORD` | `MyPi-Hotspot` / `mypi1234` | Default access point (192.168.4.1) |
+| `CONFIG_MYPI_AP_MAX_CONN` / `CONFIG_MYPI_AP_AUTOSTART` | 10 / y | AP client limit; start the AP at boot |
+| `CONFIG_MYPI_ETH_ENABLE` / `_PHY_ADDR` / `_PHY_RST_GPIO` | y / -1 / 51 | Ethernet (menu **Ethernet**) |
 | `CONFIG_MYPI_WIFI_BACKOFF_MAX_S` | 60 | Reconnect backoff 1 s → max |
 | `CONFIG_MYPI_HOSTNAME` | `mypi-hotspot` | DHCP + mDNS name (`mypi-hotspot.local`) |
 | `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ` | 40 | ~30 ms per full frame; lower to 20 if you see noise (ST7789 spec max ~62) |
@@ -218,7 +225,7 @@ pin lists and touch events only appear in debug mode.
 
 ```
 I (...) diag: ==================================================
-I (...) diag:  MyPi-Hotspot firmware 0.4.0
+I (...) diag:  MyPi-Hotspot firmware 0.5.0
 I (...) diag:  Chip: esp32p4, 2 core(s), revision v3.1
 I (...) diag:  Reset reason: power-on (1)
 I (...) diag:  Running partition: ota_0 @ 0x020000 (6144 KB)
@@ -260,6 +267,7 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | `/api/status` | Same data as JSON |
 | `/api/log` | The RAM log buffer as plain text (boot log included, oldest first) |
 | `/update` | OTA upload form |
+| Network API | STA/AP profiles, scan, AP clients, Ethernet mode, traffic stats, iperf — see [Network API](#network-api) |
 | `/api/debug?on=1\|0` (POST) | Switch debug mode on/off (saved in NVS) |
 | `/pins` | Wiring diagnostics: boot-time pin check (debug mode only) (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
 
@@ -281,6 +289,106 @@ the host component (v2.x, built with v2.13 here). The log prints both versions a
 on mismatch. If Wi-Fi init fails or the version cannot be read, update the C5 firmware following
 the [ESP-Hosted-MCU](https://github.com/espressif/esp-hosted-mcu) instructions. The display and touch
 keep working without Wi-Fi.
+
+## Wi-Fi, AP & Ethernet
+
+Since v0.5.0 the device is a small router: the ESP32-C5 runs **APSTA** (station uplink + our own
+access point on the same radio) and the P4 routes between the interfaces with lwIP **NAPT**.
+
+```
+            internet
+               │
+   ┌───────────┴───────────┐
+   │ uplink: Wi-Fi STA      │  (or Ethernet in WAN mode — preferred while it has an IP)
+   │                        │
+   │  ESP32-P4 lwIP + NAPT  │
+   │                        │
+   │ AP 192.168.4.1/24      │  Wi-Fi clients (DHCP, NAT to the uplink)
+   │ ETH-LAN 192.168.5.1/24 │  wired client (DHCP, NAT to the uplink)
+   └────────────────────────┘
+```
+
+### Defaults and subnets
+
+| Interface | Default | Notes |
+|---|---|---|
+| STA (uplink) | Saved STA profiles (10 slots); fallback `CONFIG_MYPI_WIFI_SSID` / `_PASSWORD` (`TOFTA` / `bokbacken`) | Auto-connect picks the visible saved network with the best RSSI; DHCP or static IP per profile |
+| AP | `MyPi-Hotspot` / `mypi1234`, `192.168.4.1/24`, NAT on | Started at boot (`CONFIG_MYPI_AP_AUTOSTART`) or with the AP profile flagged *start at boot* |
+| AP profile subnets | `192.168.4.0/24`, `192.168.42.0/24`, `10.11.0.0/24`, `172.16.4.0/24` | AP is always `.1/24` with a DHCP server; DNS `8.8.8.8` is offered to clients |
+| Ethernet LAN (default) | `192.168.5.1/24`, DHCP server, NAT to the Wi-Fi uplink | Connect a PC/switch to the RJ45 port |
+| Ethernet WAN | DHCP client | Becomes the default route (uplink) while it has an IP; AP clients are NATed out over Ethernet |
+
+| Limit | Value |
+|---|---|
+| STA profiles / AP profiles | 10 / 4 (NVS namespaces `staprof` / `approf`) |
+| AP clients | max 10 (`CONFIG_MYPI_AP_MAX_CONN`, ESP-Hosted limit) |
+| DHCP leases per server | 24 (`CONFIG_LWIP_DHCPS_MAX_STATION_NUM`) |
+| Password | empty (open) or 8–64 characters (WPA2-PSK) |
+| Ethernet mode change | stored in NVS (`mypi`/`ethmode`), applied **after a reboot** |
+
+Profiles are edited on the web page. Passwords are never sent back by the API (`has_pass` only); saving
+with an empty password field keeps the stored password for the same SSID, tick *open* to remove it.
+
+Kconfig (menuconfig → MyPi-Hotspot): `CONFIG_MYPI_AP_SSID`, `CONFIG_MYPI_AP_PASSWORD`,
+`CONFIG_MYPI_AP_MAX_CONN`, `CONFIG_MYPI_AP_AUTOSTART`, and under **Ethernet** `CONFIG_MYPI_ETH_ENABLE`,
+`CONFIG_MYPI_ETH_PHY_ADDR` (-1 = auto-detect), `CONFIG_MYPI_ETH_PHY_RST_GPIO` (51 on the NANO).
+
+### Network API
+
+All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or HTTP 400 `{"ok":false,"error":...}`.
+
+| Endpoint | Body / response |
+|---|---|
+| `GET /api/profiles` | STA slots `{slot,valid,ssid,has_pass,dhcp,ip,mask,gw,dns}`, `active` slot |
+| `POST /api/profile/save` | `{slot,ssid,pass,clear_pass,dhcp,ip,mask,gw,dns}` |
+| `POST /api/profile/del` | `{slot}` |
+| `POST /api/connect` | `{slot}` (`-1` = automatic, best RSSI) |
+| `POST /api/disconnect` | stays disconnected until the next connect |
+| `GET /api/scan` | `{networks:[{ssid,rssi,channel,auth,profile}]}` (blocks 2–4 s) |
+| `GET /api/approfiles` | AP slots `{slot,valid,ssid,has_pass,subnet,nat,on_boot}` + `subnets` |
+| `POST /api/approfile/save` | `{slot,ssid,pass,clear_pass,subnet,nat,on_boot}` |
+| `POST /api/approfile/del` | `{slot}` |
+| `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
+| `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
+| `GET /api/eth` / `POST /api/eth` | link, speed, IP, active/saved mode / `{mode:"lan"\|"wan"}` |
+| `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_bps`/`tx_bps` (bytes/s, 1 s window) |
+| `POST /api/iperf/start` / `stop`, `GET /api/iperf` | `{window_s}` / iperf server state and results |
+
+`/api/status` now also contains `uplink` (`sta`, `eth` or `none`), `sta_profile`, an `ap` object and an `eth` object.
+
+### Testing throughput
+
+**1. Device ↔ client (iperf).** On the web page, under *Throughput test*, click **Arm** (default
+window 300 s). The device runs an iperf2-compatible **TCP server on port 5001** and re-listens after each
+test until the window expires. From a PC (iperf **2**, not iperf3):
+
+```bash
+iperf -c 192.168.4.1 -t 10 -i 1     # PC on the AP
+iperf -c 192.168.5.1 -t 10 -i 1     # PC on Ethernet LAN
+iperf -c <STA IP> -t 10 -i 1        # PC on the upstream network (tests the STA link)
+```
+
+The page shows the live and average Mbit/s; the *Network traffic* table shows per-interface rates.
+This measures the radio/cable link to the P4, not the router path.
+
+**2. NAT path (the real hotspot use case).** Connect a phone or laptop to the AP (or to Ethernet LAN)
+and run an internet speed test (e.g. fast.com / speedtest.net). Watch *Network traffic*: the AP RX/TX
+should mirror the STA TX/RX. The result is limited by the slowest of: uplink signal, shared radio airtime
+(see below), SDIO to the C5, and NAPT forwarding on the P4.
+
+### Known limitations (read this)
+
+- **Not verified on hardware yet.** APSTA on the ESP32-C5 through ESP-Hosted (esp_wifi_remote) builds and
+  follows the documented APIs, but has not been tested on the board. If the C5 firmware rejects APSTA,
+  the device falls back to STA only and the page shows *AP unavailable (APSTA rejected)*.
+- **One radio, one channel.** STA and AP share the C5 radio, so the AP must use the STA's channel and
+  airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
+  When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.
+- NAPT is enabled per interface with the lwIP call `ip_napt_enable_netif()` (instead of
+  `esp_netif_napt_enable()`, which only allows one NAT interface), so AP and Ethernet LAN can be NATed together.
+- Ethernet uses the internal EMAC + generic PHY driver (IP101 on the NANO); mode changes need a reboot.
+- 802.11 throughput tuning (larger lwIP/Wi-Fi buffers, BA windows) is in `sdkconfig.defaults`;
+  values on the C5 side are fixed by its ESP-Hosted slave firmware.
 
 ---
 

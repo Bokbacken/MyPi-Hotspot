@@ -14,11 +14,15 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "eth.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "logbuf.h"
+#include "net.h"
 #include "pintest.h"
+#include "profiles.h"
 #include "sdkconfig.h"
+#include "wifi.h"
 
 static const char *TAG = "web";
 
@@ -33,39 +37,124 @@ static const char INDEX_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot</title><style>"
 "body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
-"h1{font-size:1.3em}a{color:#6cf}table{border-collapse:collapse}"
-"td{padding:2px 10px 2px 0;vertical-align:top}td:first-child{color:#999}"
+"h1{font-size:1.3em}h2{font-size:1.1em;margin-top:1.4em;border-top:1px solid #333;padding-top:.6em}"
+"a{color:#6cf}table{border-collapse:collapse}"
+"td,th{padding:2px 10px 2px 0;vertical-align:top;text-align:left}td:first-child{color:#999}th{color:#999;font-weight:normal}"
 "pre{background:#000;color:#9f9;padding:8px;height:45vh;overflow:auto;font-size:12px;white-space:pre-wrap}"
+"input,select,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}input{width:9em}"
+"fieldset{border:1px solid #444;margin:.5em 0}#msg{color:#fc6}"
 ".bad{color:#f66}.ok{color:#6f6}</style></head><body>"
 "<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/pins'>Wiring diagnostics</a> | "
 "<a href='/api/status'>/api/status</a> | <a href='/api/log'>/api/log</a></p>"
-"<table id='t'></table><h2 style='font-size:1.1em'>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
-"<h2 style='font-size:1.1em'>Log <label style='font-size:.8em'><input type='checkbox' id='follow' checked> follow</label></h2>"
+"<p id='msg'></p>"
+"<table id='t'></table>"
+"<h2>Network traffic</h2><table id='ns'></table>"
+"<h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
+"<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
+"<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
+"<fieldset><legend>Edit STA profile</legend>Slot <select id='ss'></select> SSID <input id='sn'> "
+"Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
+"<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
+"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
+"<h2>Access point (AP profiles)</h2><p id='aps'></p>"
+"<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
+"<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
+"<fieldset><legend>Edit AP profile</legend>Slot <select id='as'></select> SSID <input id='an'> "
+"Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
+"Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
+"<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
+"<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (192.168.5.1/24, DHCP server, NAT to Wi-Fi)</option>"
+"<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
+"<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
+"<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
+"<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
+"<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
+"NAT path: put a phone/PC on the AP and run an internet speed test.</small></p>"
+"<h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
+"<h2>Log <label style='font-size:.8em'><input type='checkbox' id='follow' style='width:auto' checked> follow</label></h2>"
 "<pre id='log'></pre><script>"
+"function $(i){return document.getElementById(i)}"
+"function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
 "function fmtUp(s){let h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h+'h '+m+'m '+(s%60)+'s'}"
 "function row(k,v,c){return '<tr><td>'+k+'</td><td'+(c?' class='+c:'')+'>'+v+'</td></tr>'}"
+"function tr(a,h){return '<tr>'+a.map(x=>(h?'<th>':'<td>')+x+(h?'</th>':'</td>')).join('')+'</tr>'}"
+"function mb(b){return (b*8/1e6).toFixed(2)}"
+"async function post(u,b){try{let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});"
+"let j=await r.json();$('msg').textContent=u+': '+(j.ok?'OK':'ERROR')+(j.msg?' - '+j.msg:'')+(j.error?' - '+j.error:'');return j.ok}"
+"catch(e){$('msg').textContent=u+': '+e;return false}}"
+"let SP=[],AP=[];"
+"async function ld(){try{"
+"let p=await (await fetch('/api/profiles')).json();SP=p.profiles;"
+"$('sp').innerHTML=tr(['Slot','SSID','IP','Pass',''],1)+SP.filter(x=>x.valid).map(x=>tr([x.slot+(x.slot==p.active?' *':''),esc(x.ssid),"
+"x.dhcp?'DHCP':esc(x.ip),x.has_pass?'yes':'open',"
+"'<button onclick=edS('+x.slot+')>Edit</button><button onclick=conn('+x.slot+')>Connect</button><button onclick=delS('+x.slot+')>Delete</button>'])).join('');"
+"let a=await (await fetch('/api/approfiles')).json();AP=a.profiles;"
+"if(!$('asub').options.length)$('asub').innerHTML=a.subnets.map((s,i)=>'<option value='+i+'>'+s+'</option>').join('');"
+"$('ap').innerHTML=tr(['Slot','SSID','Subnet','Pass','NAT','Boot',''],1)+AP.filter(x=>x.valid).map(x=>tr([x.slot,esc(x.ssid),a.subnets[x.subnet],"
+"x.has_pass?'WPA2':'open',x.nat?'yes':'no',x.on_boot?'yes':'',"
+"'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
+"let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
+"}catch(e){$('msg').textContent='load failed: '+e}}"
+"function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value='';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
+"$('sip').value=x.ip;$('smk').value=x.mask||'255.255.255.0';$('sgw').value=x.gw;$('sdn').value=x.dns}"
+"function edA(i){let x=AP[i];$('as').value=i;$('an').value=x.ssid;$('apw').value='';$('aclr').checked=!x.has_pass;$('asub').value=x.subnet;"
+"$('anat').checked=x.nat;$('aboot').checked=x.on_boot}"
+"async function saveSta(){await post('/api/profile/save',{slot:+$('ss').value,ssid:$('sn').value,pass:$('spw').value,clear_pass:$('sclr').checked,"
+"dhcp:$('sd').checked,ip:$('sip').value,mask:$('smk').value,gw:$('sgw').value,dns:$('sdn').value});ld()}"
+"async function saveAp(){await post('/api/approfile/save',{slot:+$('as').value,ssid:$('an').value,pass:$('apw').value,clear_pass:$('aclr').checked,"
+"subnet:+$('asub').value,nat:$('anat').checked,on_boot:$('aboot').checked});ld()}"
+"async function delS(i){if(confirm('Delete STA profile '+i+'?')){await post('/api/profile/del',{slot:i});ld()}}"
+"async function delA(i){if(confirm('Delete AP profile '+i+'?')){await post('/api/approfile/del',{slot:i});ld()}}"
+"async function conn(i){await post('/api/connect',{slot:i});ld()}"
+"async function disc(){await post('/api/disconnect');ld()}"
+"async function apStart(i){await post('/api/ap/start',{slot:i})}"
+"async function apStop(){await post('/api/ap/stop')}"
+"async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
+"async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
+"async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
+"async function ipStop(){await post('/api/iperf/stop')}"
+"async function scan(){$('sc').innerHTML='<tr><td>scanning...</td></tr>';try{let s=await (await fetch('/api/scan')).json();"
+"$('sc').innerHTML=tr(['SSID','RSSI','Ch','Auth','Saved'],1)+s.networks.map(n=>tr([esc(n.ssid),n.rssi,n.channel,n.auth,"
+"n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',e,'bad')}}"
 "async function tick(){try{"
 "let s=await (await fetch('/api/status')).json();"
-"document.getElementById('t').innerHTML="
+"$('t').innerHTML="
 "row('Firmware',s.firmware)+row('ESP-IDF',s.idf)+row('Chip',s.chip)+row('Reset reason',s.reset_reason)+"
 "row('Uptime',fmtUp(s.uptime_s))+row('Partition',s.partition)+"
 "row('Heap free',(s.heap_free/1024).toFixed(1)+' KB (min '+(s.heap_min/1024).toFixed(1)+' KB)')+"
 "row('PSRAM free',(s.psram_free/1024).toFixed(0)+' KB')+"
-"row('Wi-Fi',s.wifi_state+' (SSID '+s.ssid+', retries '+s.wifi_retries+')',s.wifi_state=='connected'?'ok':'bad')+"
-"row('IP',s.ip)+row('RSSI',s.rssi+' dBm')+row('ESP-Hosted',s.hosted)+"
+"row('Uplink',s.uplink,s.uplink=='none'?'bad':'ok')+"
+"row('Wi-Fi STA',s.wifi_state+' (SSID '+esc(s.ssid)+', profile '+s.sta_profile+', retries '+s.wifi_retries+')',s.wifi_state=='connected'?'ok':'bad')+"
+"row('STA IP',s.ip)+row('RSSI',s.rssi+' dBm')+"
+"row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', ch '+s.ap.channel+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
+"(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
+"row('Ethernet',s.eth.initialized?s.eth.mode+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down')+(s.eth.ip?', IP '+s.eth.ip:''):"
+"'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
+"row('ESP-Hosted',s.hosted)+"
 "row('Display',s.display_status,s.display_status.startsWith('ok')?'ok':'bad')+"
 "row('SPI clock',(s.spi_clock_hz/1e6)+' MHz')+row('LCD ID read',s.lcd_id)+"
 "row('Frames flushed',s.frames_flushed+' (errors '+s.flush_errors+')')+"
 "row('Touch',s.touch_status,s.touch_status.startsWith('ok')?'ok':'bad')+row('Touch events',s.touch_events)+"
 "row('OTA',s.ota_status)+"
-"row('Debug mode',(s.debug?'ON':'off')+\" <button onclick='dbg(\"+(s.debug?0:1)+\")'>\"+(s.debug?'Turn off':'Turn on')+"
-"\"</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>\");"
-"document.getElementById('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
-"let l=await (await fetch('/api/log')).text();let p=document.getElementById('log');p.textContent=l;"
-"if(document.getElementById('follow').checked)p.scrollTop=p.scrollHeight;"
-"}catch(e){document.getElementById('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
+"row('Debug mode',(s.debug?'ON':'off')+' <button onclick=dbg('+(s.debug?0:1)+')>'+(s.debug?'Turn off':'Turn on')+"
+"'</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>');"
+"$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.gw?', GW '+s.eth.gw:'');"
+"$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
+"let n=await (await fetch('/api/netstats')).json();"
+"$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
+"i.present?mb(i.rx_bps):'-',i.present?mb(i.tx_bps):'-',(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
+"let a=await (await fetch('/api/apstatus')).json();"
+"$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', channel '+a.channel+' (follows the STA channel)':'AP stopped';"
+"$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
+"let p=await (await fetch('/api/iperf')).json();"
+"$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
+"if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
+"let l=await (await fetch('/api/log')).text();let q=$('log');q.textContent=l;"
+"if($('follow').checked)q.scrollTop=q.scrollHeight;"
+"}catch(e){$('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
 "function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
-"tick();setInterval(tick,2000);</script></body></html>";
+"for(let i=0;i<10;i++)$('ss').innerHTML+='<option>'+i+'</option>';for(let i=0;i<4;i++)$('as').innerHTML+='<option>'+i+'</option>';"
+"ld();tick();setInterval(tick,2000);</script></body></html>";
 
 static const char UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -157,6 +246,8 @@ static esp_err_t api_pin_get(httpd_req_t *req)
 }
 
 static void reboot_task(void *arg);
+static void add_ap_info(cJSON *o, const wifi_ap_info_t *a);
+static void add_eth_info(cJSON *o);
 
 // POST /api/debug?on=1|0 - switch debug mode (saved in NVS, survives reboot).
 static esp_err_t api_debug_post(httpd_req_t *req)
@@ -237,6 +328,16 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "ota_status", st->ota_status);
     cJSON_AddBoolToObject(j, "debug", diag_debug_enabled());
     free(st);
+
+    wifi_sta_extra_t ex;
+    wifi_get_sta_extra(&ex);
+    cJSON_AddStringToObject(j, "uplink", ex.uplink);
+    cJSON_AddNumberToObject(j, "sta_profile", ex.sta_profile);
+    cJSON_AddBoolToObject(j, "sta_manual_off", ex.sta_manual_off);
+    wifi_ap_info_t ap;
+    wifi_get_ap_info(&ap);
+    add_ap_info(cJSON_AddObjectToObject(j, "ap"), &ap);
+    add_eth_info(cJSON_AddObjectToObject(j, "eth"));
 
     char *out = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -367,13 +468,419 @@ static esp_err_t update_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ---------------------------------------------------------------------------
+// JSON helpers and network API (v0.5.0)
+// ---------------------------------------------------------------------------
+
+static esp_err_t send_json(httpd_req_t *req, cJSON *j)
+{
+    char *out = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+    if (!out) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+    free(out);
+    return err;
+}
+
+/** {"ok":true,"msg":...} or 400 {"ok":false,"error":...}. */
+static esp_err_t send_result(httpd_req_t *req, esp_err_t res, const char *msg, const char *errhint)
+{
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", res == ESP_OK);
+    if (res == ESP_OK) {
+        if (msg) cJSON_AddStringToObject(j, "msg", msg);
+    } else {
+        char e[160];
+        snprintf(e, sizeof(e), "%s%s%s", esp_err_to_name(res), errhint ? ": " : "", errhint ? errhint : "");
+        cJSON_AddStringToObject(j, "error", e);
+        httpd_resp_set_status(req, "400 Bad Request");
+    }
+    return send_json(req, j);
+}
+
+/** Read a small JSON request body (empty body = empty object). NULL on error. */
+static cJSON *read_json(httpd_req_t *req)
+{
+    if (req->content_len == 0) return cJSON_CreateObject();
+    if (req->content_len > 1024) return NULL;
+    char *buf = malloc(req->content_len + 1);
+    if (!buf) return NULL;
+    size_t got = 0;
+    while (got < req->content_len) {
+        int r = httpd_req_recv(req, buf + got, req->content_len - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            free(buf);
+            return NULL;
+        }
+        got += r;
+    }
+    buf[got] = 0;
+    cJSON *j = cJSON_Parse(buf);
+    free(buf);
+    return j;
+}
+
+static int jint(const cJSON *j, const char *k, int def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, k);
+    if (cJSON_IsNumber(v)) return v->valueint;
+    if (cJSON_IsString(v) && v->valuestring[0]) return atoi(v->valuestring);
+    return def;
+}
+
+static bool jbool(const cJSON *j, const char *k, bool def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, k);
+    if (cJSON_IsBool(v)) return cJSON_IsTrue(v);
+    if (cJSON_IsNumber(v)) return v->valueint != 0;
+    return def;
+}
+
+static const char *jstr(const cJSON *j, const char *k)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, k);
+    return (cJSON_IsString(v) && v->valuestring) ? v->valuestring : "";
+}
+
+#define READ_BODY_OR_400(var)                                                   \
+    cJSON *var = read_json(req);                                                \
+    if (!var) return send_result(req, ESP_ERR_INVALID_ARG, NULL, "body must be JSON (max 1 KB)")
+
+static void mac_str(const uint8_t m[6], char out[18])
+{
+    snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+static void subnet_str(int idx, char *out, size_t n)
+{
+    if (idx < 0 || idx >= AP_SUBNET_COUNT) idx = 0;
+    snprintf(out, n, "%u.%u.%u.0/24", AP_SUBNET_BASE[idx][0], AP_SUBNET_BASE[idx][1], AP_SUBNET_BASE[idx][2]);
+}
+
+// --- STA profiles ---
+
+// GET /api/profiles - passwords are never returned, only has_pass.
+static esp_err_t api_profiles_get(httpd_req_t *req)
+{
+    wifi_sta_extra_t ex;
+    wifi_get_sta_extra(&ex);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddNumberToObject(j, "active", ex.sta_profile);
+    cJSON_AddBoolToObject(j, "manual_off", ex.sta_manual_off);
+    cJSON *arr = cJSON_AddArrayToObject(j, "profiles");
+    for (int i = 0; i < STA_PROFILE_MAX; i++) {
+        sta_profile_t p;
+        sta_profile_get(i, &p);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "slot", i);
+        cJSON_AddBoolToObject(o, "valid", p.valid);
+        cJSON_AddStringToObject(o, "ssid", p.valid ? p.ssid : "");
+        cJSON_AddBoolToObject(o, "has_pass", p.valid && p.pass[0]);
+        cJSON_AddBoolToObject(o, "dhcp", !p.valid || p.dhcp);
+        cJSON_AddStringToObject(o, "ip", p.valid ? p.ip : "");
+        cJSON_AddStringToObject(o, "mask", p.valid ? p.mask : "");
+        cJSON_AddStringToObject(o, "gw", p.valid ? p.gw : "");
+        cJSON_AddStringToObject(o, "dns", p.valid ? p.dns : "");
+        cJSON_AddItemToArray(arr, o);
+    }
+    return send_json(req, j);
+}
+
+// POST /api/profile/save {slot,ssid,pass,clear_pass,dhcp,ip,mask,gw,dns}
+// An empty pass keeps the stored password of the same SSID unless clear_pass is set.
+static esp_err_t api_profile_save(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    sta_profile_t old, p = { 0 };
+    if (!sta_profile_get(slot, &old)) {
+        cJSON_Delete(j);
+        return send_result(req, ESP_ERR_INVALID_ARG, NULL, "slot must be 0-9");
+    }
+    strlcpy(p.ssid, jstr(j, "ssid"), sizeof(p.ssid));
+    const char *pw = jstr(j, "pass");
+    if (pw[0]) {
+        strlcpy(p.pass, pw, sizeof(p.pass));
+    } else if (!jbool(j, "clear_pass", false) && old.valid && strcmp(old.ssid, p.ssid) == 0) {
+        strlcpy(p.pass, old.pass, sizeof(p.pass));
+    }
+    p.dhcp = jbool(j, "dhcp", true);
+    strlcpy(p.ip, jstr(j, "ip"), sizeof(p.ip));
+    strlcpy(p.mask, jstr(j, "mask"), sizeof(p.mask));
+    strlcpy(p.gw, jstr(j, "gw"), sizeof(p.gw));
+    strlcpy(p.dns, jstr(j, "dns"), sizeof(p.dns));
+    p.valid = true;
+    cJSON_Delete(j);
+    return send_result(req, sta_profile_save(slot, &p), "saved",
+                       "SSID required, password empty or >= 8 chars, static IP needs valid ip/mask/gw");
+}
+
+static esp_err_t api_profile_del(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    cJSON_Delete(j);
+    return send_result(req, sta_profile_delete(slot), "deleted", "slot must be 0-9");
+}
+
+// POST /api/connect {slot} (-1 = automatic, best RSSI)
+static esp_err_t api_connect_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    cJSON_Delete(j);
+    return send_result(req, wifi_connect_profile(slot), "connecting", "invalid or empty profile slot");
+}
+
+static esp_err_t api_disconnect_post(httpd_req_t *req)
+{
+    return send_result(req, wifi_disconnect(), "disconnected (stays off until connect)", NULL);
+}
+
+// GET /api/scan - blocking 2-4 s
+static esp_err_t api_scan_get(httpd_req_t *req)
+{
+    const int max = 32;
+    wifi_scan_entry_t *e = calloc(max, sizeof(*e));
+    if (!e) return httpd_resp_send_500(req);
+    int n = wifi_scan(e, max);
+    if (n < 0) {
+        free(e);
+        return send_result(req, ESP_FAIL, NULL, "scan failed (Wi-Fi not started?)");
+    }
+    cJSON *j = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(j, "networks");
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "ssid", e[i].ssid);
+        cJSON_AddNumberToObject(o, "rssi", e[i].rssi);
+        cJSON_AddNumberToObject(o, "channel", e[i].channel);
+        cJSON_AddStringToObject(o, "auth", e[i].auth == 0 ? "open" : "secured");
+        cJSON_AddNumberToObject(o, "profile", e[i].profile);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(e);
+    return send_json(req, j);
+}
+
+// --- AP profiles ---
+
+static esp_err_t api_approfiles_get(httpd_req_t *req)
+{
+    cJSON *j = cJSON_CreateObject();
+    cJSON *subs = cJSON_AddArrayToObject(j, "subnets");
+    char s[24];
+    for (int i = 0; i < AP_SUBNET_COUNT; i++) {
+        subnet_str(i, s, sizeof(s));
+        cJSON_AddItemToArray(subs, cJSON_CreateString(s));
+    }
+    cJSON *arr = cJSON_AddArrayToObject(j, "profiles");
+    for (int i = 0; i < AP_PROFILE_MAX; i++) {
+        ap_profile_t p;
+        ap_profile_get(i, &p);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "slot", i);
+        cJSON_AddBoolToObject(o, "valid", p.valid);
+        cJSON_AddStringToObject(o, "ssid", p.valid ? p.ssid : "");
+        cJSON_AddBoolToObject(o, "has_pass", p.valid && p.pass[0]);
+        cJSON_AddNumberToObject(o, "subnet", p.valid ? p.subnet : 0);
+        cJSON_AddBoolToObject(o, "nat", !p.valid || p.nat);
+        cJSON_AddBoolToObject(o, "on_boot", p.valid && p.on_boot);
+        cJSON_AddItemToArray(arr, o);
+    }
+    return send_json(req, j);
+}
+
+// POST /api/approfile/save {slot,ssid,pass,clear_pass,subnet,nat,on_boot}
+static esp_err_t api_approfile_save(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    ap_profile_t old, p = { 0 };
+    if (!ap_profile_get(slot, &old)) {
+        cJSON_Delete(j);
+        return send_result(req, ESP_ERR_INVALID_ARG, NULL, "slot must be 0-3");
+    }
+    strlcpy(p.ssid, jstr(j, "ssid"), sizeof(p.ssid));
+    const char *pw = jstr(j, "pass");
+    if (pw[0]) {
+        strlcpy(p.pass, pw, sizeof(p.pass));
+    } else if (!jbool(j, "clear_pass", false) && old.valid && strcmp(old.ssid, p.ssid) == 0) {
+        strlcpy(p.pass, old.pass, sizeof(p.pass));
+    }
+    int sub = jint(j, "subnet", 0);
+    p.subnet = (sub >= 0 && sub < AP_SUBNET_COUNT) ? sub : 0;
+    p.nat = jbool(j, "nat", true);
+    p.on_boot = jbool(j, "on_boot", false);
+    p.valid = true;
+    cJSON_Delete(j);
+    return send_result(req, ap_profile_save(slot, &p), "saved (restart the AP to apply)",
+                       "SSID required, password empty (open) or >= 8 chars");
+}
+
+static esp_err_t api_approfile_del(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    cJSON_Delete(j);
+    return send_result(req, ap_profile_delete(slot), "deleted", "slot must be 0-3");
+}
+
+// POST /api/ap/start {slot} (-1 = Kconfig default AP)
+static esp_err_t api_ap_start(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int slot = jint(j, "slot", -1);
+    cJSON_Delete(j);
+    return send_result(req, wifi_ap_start(slot), "AP started", "empty slot or APSTA not supported");
+}
+
+static esp_err_t api_ap_stop(httpd_req_t *req)
+{
+    return send_result(req, wifi_ap_stop(), "AP stopped", NULL);
+}
+
+static void add_ap_info(cJSON *o, const wifi_ap_info_t *a)
+{
+    cJSON_AddBoolToObject(o, "apsta_supported", a->apsta_supported);
+    cJSON_AddBoolToObject(o, "running", a->running);
+    cJSON_AddNumberToObject(o, "slot", a->slot);
+    cJSON_AddStringToObject(o, "ssid", a->ssid);
+    cJSON_AddBoolToObject(o, "open", a->open);
+    cJSON_AddStringToObject(o, "ip", a->ip);
+    cJSON_AddBoolToObject(o, "nat", a->nat);
+    cJSON_AddNumberToObject(o, "channel", a->channel);
+    cJSON_AddNumberToObject(o, "clients", a->clients);
+    cJSON_AddNumberToObject(o, "max_clients", a->max_clients);
+}
+
+// GET /api/apstatus - AP state plus connected clients (MAC, IP, RSSI)
+static esp_err_t api_apstatus_get(httpd_req_t *req)
+{
+    wifi_ap_info_t a;
+    wifi_get_ap_info(&a);
+    cJSON *j = cJSON_CreateObject();
+    add_ap_info(j, &a);
+    cJSON *arr = cJSON_AddArrayToObject(j, "clients");
+    if (a.running) {
+        wifi_client_t cl[12];
+        int n = wifi_ap_clients(cl, 12);
+        for (int i = 0; i < n; i++) {
+            char mac[18];
+            mac_str(cl[i].mac, mac);
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddStringToObject(o, "mac", mac);
+            cJSON_AddStringToObject(o, "ip", cl[i].ip);
+            cJSON_AddNumberToObject(o, "rssi", cl[i].rssi);
+            cJSON_AddItemToArray(arr, o);
+        }
+    }
+    return send_json(req, j);
+}
+
+// --- Ethernet ---
+
+static void add_eth_info(cJSON *o)
+{
+    eth_info_t e;
+    eth_get_info(&e);
+    cJSON_AddBoolToObject(o, "initialized", e.initialized);
+    cJSON_AddStringToObject(o, "mode", eth_mode_name(e.mode));
+    cJSON_AddStringToObject(o, "saved_mode", eth_mode_name(e.saved_mode));
+    cJSON_AddBoolToObject(o, "link_up", e.link_up);
+    cJSON_AddBoolToObject(o, "has_ip", e.has_ip);
+    cJSON_AddNumberToObject(o, "speed_mbps", e.speed_mbps);
+    cJSON_AddBoolToObject(o, "full_duplex", e.full_duplex);
+    cJSON_AddStringToObject(o, "ip", e.ip);
+    cJSON_AddStringToObject(o, "gw", e.gw);
+    cJSON_AddStringToObject(o, "mac", e.mac);
+    cJSON_AddStringToObject(o, "error", e.error);
+}
+
+static esp_err_t api_eth_get(httpd_req_t *req)
+{
+    cJSON *j = cJSON_CreateObject();
+    add_eth_info(j);
+    return send_json(req, j);
+}
+
+// POST /api/eth {mode:"lan"|"wan"} - stored in NVS, applied after reboot
+static esp_err_t api_eth_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    const char *m = jstr(j, "mode");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (strcmp(m, "lan") == 0) err = eth_set_mode(ETH_MODE_LAN);
+    else if (strcmp(m, "wan") == 0) err = eth_set_mode(ETH_MODE_WAN);
+    cJSON_Delete(j);
+    return send_result(req, err, "saved - reboot to apply", "mode must be \"lan\" or \"wan\"");
+}
+
+// --- Traffic stats ---
+
+static esp_err_t api_netstats_get(httpd_req_t *req)
+{
+    cJSON *j = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(j, "interfaces");
+    for (int i = 0; i < NET_IF_COUNT; i++) {
+        net_if_stats_t s;
+        net_stats_get((net_if_id_t)i, &s);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", net_if_name((net_if_id_t)i));
+        cJSON_AddBoolToObject(o, "present", s.present);
+        cJSON_AddNumberToObject(o, "rx_bytes", (double)s.rx_bytes);
+        cJSON_AddNumberToObject(o, "tx_bytes", (double)s.tx_bytes);
+        cJSON_AddNumberToObject(o, "rx_pkts", s.rx_pkts);
+        cJSON_AddNumberToObject(o, "tx_pkts", s.tx_pkts);
+        cJSON_AddNumberToObject(o, "rx_bps", s.rx_bps);   // bytes per second
+        cJSON_AddNumberToObject(o, "tx_bps", s.tx_bps);
+        cJSON_AddItemToArray(arr, o);
+    }
+    return send_json(req, j);
+}
+
+// --- iperf ---
+
+static esp_err_t api_iperf_start(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int w = jint(j, "window_s", 300);
+    cJSON_Delete(j);
+    return send_result(req, net_iperf_start(w > 0 ? (uint32_t)w : 300),
+                       "iperf TCP server armed on port 5001", NULL);
+}
+
+static esp_err_t api_iperf_stop(httpd_req_t *req)
+{
+    net_iperf_stop();
+    return send_result(req, ESP_OK, "iperf stopped", NULL);
+}
+
+static esp_err_t api_iperf_get(httpd_req_t *req)
+{
+    net_iperf_status_t s;
+    net_iperf_get(&s);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddNumberToObject(j, "port", 5001);
+    cJSON_AddBoolToObject(j, "armed", s.armed);
+    cJSON_AddNumberToObject(j, "armed_left_s", s.armed_left_s);
+    cJSON_AddBoolToObject(j, "running", s.running);
+    cJSON_AddNumberToObject(j, "last_mbps", s.last_mbps);
+    cJSON_AddNumberToObject(j, "summary_mbps", s.summary_mbps);
+    cJSON_AddNumberToObject(j, "total_bytes", (double)s.total_bytes);
+    return send_json(req, j);
+}
+
 esp_err_t web_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 8192;
+    cfg.stack_size = 10240;
     cfg.recv_wait_timeout = 15;
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 16;
+    cfg.max_uri_handlers = 48;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[FAIL] httpd_start: %s", esp_err_to_name(err));
@@ -390,6 +897,24 @@ esp_err_t web_start(void)
         { .uri = "/api/pin",    .method = HTTP_GET,  .handler = api_pin_get },
         { .uri = "/api/reboot", .method = HTTP_POST, .handler = api_reboot_post },
         { .uri = "/api/debug",  .method = HTTP_POST, .handler = api_debug_post },
+        { .uri = "/api/profiles",       .method = HTTP_GET,  .handler = api_profiles_get },
+        { .uri = "/api/profile/save",   .method = HTTP_POST, .handler = api_profile_save },
+        { .uri = "/api/profile/del",    .method = HTTP_POST, .handler = api_profile_del },
+        { .uri = "/api/connect",        .method = HTTP_POST, .handler = api_connect_post },
+        { .uri = "/api/disconnect",     .method = HTTP_POST, .handler = api_disconnect_post },
+        { .uri = "/api/scan",           .method = HTTP_GET,  .handler = api_scan_get },
+        { .uri = "/api/approfiles",     .method = HTTP_GET,  .handler = api_approfiles_get },
+        { .uri = "/api/approfile/save", .method = HTTP_POST, .handler = api_approfile_save },
+        { .uri = "/api/approfile/del",  .method = HTTP_POST, .handler = api_approfile_del },
+        { .uri = "/api/ap/start",       .method = HTTP_POST, .handler = api_ap_start },
+        { .uri = "/api/ap/stop",        .method = HTTP_POST, .handler = api_ap_stop },
+        { .uri = "/api/apstatus",       .method = HTTP_GET,  .handler = api_apstatus_get },
+        { .uri = "/api/eth",            .method = HTTP_GET,  .handler = api_eth_get },
+        { .uri = "/api/eth",            .method = HTTP_POST, .handler = api_eth_post },
+        { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
+        { .uri = "/api/iperf/start",    .method = HTTP_POST, .handler = api_iperf_start },
+        { .uri = "/api/iperf/stop",     .method = HTTP_POST, .handler = api_iperf_stop },
+        { .uri = "/api/iperf",          .method = HTTP_GET,  .handler = api_iperf_get },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);

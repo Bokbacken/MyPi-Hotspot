@@ -26,6 +26,51 @@ menu "MyPi-Hotspot"
             default "mypi-hotspot"
             help
                 The device answers to <hostname>.local via mDNS.
+
+        config MYPI_AP_SSID
+            string "Default access point SSID"
+            default "MyPi-Hotspot"
+            help
+                Used at boot when no saved AP profile is marked "start at boot".
+                The default AP uses 192.168.4.1/24 with NAT to the uplink.
+
+        config MYPI_AP_PASSWORD
+            string "Default access point password"
+            default "mypi1234"
+            help
+                WPA2 password (8-63 characters). Leave empty for an open AP.
+
+        config MYPI_AP_MAX_CONN
+            int "Max stations on the access point"
+            range 1 10
+            default 10
+            help
+                ESP-Hosted limits the soft-AP to 10 stations (MAX_CONN_NO on the host).
+
+        config MYPI_AP_AUTOSTART
+            bool "Start the default AP at boot"
+            default y
+            help
+                If disabled, the AP only starts at boot when an AP profile has
+                "start at boot" set, or when started from the web UI.
+    endmenu
+
+    menu "Ethernet"
+        config MYPI_ETH_ENABLE
+            bool "Enable on-board Ethernet (IP101 RMII PHY)"
+            default y
+
+        config MYPI_ETH_PHY_ADDR
+            int "PHY address (-1 = auto detect)"
+            range -1 31
+            default -1
+            depends on MYPI_ETH_ENABLE
+
+        config MYPI_ETH_PHY_RST_GPIO
+            int "PHY reset GPIO (-1 = none)"
+            range -1 54
+            default 51
+            depends on MYPI_ETH_ENABLE
     endmenu
 
     menu "Display"

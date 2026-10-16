@@ -1,0 +1,51 @@
+#pragma once
+
+// Shared networking helpers: NAPT, DHCP server setup, per-interface traffic
+// counters (/api/netstats) and the iperf throughput test server.
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+#include "esp_netif.h"
+
+typedef enum { NET_IF_STA = 0, NET_IF_AP, NET_IF_ETH, NET_IF_COUNT } net_if_id_t;
+
+typedef struct {
+    bool present;
+    uint64_t rx_bytes, tx_bytes;
+    uint32_t rx_pkts, tx_pkts;
+    uint32_t rx_bps, tx_bps;    // bytes per second over the last 1 s sample
+} net_if_stats_t;
+
+/** Start the 1 s sampler task (hooks interfaces as they appear). */
+void net_stats_start(void);
+/** Register an esp_netif for counting under the given id. */
+void net_stats_register(net_if_id_t id, esp_netif_t *nif);
+void net_stats_get(net_if_id_t id, net_if_stats_t *out);
+const char *net_if_name(net_if_id_t id);
+
+/**
+ * Enable/disable NAPT on an (inbound) interface. Unlike esp_netif_napt_enable()
+ * this does not disable NAPT on other interfaces, so AP and Ethernet-LAN can both
+ * be NATed. The interface must be up.
+ */
+esp_err_t net_napt(esp_netif_t *nif, bool on);
+
+/** (Re)configure a DHCP server interface: static ip/24, DNS offered to clients. */
+esp_err_t net_dhcps_setup(esp_netif_t *nif, uint8_t a, uint8_t b, uint8_t c, const char *dns);
+
+// --- iperf (TCP server, port 5001) ---
+typedef struct {
+    bool armed;                 // server is (re)listening
+    uint32_t armed_left_s;      // seconds until auto-disarm
+    bool running;               // a client is connected and sending
+    float last_mbps;            // last 1 s interval
+    float summary_mbps;         // average of the last finished test
+    uint64_t total_bytes;
+} net_iperf_status_t;
+
+/** Arm the iperf TCP server for window_s seconds (re-listens after each test). */
+esp_err_t net_iperf_start(uint32_t window_s);
+void net_iperf_stop(void);
+void net_iperf_get(net_iperf_status_t *out);
