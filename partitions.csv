@@ -1,0 +1,11 @@
+# MyPi-Hotspot partition table (16 MB flash, two OTA slots)
+# The partition table itself lives at 0xA000 (CONFIG_PARTITION_TABLE_OFFSET) to give
+# the bootloader (0x2000..0xA000, 32 KB) headroom; with rollback enabled it no longer
+# fits comfortably in the default 24 KB.
+# Name,    Type, SubType, Offset,   Size,     Flags
+nvs,       data, nvs,     0xB000,   0x6000,
+otadata,   data, ota,     0x11000,  0x2000,
+phy_init,  data, phy,     0x13000,  0x1000,
+ota_0,     app,  ota_0,   0x20000,  0x600000,
+ota_1,     app,  ota_1,   0x620000, 0x600000,
+storage,   data, fat,     0xC20000, 0x3E0000,

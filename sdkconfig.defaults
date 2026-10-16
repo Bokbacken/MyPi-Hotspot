@@ -1,0 +1,110 @@
+# MyPi-Hotspot default configuration
+# Target: Waveshare ESP32-P4-NANO (ESP32-P4NRW32X, 32 MB PSRAM)
+# These values are applied when sdkconfig is generated for the first time.
+# After changing this file, delete `sdkconfig` (or run `idf.py fullclean`) to re-apply.
+
+CONFIG_IDF_TARGET="esp32p4"
+
+# --- Chip revision ---
+# The ESP32-P4-NANO-WIFI6-DB ships with ESP32-P4 rev v3.1 silicon.
+# Support for rev <3.0 and >=3.0 is mutually exclusive (ESP-IDF >= v6.1 defaults to rev v3.x; kept explicit here).
+# Disabling this targets rev v3.x; a rev <3.0 build is rejected by the v3.x bootloader.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+CONFIG_ESP32P4_REV_MIN_300=y
+
+# --- CPU ---
+# Rev v3.x runs at 400 MHz (the 360 MHz option only exists for rev <3.0 builds).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+
+# --- Flash ---
+# The board has 32 MB of flash. 16 MB is a safe, conservative setting
+# (using less than the physical size always works).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# --- PSRAM ---
+# ESP32-P4 uses hex-mode PSRAM (the P4 equivalent of "octal" on the S3).
+CONFIG_SPIRAM=y
+# 200 MHz is marked experimental; 80 MHz is the stable choice.
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# --- Logging / console ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# --- FreeRTOS ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- Partition table: two 6 MB OTA slots (see partitions.csv) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0xA000
+
+# --- OTA rollback: a new image must call esp_ota_mark_app_valid_cancel_rollback() ---
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Wi-Fi via ESP32-C5 co-processor (esp_wifi_remote + ESP-Hosted over SDIO) ---
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C5=y
+# ESP-Hosted 3.x host symbol names (2.x names are mapped by the component's sdkconfig.rename).
+# Must match the C5 slave (c5_slave/): SDIO, 4-bit bus, high speed, slot 1, 40 MHz clock.
+CONFIG_ESP_HOSTED_HOST_TRANSPORT_BUS_SDIO=y
+CONFIG_ESP_HOSTED_HOST_SDIO_BUS_WIDTH_4=y
+CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
+CONFIG_ESP_HOSTED_HOST_SDIO_CLK_KHZ=40000
+# RX staging slots (default 2): more SDIO RX buffers in flight between the bus
+# reader and the network stack, smooths downlink bursts. Clock stays at 40 MHz.
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS=4
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_CLK=18
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_CMD=19
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D0=14
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D1=15
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D2=16
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D3=17
+CONFIG_ESP_HOSTED_HOST_RESET_GPIO=54
+# Never reboot the P4 because the C5 link failed: Ethernet, the web UI, /update and
+# /c5update must stay up even with a missing or incompatible co-processor firmware.
+CONFIG_ESP_HOSTED_HOST_CP_BRINGUP_ON_TIMEOUT_NONE=y
+# CONFIG_ESP_HOSTED_HOST_TRANSPORT_RESTART_ON_FAILURE is not set
+
+# --- HTTP server ---
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# --- Routing: AP / Ethernet-LAN clients are NATed out through the uplink (v0.5.0) ---
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+# DHCP leases per server instance (AP is additionally limited to 10 stations by ESP-Hosted)
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=24
+
+# --- Ethernet: on-board IP101 RMII PHY (internal EMAC) ---
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_ESP32_EMAC=y
+# Deeper EMAC rx ring: one full-size frame per descriptor, 30 frames (was ~6 x 1.5 KB
+# with 20 x 512 B). Absorbs 100 Mbit bursts from LAN clients while the uplink drains.
+CONFIG_ETH_DMA_BUFFER_SIZE=1536
+CONFIG_ETH_DMA_RX_BUFFER_NUM=30
+CONFIG_ETH_DMA_TX_BUFFER_NUM=20
+
+# --- Throughput tuning (lwIP + Wi-Fi remote buffers) ---
+# Allow lwIP / Wi-Fi buffers in PSRAM so the larger windows do not exhaust internal RAM.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_LWIP_WND_SCALE=y
+CONFIG_LWIP_TCP_RCV_SCALE=2
+CONFIG_LWIP_TCP_WND_DEFAULT=131072
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+# Must be >= TCP_WND_DEFAULT/MSS + 2 (131072/1436 + 2 = 94), otherwise lwIP drops segments
+# while the app is busy (e.g. flash writes during OTA) and large uploads stall.
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=96
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=128
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=32
+CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=128
+CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=128
+CONFIG_WIFI_RMT_TX_BA_WIN=64
+CONFIG_WIFI_RMT_RX_BA_WIN=64
+# Host-side ESP-Hosted SDIO queues (default 20): more room for uplink bursts.
+CONFIG_ESP_HOSTED_HOST_SDIO_TX_Q_SIZE=64
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE=64
