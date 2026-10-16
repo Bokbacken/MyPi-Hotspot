@@ -27,16 +27,19 @@ No LVGL, no Wi-Fi yet — just `esp_lcd` (built into ESP-IDF) and raw I2C.
 
 ### Wiring (display module → ESP32-P4-NANO)
 
-> ⚠️ **VERIFY BEFORE FLASHING.** `SCLK` and `MOSI` are best-guess defaults. Check them against
-> your actual wiring and edit the `VERIFY BEFORE FLASHING` block at the top of
-> [`main/display.h`](main/display.h) and [`main/touch.h`](main/touch.h) if needed.
+> ⚠️ **VERIFY BEFORE FLASHING.** The board has no fixed SPI pins (the ESP32-P4 GPIO matrix can
+> route SPI to any free GPIO). `SCLK = GPIO23` and `MOSI = GPIO5` were chosen as free header pins
+> that avoid strapping pins (34–38), USB-JTAG (24/25) and the Wi-Fi co-processor. If you wire
+> differently, edit the `VERIFY BEFORE FLASHING` block at the top of [`main/display.h`](main/display.h).
+> **MISO is not needed** — the ST7789 module is write-only, so leave it unconnected.
 
 | LCD pin | Function | ESP32-P4 GPIO | Status |
 |---|---|---|---|
 | VCC | 3.3 V | 3V3 | — |
 | GND | Ground | GND | — |
-| SCL / CLK | SPI clock | **GPIO36** | ⚠️ VERIFY |
-| SDA / DIN | SPI MOSI | **GPIO35** | ⚠️ VERIFY |
+| SCL / CLK | SPI clock | **GPIO23** | proposed |
+| SDA / DIN | SPI MOSI | **GPIO5** | proposed |
+| MISO | — | not connected (display is write-only) | — |
 | CS | SPI chip select | GPIO20 | confirmed |
 | DC | Data / command | GPIO21 | confirmed |
 | BL | Backlight (high = on) | GPIO22 | confirmed |
@@ -51,19 +54,24 @@ No LVGL, no Wi-Fi yet — just `esp_lcd` (built into ESP-IDF) and raw I2C.
 | GPIO | Use | Free for user? |
 |---|---|---|
 | 0, 1 | 32 kHz crystal (XTAL32K) | ❌ |
-| 2–6 | Header | ✅ free |
+| 2, 3, 4 | Header (pad-JTAG only if strapped, off by default) | ✅ free |
+| 5 | LCD MOSI | 🟡 used by this project |
+| 6 | Header, but tied to Wi-Fi co-processor IO via 0 Ω (C6 schematic) | ⚠️ avoid |
 | 7, 8 | I2C (touch, shared bus) | 🟡 used by this project |
 | 9–13 | I2S audio codec | ❌ |
 | 14–19 | SDIO to ESP32-C5 (Wi-Fi) | ❌ |
 | 20, 21, 22 | LCD CS / DC / BL | 🟡 used by this project |
-| 23–27 | Header | ✅ free |
-| 28–34 | Header (check board schematic) | ✅ mostly free |
-| 35, 36 | LCD MOSI / SCLK (proposed) | 🟡 used by this project — VERIFY |
-| 37, 38 | UART0 TX/RX (console) | ❌ |
+| 23 | LCD SCLK | 🟡 used by this project |
+| 24, 25 | USB Serial/JTAG | ⚠️ avoid |
+| 26, 27 | Header (USB FS OTG alt. function) | ✅ free |
+| 28–31 | Ethernet RMII | ❌ |
+| 32, 33 | Header | ✅ free |
+| 34–36 | Strapping (35 = boot mode; 34/35 also Ethernet) | ❌ |
+| 37, 38 | UART0 TX/RX (console) + strapping | ❌ |
 | 39–44 | microSD (TF) card | ❌ |
 | 45–48 | Header / misc (check schematic) | ⚠️ check |
 | 49–53 | Ethernet PHY / speaker amplifier (PA) | ❌ |
-| 54 | Header (check schematic) | ⚠️ check |
+| 54 | ESP32-C5 reset (CHIP_PU) | ❌ |
 
 Always confirm against the official Waveshare ESP32-P4-NANO schematic before connecting new hardware.
 
@@ -122,7 +130,7 @@ Exit the monitor with `Ctrl+]`.
 
 ```
 I (...) main: MyPi-Hotspot hello world starting
-I (...) display: Pins: SCLK=36 MOSI=35 CS=20 DC=21 BL=22
+I (...) display: Pins: SCLK=23 MOSI=5 CS=20 DC=21 BL=22
 I (...) display: ST7789 240x320 ready, framebuffer 153600 bytes in PSRAM
 I (...) main: Screen filled navy blue
 I (...) touch: Pins: SDA=7 SCL=8 addr=0x15

@@ -8,8 +8,11 @@
 // Waveshare 2" Capacitive Touch LCD (ST7789, 240x320, SPI)
 // on Waveshare ESP32-P4-NANO.
 // ============================================================================
-#define LCD_SPI_SCLK        36      // VERIFY: SPI clock (SCL/CLK on the LCD)
-#define LCD_SPI_MOSI        35      // VERIFY: SPI data  (SDA/DIN on the LCD)
+// SPI pins are routed through the GPIO matrix, so any free header GPIO works.
+// Avoid 34-38 (strapping; 35 = boot mode), 24/25 (USB-JTAG), 6 (tied to Wi-Fi co-processor IO).
+// MISO is not used: the ST7789 module is write-only.
+#define LCD_SPI_SCLK        23      // SPI clock (SCL/CLK on the LCD)
+#define LCD_SPI_MOSI        5       // SPI data  (SDA/DIN on the LCD)
 #define LCD_CS              20      // Chip select
 #define LCD_DC              21      // Data/command select
 #define LCD_BL              22      // Backlight (driven high = on)
