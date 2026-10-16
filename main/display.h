@@ -2,23 +2,9 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+#include "pins.h"   // All GPIO assignments (VERIFY BEFORE FLASHING)
 
-// ============================================================================
-// === VERIFY BEFORE FLASHING — adjust to your actual wiring ===
 // Waveshare 2" Capacitive Touch LCD (ST7789, 240x320, SPI)
-// on Waveshare ESP32-P4-NANO.
-// ============================================================================
-// SPI pins are routed through the GPIO matrix, so any free header GPIO works.
-// Avoid 34-38 (strapping; 35 = boot mode), 24/25 (USB-JTAG), 6 (tied to Wi-Fi co-processor IO).
-// MISO is not used: the ST7789 module is write-only.
-#define LCD_SPI_SCLK        23      // SPI clock (SCL/CLK on the LCD)
-#define LCD_SPI_MOSI        5       // SPI data  (SDA/DIN on the LCD)
-#define LCD_CS              20      // Chip select
-#define LCD_DC              21      // Data/command select
-#define LCD_BL              22      // Backlight (driven high = on)
-#define LCD_RST             (-1)    // Reset not connected -> software reset
-// ============================================================================
-
 #define LCD_SPI_HOST        SPI2_HOST
 #define LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000)
 #define LCD_H_RES           240

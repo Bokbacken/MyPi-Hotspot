@@ -23,49 +23,57 @@ No LVGL, no Wi-Fi yet — just `esp_lcd` (built into ESP-IDF) and raw I2C.
 | MCU board | Waveshare ESP32-P4-NANO-WIFI6-DB — ESP32-P4NRW32X, 32 MB PSRAM, 32 MB flash |
 | Wi-Fi | ESP32-C5 co-processor over SDIO (not used yet) |
 | Display | Waveshare 2" LCD, ST7789, 240×320, SPI |
-| Touch | CST816D, I2C address `0x15`, polled (INT and RST not connected) |
+| Touch | CST816D, I2C address `0x15`, polled (TP_RST pulsed at init, TP_INT read-ready) |
 
 ### Wiring (display module → ESP32-P4-NANO)
 
-> ⚠️ **VERIFY BEFORE FLASHING.** The board has no fixed SPI pins (the ESP32-P4 GPIO matrix can
-> route SPI to any free GPIO). `SCLK = GPIO23` and `MOSI = GPIO5` were chosen as free header pins
-> that avoid strapping pins (34–38), USB-JTAG (24/25) and the Wi-Fi co-processor. If you wire
-> differently, edit the `VERIFY BEFORE FLASHING` block at the top of [`main/display.h`](main/display.h).
-> **MISO is not needed** — the ST7789 module is write-only, so leave it unconnected.
+> ⚠️ **VERIFY BEFORE FLASHING.** All GPIO assignments live in one file, [`main/pins.h`](main/pins.h),
+> with macro names matching the module labels (`PIN_SCLK`, `PIN_LCD_CS`, `PIN_TP_INT`, …).
+> The board has no fixed SPI pins (the ESP32-P4 GPIO matrix can route SPI to any free GPIO); the
+> proposed pins avoid strapping pins (34–38), USB-JTAG (24/25) and the Wi-Fi co-processor.
+> Set a pin to `-1` in `pins.h` if you leave that wire unconnected.
 
-| LCD pin | Function | ESP32-P4 GPIO | Status |
-|---|---|---|---|
-| VCC | 3.3 V | 3V3 | — |
-| GND | Ground | GND | — |
-| SCL / CLK | SPI clock | **GPIO23** | proposed |
-| SDA / DIN | SPI MOSI | **GPIO5** | proposed |
-| MISO | — | not connected (display is write-only) | — |
-| CS | SPI chip select | GPIO20 | confirmed |
-| DC | Data / command | GPIO21 | confirmed |
-| BL | Backlight (high = on) | GPIO22 | confirmed |
-| RST | LCD reset | not connected (software reset) | — |
-| TP_SDA | Touch I2C data | GPIO7 | confirmed |
-| TP_SCL | Touch I2C clock | GPIO8 | confirmed |
-| TP_INT | Touch interrupt | not connected (polling) | — |
-| TP_RST | Touch reset | not connected | — |
+The display is SPI; only the touch controller (`TP_*`) is I2C. The SPI bus is shared between the
+LCD and the module's microSD slot (`SD_CS`), which is why `MISO` exists.
+
+| Module pin | Bus | Function | ESP32-P4 GPIO | Status |
+|---|---|---|---|---|
+| VCC | — | 3.3 V supply | 3V3 | — |
+| GND | — | Ground | GND | — |
+| SCLK | SPI | SPI clock | **GPIO23** | proposed |
+| MOSI | SPI | Data to LCD / SD | **GPIO5** | proposed |
+| MISO | SPI | Data from SD card (LCD is write-only) | **GPIO4** | proposed |
+| SD_CS | SPI | microSD chip select (held high) | **GPIO32** | proposed |
+| LCD_CS | SPI | LCD chip select | GPIO20 | confirmed |
+| LCD_DC | — | LCD data / command | GPIO21 | confirmed |
+| LCD_RESET | — | LCD hardware reset (active low) | **GPIO26** | proposed |
+| LCD_BL | — | Backlight (high = on) | GPIO22 | confirmed |
+| TP_SDA | I2C | Touch data | GPIO7 | confirmed |
+| TP_SCL | I2C | Touch clock | GPIO8 | confirmed |
+| TP_INT | — | Touch interrupt (active low, polled for now) | **GPIO3** | proposed |
+| TP_RST | — | Touch reset (active low) | **GPIO2** | proposed |
 
 ### ESP32-P4-NANO GPIO overview
 
 | GPIO | Use | Free for user? |
 |---|---|---|
 | 0, 1 | 32 kHz crystal (XTAL32K) | ❌ |
-| 2, 3, 4 | Header (pad-JTAG only if strapped, off by default) | ✅ free |
-| 5 | LCD MOSI | 🟡 used by this project |
+| 2 | TP_RST | 🟡 used by this project |
+| 3 | TP_INT | 🟡 used by this project |
+| 4 | MISO | 🟡 used by this project |
+| 5 | MOSI | 🟡 used by this project |
 | 6 | Header, but tied to Wi-Fi co-processor IO via 0 Ω (C6 schematic) | ⚠️ avoid |
-| 7, 8 | I2C (touch, shared bus) | 🟡 used by this project |
+| 7, 8 | TP_SDA / TP_SCL (I2C, shared with on-board ES8311) | 🟡 used by this project |
 | 9–13 | I2S audio codec | ❌ |
 | 14–19 | SDIO to ESP32-C5 (Wi-Fi) | ❌ |
-| 20, 21, 22 | LCD CS / DC / BL | 🟡 used by this project |
-| 23 | LCD SCLK | 🟡 used by this project |
+| 20, 21, 22 | LCD_CS / LCD_DC / LCD_BL | 🟡 used by this project |
+| 23 | SCLK | 🟡 used by this project |
 | 24, 25 | USB Serial/JTAG | ⚠️ avoid |
-| 26, 27 | Header (USB FS OTG alt. function) | ✅ free |
+| 26 | LCD_RESET | 🟡 used by this project |
+| 27 | Header | ✅ free |
 | 28–31 | Ethernet RMII | ❌ |
-| 32, 33 | Header | ✅ free |
+| 32 | SD_CS | 🟡 used by this project |
+| 33 | Header | ✅ free |
 | 34–36 | Strapping (35 = boot mode; 34/35 also Ethernet) | ❌ |
 | 37, 38 | UART0 TX/RX (console) + strapping | ❌ |
 | 39–44 | microSD (TF) card | ❌ |
@@ -86,6 +94,7 @@ MyPi-Hotspot/
 └── main/
     ├── CMakeLists.txt
     ├── main.c            app_main: init, touch loop, tap/drag logic
+    ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
     ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM
     └── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
 ```
@@ -130,10 +139,10 @@ Exit the monitor with `Ctrl+]`.
 
 ```
 I (...) main: MyPi-Hotspot hello world starting
-I (...) display: Pins: SCLK=23 MOSI=5 CS=20 DC=21 BL=22
+I (...) display: Pins: SCLK=23 MOSI=5 MISO=4 SD_CS=32 LCD_CS=20 LCD_DC=21 LCD_RESET=26 LCD_BL=22
 I (...) display: ST7789 240x320 ready, framebuffer 153600 bytes in PSRAM
 I (...) main: Screen filled navy blue
-I (...) touch: Pins: SDA=7 SCL=8 addr=0x15
+I (...) touch: Pins: TP_SDA=7 TP_SCL=8 TP_INT=3 TP_RST=2 addr=0x15
 I (...) main: DOWN  x=120 y=160
 I (...) main: TAP   x=120 y=160 color=0x5A3F
 ```
@@ -142,8 +151,8 @@ I (...) main: TAP   x=120 y=160 color=0x5A3F
 
 | Symptom | Likely cause |
 |---|---|
-| Backlight on, screen stays black/white | Wrong SCLK/MOSI pins — check `main/display.h` |
+| Backlight on, screen stays black/white | Wrong SCLK/MOSI/LCD_CS/LCD_DC, or LCD_RESET stuck low — check `main/pins.h` |
 | Colors look inverted | Remove/flip `esp_lcd_panel_invert_color(..., true)` in `display.c` |
-| `CST816D did not ACK at 0x15` | SDA/SCL swapped or not connected — check `main/touch.h` |
+| `CST816D did not ACK at 0x15` | TP_SDA/TP_SCL swapped or not connected, or TP_RST held low — check `main/pins.h` |
 | Touch works briefly then stops | Controller went to sleep; auto-sleep is disabled at init, power-cycle the board |
 | Touch position mirrored | Panel orientation differs; mirror `x`/`y` in `touch_read()` |

@@ -1,6 +1,7 @@
 #include "touch.h"
 
 #include "display.h"  // LCD_H_RES / LCD_V_RES for clamping
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -33,12 +34,35 @@ static esp_err_t write_reg(uint8_t reg, uint8_t val)
 
 esp_err_t touch_init(void)
 {
-    ESP_LOGI(TAG, "Pins: SDA=%d SCL=%d addr=0x%02X", TOUCH_SDA, TOUCH_SCL, TOUCH_I2C_ADDR);
+    ESP_LOGI(TAG, "Pins: TP_SDA=%d TP_SCL=%d TP_INT=%d TP_RST=%d addr=0x%02X",
+             PIN_TP_SDA, PIN_TP_SCL, PIN_TP_INT, PIN_TP_RST, TOUCH_I2C_ADDR);
+
+    // TP_INT: input with pull-up (active low). Not used for interrupts yet; we poll.
+    if (PIN_TP_INT >= 0) {
+        gpio_config_t int_cfg = {
+            .pin_bit_mask = 1ULL << PIN_TP_INT,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&int_cfg), TAG, "tp_int gpio");
+    }
+
+    // TP_RST: hardware reset pulse (active low).
+    if (PIN_TP_RST >= 0) {
+        gpio_config_t rst_cfg = {
+            .pin_bit_mask = 1ULL << PIN_TP_RST,
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&rst_cfg), TAG, "tp_rst gpio");
+        gpio_set_level(PIN_TP_RST, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(PIN_TP_RST, 1);
+    }
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = TOUCH_I2C_PORT,
-        .sda_io_num = TOUCH_SDA,
-        .scl_io_num = TOUCH_SCL,
+        .sda_io_num = PIN_TP_SDA,
+        .scl_io_num = PIN_TP_SCL,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,  // The LCD module also has its own pull-ups
@@ -50,7 +74,7 @@ esp_err_t touch_init(void)
 
     esp_err_t err = i2c_master_probe(s_bus, TOUCH_I2C_ADDR, I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "CST816D did not ACK at 0x%02X (%s) - check SDA/SCL wiring",
+        ESP_LOGW(TAG, "CST816D did not ACK at 0x%02X (%s) - check TP_SDA/TP_SCL wiring",
                  TOUCH_I2C_ADDR, esp_err_to_name(err));
     }
 

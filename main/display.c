@@ -50,15 +50,27 @@ static bool on_color_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_e
 
 esp_err_t display_init(void)
 {
-    ESP_LOGI(TAG, "Pins: SCLK=%d MOSI=%d CS=%d DC=%d BL=%d", LCD_SPI_SCLK, LCD_SPI_MOSI, LCD_CS, LCD_DC, LCD_BL);
+    ESP_LOGI(TAG, "Pins: SCLK=%d MOSI=%d MISO=%d SD_CS=%d LCD_CS=%d LCD_DC=%d LCD_RESET=%d LCD_BL=%d",
+             PIN_SCLK, PIN_MOSI, PIN_MISO, PIN_SD_CS, PIN_LCD_CS, PIN_LCD_DC, PIN_LCD_RESET, PIN_LCD_BL);
 
     // Backlight off during init to avoid showing garbage.
     gpio_config_t bl_cfg = {
-        .pin_bit_mask = 1ULL << LCD_BL,
+        .pin_bit_mask = 1ULL << PIN_LCD_BL,
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&bl_cfg), TAG, "backlight gpio");
-    gpio_set_level(LCD_BL, 0);
+    gpio_set_level(PIN_LCD_BL, 0);
+
+    // Keep the module's microSD card deselected so it never drives the shared SPI bus.
+    if (PIN_SD_CS >= 0) {
+        gpio_config_t sd_cfg = {
+            .pin_bit_mask = 1ULL << PIN_SD_CS,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&sd_cfg), TAG, "sd_cs gpio");
+        gpio_set_level(PIN_SD_CS, 1);
+    }
 
     s_trans_done = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(s_trans_done, ESP_ERR_NO_MEM, TAG, "semaphore");
@@ -71,9 +83,9 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_FALSE(s_dma_buf, ESP_ERR_NO_MEM, TAG, "DMA buffer alloc failed");
 
     spi_bus_config_t bus_cfg = {
-        .sclk_io_num = LCD_SPI_SCLK,
-        .mosi_io_num = LCD_SPI_MOSI,
-        .miso_io_num = -1,
+        .sclk_io_num = PIN_SCLK,
+        .mosi_io_num = PIN_MOSI,
+        .miso_io_num = PIN_MISO,    // Only used by the microSD slot
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = band_bytes,
@@ -82,8 +94,8 @@ esp_err_t display_init(void)
 
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = {
-        .dc_gpio_num = LCD_DC,
-        .cs_gpio_num = LCD_CS,
+        .dc_gpio_num = PIN_LCD_DC,
+        .cs_gpio_num = PIN_LCD_CS,
         .pclk_hz = LCD_PIXEL_CLOCK_HZ,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
@@ -94,7 +106,7 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_cfg, &io), TAG, "panel io");
 
     esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = LCD_RST,
+        .reset_gpio_num = PIN_LCD_RESET,   // -1 falls back to software reset
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
@@ -108,7 +120,7 @@ esp_err_t display_init(void)
 
     display_fill_screen(COLOR_BLACK);
     ESP_RETURN_ON_ERROR(display_flush(), TAG, "first flush");
-    gpio_set_level(LCD_BL, 1);
+    gpio_set_level(PIN_LCD_BL, 1);
 
     ESP_LOGI(TAG, "ST7789 %dx%d ready, framebuffer %u bytes in PSRAM",
              LCD_H_RES, LCD_V_RES, (unsigned)(LCD_H_RES * LCD_V_RES * sizeof(uint16_t)));
