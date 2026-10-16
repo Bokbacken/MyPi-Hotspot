@@ -1,0 +1,14 @@
+## Managed components (downloaded by the ESP-IDF component manager at build time)
+dependencies:
+  idf:
+    version: ">=5.5.2"
+  espressif/esp_wifi_remote:
+    version: ">=0.10,<2.0"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/esp_hosted:
+    version: "~2"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/mdns:
+    version: "^1.8"

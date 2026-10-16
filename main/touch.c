@@ -1,5 +1,6 @@
 #include "touch.h"
 
+#include "diag.h"
 #include "display.h"  // LCD_H_RES / LCD_V_RES for clamping
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -67,15 +68,25 @@ esp_err_t touch_init(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,  // The LCD module also has its own pull-ups
     };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_bus), TAG, "i2c bus");
+    diag_set_touch_status("initializing");
+    esp_err_t berr = i2c_new_master_bus(&bus_cfg, &s_bus);
+    if (berr != ESP_OK) {
+        ESP_LOGE(TAG, "[FAIL] i2c_new_master_bus: %s", esp_err_to_name(berr));
+        diag_set_touch_status("I2C bus init failed: %s", esp_err_to_name(berr));
+        return berr;
+    }
+    ESP_LOGI(TAG, "[ OK ] i2c_new_master_bus (port %d, %d Hz)", TOUCH_I2C_PORT, TOUCH_I2C_HZ);
 
     // Give the controller time to boot after power-up.
     vTaskDelay(pdMS_TO_TICKS(50));
 
     esp_err_t err = i2c_master_probe(s_bus, TOUCH_I2C_ADDR, I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "CST816D did not ACK at 0x%02X (%s) - check TP_SDA/TP_SCL wiring",
+        ESP_LOGW(TAG, "[FAIL] CST816D did not ACK at 0x%02X (%s) - check TP_SDA/TP_SCL wiring",
                  TOUCH_I2C_ADDR, esp_err_to_name(err));
+        diag_set_touch_status("no ACK at 0x%02X (%s)", TOUCH_I2C_ADDR, esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "[ OK ] CST816D ACK at 0x%02X", TOUCH_I2C_ADDR);
     }
 
     i2c_device_config_t dev_cfg = {
@@ -87,7 +98,10 @@ esp_err_t touch_init(void)
 
     uint8_t chip_id = 0, fw = 0;
     if (read_regs(REG_CHIP_ID, &chip_id, 1) == ESP_OK && read_regs(REG_FW_VERSION, &fw, 1) == ESP_OK) {
-        ESP_LOGI(TAG, "CST816 chip ID 0x%02X, FW 0x%02X", chip_id, fw);
+        ESP_LOGI(TAG, "[ OK ] CST816 chip ID 0x%02X, FW 0x%02X", chip_id, fw);
+        diag_set_touch_status("ok (chip ID 0x%02X, FW 0x%02X)", chip_id, fw);
+    } else {
+        ESP_LOGW(TAG, "[FAIL] Could not read CST816 chip ID / FW version");
     }
 
     // Without an INT line we must poll, so stop the chip from auto-sleeping.

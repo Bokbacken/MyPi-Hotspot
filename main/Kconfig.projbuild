@@ -1,0 +1,77 @@
+menu "MyPi-Hotspot"
+
+    menu "Wi-Fi"
+        config MYPI_WIFI_SSID
+            string "Wi-Fi SSID"
+            default "TOFTA"
+            help
+                SSID of the access point the device joins in station mode.
+
+        config MYPI_WIFI_PASSWORD
+            string "Wi-Fi password"
+            default "bokbacken"
+            help
+                WPA/WPA2/WPA3 password. Leave empty for an open network.
+
+        config MYPI_WIFI_BACKOFF_MAX_S
+            int "Max reconnect back-off (seconds)"
+            range 2 600
+            default 60
+            help
+                Reconnect delay doubles after each failed attempt (1, 2, 4 ... s)
+                up to this limit.
+
+        config MYPI_HOSTNAME
+            string "Hostname (DHCP and mDNS)"
+            default "mypi-hotspot"
+            help
+                The device answers to <hostname>.local via mDNS.
+    endmenu
+
+    menu "Display"
+        config MYPI_LCD_SPI_CLOCK_MHZ
+            int "LCD SPI clock (MHz)"
+            range 1 80
+            default 10
+            help
+                SPI pixel clock for the ST7789. 10 MHz is a conservative,
+                diagnostic-friendly default (works with long jumper wires).
+                Raise to 40 MHz once the display is confirmed working.
+
+        config MYPI_LCD_INVERT_COLOR
+            bool "Invert colors (INVON)"
+            default y
+            help
+                The Waveshare 2" ST7789 module needs color inversion for correct colors.
+                Disable if black and white appear swapped.
+
+        config MYPI_LCD_BGR_ORDER
+            bool "Use BGR element order"
+            default n
+            help
+                Enable if red and blue appear swapped.
+
+        config MYPI_LCD_TEST_PATTERN
+            bool "Show startup test pattern"
+            default y
+            help
+                Cycle full-screen red/green/blue/white/black (~1 s each) and
+                show color bars before the hello-world UI.
+    endmenu
+
+    menu "Diagnostics"
+        config MYPI_HEARTBEAT_INTERVAL_S
+            int "Serial heartbeat interval (seconds)"
+            range 1 3600
+            default 5
+
+        config MYPI_LOG_BUFFER_SIZE
+            int "In-RAM log ring buffer size (bytes)"
+            range 2048 262144
+            default 16384
+            help
+                Log lines are mirrored into this buffer (allocated in PSRAM) and
+                exposed on the web UI and /api/log.
+    endmenu
+
+endmenu
