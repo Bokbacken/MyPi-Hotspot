@@ -103,7 +103,7 @@ static const char INDEX_HTML[] =
 "function tr(a,h){return '<tr>'+a.map(x=>(h?'<th>':'<td>')+x+(h?'</th>':'</td>')).join('')+'</tr>'}"
 "function mb(v){return (+v).toFixed(2)}"
 "async function post(u,b){try{let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});"
-"let j=await r.json();$('msg').textContent=u+': '+(j.ok?'OK':'ERROR')+(j.msg?' - '+j.msg:'')+(j.error?' - '+j.error:'');return j.ok}"
+"let t=await r.text(),j;try{j=JSON.parse(t)}catch(e){j={ok:r.ok,msg:t}}$('msg').textContent=u+': '+(j.ok?'OK':'ERROR')+(j.msg?' - '+j.msg:'')+(j.error?' - '+j.error:'');return j.ok}"
 "catch(e){$('msg').textContent=u+': '+e;return false}}"
 "let SP=[],AP=[];"
 "async function ld(){try{"
@@ -385,7 +385,8 @@ static esp_err_t api_debug_post(httpd_req_t *req)
 
 static esp_err_t api_reboot_post(httpd_req_t *req)
 {
-    httpd_resp_sendstr(req, "rebooting");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"msg\":\"rebooting\"}");
     xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
