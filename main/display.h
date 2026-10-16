@@ -44,5 +44,12 @@ void display_fill_rect(int x0, int y0, int x1, int y1, uint16_t color);
 /** Cycle full-screen R/G/B/white/black (~1 s each) then show color bars (~2 s). */
 void display_test_pattern(void);
 
+/**
+ * Serialize framebuffer access between tasks (recursive mutex). Hold it around a
+ * sequence of draw calls + display_flush() so another task cannot interleave.
+ */
+void display_lock(void);
+void display_unlock(void);
+
 /** Push the changed (dirty) region of the framebuffer to the panel. */
 esp_err_t display_flush(void);

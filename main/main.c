@@ -1,7 +1,9 @@
 // MyPi-Hotspot — hello world for display + touch.
 //
 // Behavior:
-//   * Boot: fill the screen navy blue.
+//   * Boot: fill the screen navy blue, then start the LCD status screen
+//     (display_ui.c). While the status screen runs, touch drawing is disabled
+//     (events are still recorded); the drawing below is the fallback.
 //   * Tap (finger down + up with < TAP_MAX_DRIFT_PX movement): draw a filled
 //     circle in a random color at the touch point.
 //   * Drag: draw a black line following the finger.
@@ -16,6 +18,7 @@
 
 #include "diag.h"
 #include "display.h"
+#include "display_ui.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "logbuf.h"
@@ -69,6 +72,7 @@ void app_main(void)
     diag_start_heartbeat();
 
     bool display_ok = false;
+    bool status_ui = false;         // Status screen owns the panel; touch drawing is disabled
     err = display_init();
     if (err == ESP_OK) {
         display_ok = true;
@@ -78,6 +82,7 @@ void app_main(void)
         display_fill_screen(COLOR_NAVY);
         err = display_flush();
         ESP_LOGD(TAG, "Screen filled navy blue: %s", esp_err_to_name(err));
+        status_ui = display_ui_init() == ESP_OK;
     } else {
         ESP_LOGE(TAG, "Display init failed (%s) - continuing without display", esp_err_to_name(err));
     }
@@ -134,11 +139,11 @@ void app_main(void)
             if (!dragging && (abs(pt.x - start_x) > TAP_MAX_DRIFT_PX || abs(pt.y - start_y) > TAP_MAX_DRIFT_PX)) {
                 dragging = true;
                 ESP_LOGD(TAG, "DRAG  start x=%3d y=%3d", start_x, start_y);
-                display_draw_line(start_x, start_y, pt.x, pt.y, LINE_THICKNESS_PX, COLOR_BLACK);
+                if (!status_ui) display_draw_line(start_x, start_y, pt.x, pt.y, LINE_THICKNESS_PX, COLOR_BLACK);
                 last_x = pt.x;
                 last_y = pt.y;
             } else if (dragging && (pt.x != last_x || pt.y != last_y)) {
-                display_draw_line(last_x, last_y, pt.x, pt.y, LINE_THICKNESS_PX, COLOR_BLACK);
+                if (!status_ui) display_draw_line(last_x, last_y, pt.x, pt.y, LINE_THICKNESS_PX, COLOR_BLACK);
                 ESP_LOGD(TAG, "MOVE  x=%3d y=%3d", pt.x, pt.y);
                 last_x = pt.x;
                 last_y = pt.y;
@@ -150,7 +155,7 @@ void app_main(void)
                 diag_touch_event("drag %d,%d -> %d,%d", start_x, start_y, last_x, last_y);
             } else {
                 uint16_t color = random_color();
-                display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
+                if (!status_ui) display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
                 ESP_LOGD(TAG, "TAP   x=%3d y=%3d color=0x%04X", start_x, start_y, color);
                 diag_touch_event("tap %d,%d color 0x%04X", start_x, start_y, color);
             }
@@ -161,7 +166,7 @@ void app_main(void)
         }
         was_pressed = pt.pressed;
 
-        if (display_ok) {
+        if (display_ok && !status_ui) {
             display_flush();
         }
     }

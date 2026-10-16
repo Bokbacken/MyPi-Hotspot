@@ -39,6 +39,7 @@ static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;          // Full framebuffer, LCD_H_RES * LCD_V_RES, in PSRAM
 static uint16_t *s_dma_buf[2];  // Ping-pong bounce buffers in internal DMA memory
 static SemaphoreHandle_t s_trans_done;
+static SemaphoreHandle_t s_lock;    // Recursive: serializes drawing + flushing between tasks
 
 // Dirty rectangle (inclusive). s_dirty_x0 > s_dirty_x1 means "nothing dirty".
 static int s_dirty_x0 = LCD_H_RES, s_dirty_y0 = LCD_V_RES, s_dirty_x1 = -1, s_dirty_y1 = -1;
@@ -116,8 +117,19 @@ static void read_panel_ids(void)
                     all_same ? " - SDO likely not wired" : "");
 }
 
+void display_lock(void)
+{
+    if (s_lock) xSemaphoreTakeRecursive(s_lock, portMAX_DELAY);
+}
+
+void display_unlock(void)
+{
+    if (s_lock) xSemaphoreGiveRecursive(s_lock);
+}
+
 esp_err_t display_init(void)
 {
+    if (!s_lock) s_lock = xSemaphoreCreateRecursiveMutex();
     diag_set_display_status("initializing");
     diag_set_spi_clock(LCD_PIXEL_CLOCK_HZ);
     ESP_LOGD(TAG, "Pins: SCLK=%d MOSI=%d MISO=%d SD_CS=%d LCD_CS=%d LCD_DC=%d LCD_RESET=%d LCD_BL=%d",
@@ -305,7 +317,17 @@ void display_draw_line(int x0, int y0, int x1, int y1, int thickness, uint16_t c
     }
 }
 
+static esp_err_t flush_locked(void);
+
 esp_err_t display_flush(void)
+{
+    display_lock();
+    esp_err_t err = flush_locked();
+    display_unlock();
+    return err;
+}
+
+static esp_err_t flush_locked(void)
 {
     if (!s_panel || !s_fb) {
         return ESP_ERR_INVALID_STATE;

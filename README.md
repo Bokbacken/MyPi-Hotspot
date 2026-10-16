@@ -3,8 +3,8 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Current version: **0.5.0** — the display/touch **hello world**, Wi-Fi uplink + own access point
-(APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats and an iperf throughput test,
+Current version: **0.5.1** — an **LCD status screen**, Wi-Fi uplink + own access point
+(APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
 a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
@@ -114,16 +114,18 @@ MyPi-Hotspot/
     ├── CMakeLists.txt
     ├── Kconfig.projbuild Project options (menuconfig → "MyPi-Hotspot")
     ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns, iperf
-    ├── main.c            app_main: init, touch loop, tap/drag logic, OTA rollback confirm
+    ├── main.c            app_main: init, status screen start, touch loop, OTA rollback confirm
     ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
     ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
+    ├── display_font.h/.c Classic 5×7 ASCII font (Adafruit GFX glcdfont) + up/down arrows
+    ├── display_ui.h/.c   Text/icon drawing and the LCD status screen task (redraw every 2 s)
     ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
     ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
     ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
     ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
     ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
     ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
-    ├── net.h/.c          NAPT, DHCP server setup, per-interface traffic counters, iperf server
+    ├── net.h/.c          NAPT, DHCP server setup, traffic counters + peaks, traffic log (PSRAM), iperf server
     ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (L2 bridge to the AP) or WAN (uplink)
     └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload, network API
 ```
@@ -225,7 +227,7 @@ pin lists and touch events only appear in debug mode.
 
 ```
 I (...) diag: ==================================================
-I (...) diag:  MyPi-Hotspot firmware 0.5.0
+I (...) diag:  MyPi-Hotspot firmware 0.5.1
 I (...) diag:  Chip: esp32p4, 2 core(s), revision v3.1
 I (...) diag:  Reset reason: power-on (1)
 I (...) diag:  Running partition: ota_0 @ 0x020000 (6144 KB)
@@ -360,7 +362,10 @@ All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or 
 | `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
 | `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
 | `GET /api/eth` / `POST /api/eth` | link, speed, IP (WAN), active/saved mode, `bridged`, `bridge_drops` (LAN) / `{mode:"lan"\|"wan"}` |
-| `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_bps`/`tx_bps` (bytes/s, 1 s window) |
+| `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_bps`/`tx_bps` (bytes/s, 1 s window), `rx_bps_peak`/`tx_bps_peak`; plus `log_running`, `log_ever`, `log_samples`, `log_max` |
+| `POST /api/netstats/reset` | clear the peak rates → `{"ok":true}` |
+| `POST /api/netstats/log/start` / `stop` | start (clears old samples) / stop the traffic log → `{"ok":true,"running":…,"samples":N}` |
+| `GET /api/netstats/log` | traffic log as CSV download (`hotspot_log.csv`): `ts,sta_rx_bps,sta_tx_bps,ap_rx_bps,ap_tx_bps,eth_rx_bps,eth_tx_bps` (bytes/s) |
 | `POST /api/iperf/start` / `stop`, `GET /api/iperf` | `{window_s}` / iperf server state and results |
 
 `/api/status` now also contains `uplink` (`sta`, `eth` or `none`), `sta_profile`, an `ap` object and an `eth` object.
@@ -383,6 +388,20 @@ This measures the radio/cable link to the P4, not the router path.
 and run an internet speed test (e.g. fast.com / speedtest.net). Watch *Network traffic*: the AP RX/TX
 should mirror the STA TX/RX. The result is limited by the slowest of: uplink signal, shared radio airtime
 (see below), SDIO to the C5, and NAPT forwarding on the P4.
+
+**3. Peaks and the traffic log (v0.5.1).** The *Network traffic* table also shows the highest 1 s rate
+per interface (**Reset peaks** clears them). **Start log** records one sample per second for every interface
+into a 3600-sample ring buffer in PSRAM (1 hour; older samples are overwritten); **Download CSV** saves it.
+Start the log, run a speed test or iperf, stop the log and compare the STA and AP columns to see where the
+ceiling is.
+
+### LCD status screen (v0.5.1)
+
+After boot the panel shows a status screen, refreshed every 2 s: title (Wi-Fi icon when the AP runs),
+uplink IP (green, or red *No uplink*), uplink SSID + channel, AP clients + channel and SSID, Ethernet state,
+uplink throughput (live in cyan, peak in yellow, Mbit/s) and the traffic log state once it has been used.
+While the status screen runs, touch drawing is disabled (touch events still appear in the web UI).
+*Not yet verified on hardware.*
 
 ### Known limitations (read this)
 

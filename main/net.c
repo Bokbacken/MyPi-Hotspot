@@ -1,10 +1,13 @@
 #include "net.h"
 
+#include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif_net_stack.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "iperf.h"
 #include "lwip/lwip_napt.h"
@@ -84,6 +87,7 @@ typedef struct {
     uint32_t rx_pkts, tx_pkts;
     uint64_t last_rx, last_tx;
     uint32_t rx_bps, tx_bps;
+    uint32_t rx_bps_peak, tx_bps_peak;
     bool manual;                // counted by net_stats_add() (no lwIP netif, e.g. bridged ETH)
 } if_slot_t;
 
@@ -214,7 +218,147 @@ void net_stats_get(net_if_id_t id, net_if_stats_t *out)
     out->tx_pkts = s->tx_pkts;
     out->rx_bps = s->rx_bps;
     out->tx_bps = s->tx_bps;
+    out->rx_bps_peak = s->rx_bps_peak;
+    out->tx_bps_peak = s->tx_bps_peak;
     portEXIT_CRITICAL(&s_mux);
+}
+
+void net_stats_reset_peaks(void)
+{
+    portENTER_CRITICAL(&s_mux);
+    for (int i = 0; i < NET_IF_COUNT; i++) {
+        s_if[i].rx_bps_peak = 0;
+        s_if[i].tx_bps_peak = 0;
+    }
+    portEXIT_CRITICAL(&s_mux);
+}
+
+// ---------------------------------------------------------------------------
+// Traffic log (ring buffer in PSRAM, one sample per second)
+// ---------------------------------------------------------------------------
+
+static net_log_sample_t *s_log;         // NET_LOG_MAX_SAMPLES entries, allocated lazily
+static SemaphoreHandle_t s_log_mtx;
+static uint32_t s_log_head;             // index of the oldest sample
+static uint32_t s_log_count;
+static TickType_t s_log_t0;             // tick count when the log was started
+static volatile bool s_log_running;
+static volatile bool s_log_ever;
+
+static bool log_lock_to(TickType_t to)
+{
+    if (!s_log_mtx) {
+        static portMUX_TYPE init_mux = portMUX_INITIALIZER_UNLOCKED;
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        if (!m) return false;
+        portENTER_CRITICAL(&init_mux);
+        if (!s_log_mtx) {
+            s_log_mtx = m;
+            m = NULL;
+        }
+        portEXIT_CRITICAL(&init_mux);
+        if (m) vSemaphoreDelete(m);
+    }
+    return xSemaphoreTake(s_log_mtx, to) == pdTRUE;
+}
+
+static bool log_lock(void) { return log_lock_to(portMAX_DELAY); }
+
+static void log_unlock(void) { xSemaphoreGive(s_log_mtx); }
+
+esp_err_t net_log_start(void)
+{
+    if (!log_lock()) return ESP_ERR_NO_MEM;
+    if (!s_log) {
+        s_log = heap_caps_malloc(sizeof(net_log_sample_t) * NET_LOG_MAX_SAMPLES, MALLOC_CAP_SPIRAM);
+        if (!s_log) {
+            log_unlock();
+            ESP_LOGE(TAG, "traffic log: PSRAM allocation failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    s_log_head = 0;
+    s_log_count = 0;
+    s_log_t0 = xTaskGetTickCount();
+    s_log_running = true;
+    s_log_ever = true;
+    log_unlock();
+    ESP_LOGI(TAG, "traffic log started (max %d samples)", NET_LOG_MAX_SAMPLES);
+    return ESP_OK;
+}
+
+void net_log_stop(void)
+{
+    if (!log_lock()) return;
+    bool was = s_log_running;
+    s_log_running = false;
+    uint32_t n = s_log_count;
+    log_unlock();
+    if (was) ESP_LOGI(TAG, "traffic log stopped, %lu samples", (unsigned long)n);
+}
+
+bool net_log_is_running(void) { return s_log_running; }
+bool net_log_ever_started(void) { return s_log_ever; }
+
+uint32_t net_log_sample_count(void)
+{
+    if (!log_lock()) return 0;
+    uint32_t n = s_log_count;
+    log_unlock();
+    return n;
+}
+
+static void log_add(const uint32_t *rx, const uint32_t *tx)
+{
+    // Never stall the sampler: if a CSV download holds the lock, drop this sample.
+    if (!s_log_running || !log_lock_to(pdMS_TO_TICKS(20))) return;
+    if (s_log_running && s_log) {
+        uint32_t idx = (s_log_head + s_log_count) % NET_LOG_MAX_SAMPLES;
+        if (s_log_count == NET_LOG_MAX_SAMPLES) {
+            s_log_head = (s_log_head + 1) % NET_LOG_MAX_SAMPLES;  // overwrite the oldest
+        } else {
+            s_log_count++;
+        }
+        net_log_sample_t *e = &s_log[idx];
+        e->ts = (uint32_t)((uint64_t)(xTaskGetTickCount() - s_log_t0) * portTICK_PERIOD_MS / 1000);
+        memcpy(e->rx_bps, rx, sizeof(e->rx_bps));
+        memcpy(e->tx_bps, tx, sizeof(e->tx_bps));
+    }
+    log_unlock();
+}
+
+esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx)
+{
+    if (!fn) return ESP_ERR_INVALID_ARG;
+    static const char header[] = "ts,sta_rx_bps,sta_tx_bps,ap_rx_bps,ap_tx_bps,eth_rx_bps,eth_tx_bps\n";
+    if (!fn(header, sizeof(header) - 1, ctx)) return ESP_FAIL;
+    if (!log_lock()) return ESP_ERR_NO_MEM;
+    // Rows are batched into a chunk buffer; the lock is held while streaming so
+    // the sampler cannot overwrite entries mid-read (it only misses samples).
+    char buf[1024];
+    size_t used = 0;
+    esp_err_t err = ESP_OK;
+    for (uint32_t i = 0; i < s_log_count && s_log; i++) {
+        const net_log_sample_t *e = &s_log[(s_log_head + i) % NET_LOG_MAX_SAMPLES];
+        char row[96];
+        int n = snprintf(row, sizeof(row), "%lu,%lu,%lu,%lu,%lu,%lu,%lu\n", (unsigned long)e->ts,
+                         (unsigned long)e->rx_bps[NET_IF_STA], (unsigned long)e->tx_bps[NET_IF_STA],
+                         (unsigned long)e->rx_bps[NET_IF_AP], (unsigned long)e->tx_bps[NET_IF_AP],
+                         (unsigned long)e->rx_bps[NET_IF_ETH], (unsigned long)e->tx_bps[NET_IF_ETH]);
+        if (n <= 0) continue;
+        if (used + (size_t)n > sizeof(buf)) {
+            if (!fn(buf, used, ctx)) {
+                err = ESP_FAIL;
+                break;
+            }
+            used = 0;
+        }
+        memcpy(buf + used, row, (size_t)n);
+        used += (size_t)n;
+    }
+    if (err == ESP_OK && used && !fn(buf, used, ctx)) err = ESP_FAIL;
+    log_unlock();
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +465,7 @@ static void sampler_task(void *arg)
     while (true) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(1000));
         esp_netif_tcpip_exec(install_hooks_cb, NULL);
+        uint32_t rx[NET_IF_COUNT], tx[NET_IF_COUNT];
         portENTER_CRITICAL(&s_mux);
         for (int i = 0; i < NET_IF_COUNT; i++) {
             if_slot_t *s = &s_if[i];
@@ -328,8 +473,13 @@ static void sampler_task(void *arg)
             s->tx_bps = (uint32_t)(s->tx_bytes - s->last_tx);
             s->last_rx = s->rx_bytes;
             s->last_tx = s->tx_bytes;
+            if (s->rx_bps > s->rx_bps_peak) s->rx_bps_peak = s->rx_bps;
+            if (s->tx_bps > s->tx_bps_peak) s->tx_bps_peak = s->tx_bps;
+            rx[i] = s->rx_bps;
+            tx[i] = s->tx_bps;
         }
         portEXIT_CRITICAL(&s_mux);
+        log_add(rx, tx);
 
         if (s_iperf_armed) {
             if (!s_iperf_running && s_iperf_left_s > 0) s_iperf_left_s--;

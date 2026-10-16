@@ -49,6 +49,8 @@ static const char INDEX_HTML[] =
 "<p id='msg'></p>"
 "<table id='t'></table>"
 "<h2>Network traffic</h2><table id='ns'></table>"
+"<p><button onclick='resetPeaks()'>Reset peaks</button> <button id='lb' onclick='logToggle()'>Start log</button> "
+"<button onclick='dlLog()'>Download CSV</button> <span id='lst'></span></p>"
 "<h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
 "<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
 "<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
@@ -146,8 +148,11 @@ static const char INDEX_HTML[] =
 "$('es').textContent='Active mode: '+s.eth.mode+', saved: '+s.eth.saved_mode+(s.eth.mac?', MAC '+s.eth.mac:'')+(s.eth.mode=='lan'?' - LAN (bridged to AP, '+lanNet(s)+'), no own IP, bridge '+(s.eth.bridged?'active':'idle')+', drops '+s.eth.bridge_drops:(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:''));"
 "$('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let n=await (await fetch('/api/netstats')).json();"
-"$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
-"i.present?mb(i.rx_bps):'-',i.present?mb(i.tx_bps):'-',(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
+"$('ns').innerHTML=tr(['If','RX Mbit/s','TX Mbit/s','RX peak','TX peak','RX total MB','TX total MB','RX/TX pkts'],1)+n.interfaces.map(i=>tr([i.name,"
+"i.present?mb(i.rx_bps):'-',i.present?mb(i.tx_bps):'-',i.present?mb(i.rx_bps_peak):'-',i.present?mb(i.tx_bps_peak):'-',"
+"(i.rx_bytes/1e6).toFixed(1),(i.tx_bytes/1e6).toFixed(1),i.rx_pkts+'/'+i.tx_pkts])).join('');"
+"logRun=n.log_running;$('lb').textContent=logRun?'Stop log':'Start log';"
+"$('lst').textContent=n.log_ever?(logRun?'Logging: ':'Log stopped: ')+n.log_samples+'/'+n.log_max+' samples':'';"
 "let a=await (await fetch('/api/apstatus')).json();"
 "$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
@@ -158,6 +163,10 @@ static const char INDEX_HTML[] =
 "if($('follow').checked)q.scrollTop=q.scrollHeight;"
 "}catch(e){$('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
 "function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
+"let logRun=false;"
+"function resetPeaks(){fetch('/api/netstats/reset',{method:'POST'}).then(tick)}"
+"function logToggle(){fetch('/api/netstats/log/'+(logRun?'stop':'start'),{method:'POST'}).then(tick)}"
+"function dlLog(){location='/api/netstats/log'}"
 "for(let i=0;i<10;i++)$('ss').innerHTML+='<option>'+i+'</option>';for(let i=0;i<4;i++)$('as').innerHTML+='<option>'+i+'</option>';"
 "ld();tick();setInterval(tick,2000);</script></body></html>";
 
@@ -477,7 +486,7 @@ static esp_err_t update_post(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
-// JSON helpers and network API (v0.5.0)
+// JSON helpers and network API (v0.5.0+)
 // ---------------------------------------------------------------------------
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *j)
@@ -850,9 +859,58 @@ static esp_err_t api_netstats_get(httpd_req_t *req)
         cJSON_AddNumberToObject(o, "tx_pkts", s.tx_pkts);
         cJSON_AddNumberToObject(o, "rx_bps", s.rx_bps);   // bytes per second
         cJSON_AddNumberToObject(o, "tx_bps", s.tx_bps);
+        cJSON_AddNumberToObject(o, "rx_bps_peak", s.rx_bps_peak);
+        cJSON_AddNumberToObject(o, "tx_bps_peak", s.tx_bps_peak);
         cJSON_AddItemToArray(arr, o);
     }
+    cJSON_AddBoolToObject(j, "log_running", net_log_is_running());
+    cJSON_AddBoolToObject(j, "log_ever", net_log_ever_started());
+    cJSON_AddNumberToObject(j, "log_samples", net_log_sample_count());
+    cJSON_AddNumberToObject(j, "log_max", NET_LOG_MAX_SAMPLES);
     return send_json(req, j);
+}
+
+static esp_err_t api_netstats_reset(httpd_req_t *req)
+{
+    net_stats_reset_peaks();
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", true);
+    return send_json(req, j);
+}
+
+static esp_err_t api_netlog_start(httpd_req_t *req)
+{
+    esp_err_t err = net_log_start();
+    if (err != ESP_OK) return send_result(req, err, NULL, "PSRAM allocation failed");
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", true);
+    cJSON_AddBoolToObject(j, "running", true);
+    return send_json(req, j);
+}
+
+static esp_err_t api_netlog_stop(httpd_req_t *req)
+{
+    net_log_stop();
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", true);
+    cJSON_AddBoolToObject(j, "running", false);
+    cJSON_AddNumberToObject(j, "samples", net_log_sample_count());
+    return send_json(req, j);
+}
+
+static bool csv_chunk_cb(const char *buf, size_t len, void *ctx)
+{
+    return httpd_resp_send_chunk((httpd_req_t *)ctx, buf, (ssize_t)len) == ESP_OK;
+}
+
+static esp_err_t api_netlog_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"hotspot_log.csv\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = net_log_write_csv(csv_chunk_cb, req);
+    if (err != ESP_OK) return err;  // connection is broken; httpd closes it
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 // --- iperf ---
@@ -925,6 +983,10 @@ esp_err_t web_start(void)
         { .uri = "/api/eth",            .method = HTTP_GET,  .handler = api_eth_get },
         { .uri = "/api/eth",            .method = HTTP_POST, .handler = api_eth_post },
         { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
+        { .uri = "/api/netstats/reset", .method = HTTP_POST, .handler = api_netstats_reset },
+        { .uri = "/api/netstats/log/start", .method = HTTP_POST, .handler = api_netlog_start },
+        { .uri = "/api/netstats/log/stop",  .method = HTTP_POST, .handler = api_netlog_stop },
+        { .uri = "/api/netstats/log",   .method = HTTP_GET,  .handler = api_netlog_get },
         { .uri = "/api/iperf/start",    .method = HTTP_POST, .handler = api_iperf_start },
         { .uri = "/api/iperf/stop",     .method = HTTP_POST, .handler = api_iperf_stop },
         { .uri = "/api/iperf",          .method = HTTP_GET,  .handler = api_iperf_get },

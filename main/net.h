@@ -17,7 +17,32 @@ typedef struct {
     uint64_t rx_bytes, tx_bytes;
     uint32_t rx_pkts, tx_pkts;
     uint32_t rx_bps, tx_bps;    // bytes per second over the last 1 s sample
+    uint32_t rx_bps_peak, tx_bps_peak;  // highest 1 s rate since boot / last reset
 } net_if_stats_t;
+
+/** Clear the peak rates of all interfaces. */
+void net_stats_reset_peaks(void);
+
+// --- Traffic log: 1 sample/s ring buffer in PSRAM (allocated on first start) ---
+#define NET_LOG_MAX_SAMPLES 3600
+
+typedef struct {
+    uint32_t ts;                        // seconds since the log was started
+    uint32_t rx_bps[NET_IF_COUNT];
+    uint32_t tx_bps[NET_IF_COUNT];
+} net_log_sample_t;
+
+/** Start (or restart, clearing old samples) the traffic log. */
+esp_err_t net_log_start(void);
+void net_log_stop(void);
+bool net_log_is_running(void);
+/** True once the log has been started at least once since boot. */
+bool net_log_ever_started(void);
+uint32_t net_log_sample_count(void);
+/** Write callback for net_log_write_csv(); return false to abort. */
+typedef bool (*net_log_write_fn)(const char *buf, size_t len, void *ctx);
+/** Stream the log as CSV (header + one row per sample, oldest first). */
+esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx);
 
 /** Start the 1 s sampler task (hooks interfaces as they appear). */
 void net_stats_start(void);
