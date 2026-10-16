@@ -28,6 +28,8 @@ typedef struct {
     bool bridged;               // LAN mode: bridge to the AP is forwarding
     uint32_t bridge_drops;      // frames dropped by the bridge (queue full etc.)
     uint32_t bridge_inject_drops;   // subset: ETH -> host (lwIP) drops
+    bool rescue;                // emergency mode active (standalone interface, not stored)
+    bool rescue_dhcp;           // rescue: DHCP client (false = static IP)
 } eth_info_t;
 
 /** LAN mode: start/stop forwarding between Ethernet and the Wi-Fi AP (call on AP start/stop). */
@@ -45,3 +47,12 @@ bool eth_is_wan_uplink(void);
 /** Store the mode in NVS; takes effect after reboot. */
 esp_err_t eth_set_mode(eth_mode_t mode);
 const char *eth_mode_name(eth_mode_t m);
+
+/**
+ * Emergency (rescue) mode: give Ethernet its own IP stack independent of Wi-Fi /
+ * ESP-Hosted. In LAN mode the L2 bridge is stopped and a netif is created at
+ * runtime. dhcp = DHCP client, otherwise static a.b.c.d/24 with gateway a.b.c.1.
+ * Can be called again to switch between DHCP and static. Not stored in NVS.
+ */
+esp_err_t eth_rescue_apply(bool dhcp, uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+bool eth_rescue_active(void);

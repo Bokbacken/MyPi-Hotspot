@@ -27,6 +27,7 @@
 #include "net.h"
 #include "pintest.h"
 #include "profiles.h"
+#include "rescue.h"
 #include "sdkconfig.h"
 #include "wifi.h"
 
@@ -164,6 +165,7 @@ static const char INDEX_HTML[] =
 "row('STA IP',s.ip)+row('RSSI',s.rssi+' dBm')+"
 "row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', '+chText(s.ap)+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
 "(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
+"(s.eth.rescue&&s.eth.rescue.active?row('EMERGENCY MODE','Ethernet only ('+esc(s.eth.rescue.reason)+'), option '+esc(s.eth.rescue.option)+(s.eth.rescue.error?' - error '+esc(s.eth.rescue.error):'')+'. Wi-Fi AP stopped; reboot to leave.','bad'):'')+"
 "row('Ethernet',s.eth.initialized?(s.eth.mode=='lan'?'LAN (bridged to AP, '+lanNet(s)+', no own IP)'+(s.eth.bridged?'':' - bridge idle (AP off)'):'WAN'+(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:', no IP yet'))+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down'):"
 "'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
 "row('ESP-Hosted',s.hosted)+"
@@ -1127,6 +1129,16 @@ static void add_eth_info(cJSON *o)
     cJSON_AddBoolToObject(o, "bridged", e.bridged);
     cJSON_AddNumberToObject(o, "bridge_drops", e.bridge_drops);
     cJSON_AddNumberToObject(o, "bridge_inject_drops", e.bridge_inject_drops);
+    rescue_state_t r;
+    rescue_get(&r);
+    cJSON *rj = cJSON_AddObjectToObject(o, "rescue");
+    cJSON_AddBoolToObject(rj, "active", r.active);
+    cJSON_AddStringToObject(rj, "reason", rescue_reason_text(r.reason));
+    char label[20] = "";
+    if (r.option >= 0) rescue_option_label(r.option, label, sizeof(label));
+    cJSON_AddStringToObject(rj, "option", label);
+    cJSON_AddBoolToObject(rj, "busy", r.busy);
+    cJSON_AddStringToObject(rj, "error", r.err == ESP_OK ? "" : esp_err_to_name(r.err));
 }
 
 static esp_err_t api_eth_get(httpd_req_t *req)

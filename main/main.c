@@ -24,6 +24,7 @@
 #include "logbuf.h"
 #include "nvs_flash.h"
 #include "pintest.h"
+#include "rescue.h"
 #include "wifi.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -36,6 +37,7 @@ static const char *TAG = "main";
 #define TAP_MAX_DRIFT_PX    10
 #define DOT_RADIUS_PX       8
 #define LINE_THICKNESS_PX   3
+#define SWIPE_MIN_PX        60      // emergency-mode swipe: vertical travel downwards (screen coordinates)
 
 static uint16_t random_color(void)
 {
@@ -159,6 +161,17 @@ void app_main(void)
             if (dragging) {
                 ESP_LOGD(TAG, "UP    drag end x=%3d y=%3d", last_x, last_y);
                 diag_touch_event("drag %d,%d -> %d,%d", start_x, start_y, last_x, last_y);
+                // Swipe down within the boot window -> emergency mode. Uses the (rotation
+                // corrected) coordinates, not the controller gesture, which ignores rotation.
+                int dy = last_y - start_y, dx = abs(last_x - start_x);
+                if (!rescue_active() && dy >= SWIPE_MIN_PX && dx < dy && rescue_swipe_seconds_left() > 0) {
+                    ESP_LOGW(TAG, "Swipe down within %d s of boot - entering emergency mode", RESCUE_SWIPE_WINDOW_S);
+                    rescue_request(RESCUE_REASON_SWIPE);
+                }
+            } else if (rescue_active()) {
+                int opt = display_ui_rescue_hit(start_x, start_y);
+                diag_touch_event("rescue tap %d,%d -> option %d", start_x, start_y, opt);
+                if (opt >= 0) rescue_select(opt);
             } else {
                 uint16_t color = random_color();
                 if (!status_ui) display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);

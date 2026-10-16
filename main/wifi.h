@@ -52,6 +52,8 @@ typedef struct {
 /** Start the AP with a saved profile (slot) or -1 = Kconfig default. Replaces a running AP. */
 esp_err_t wifi_ap_start(int slot);
 esp_err_t wifi_ap_stop(void);
+/** Emergency mode: take the AP interface down at once and stop the AP radio in the background. */
+void wifi_rescue_stop_ap(void);
 void wifi_get_ap_info(wifi_ap_info_t *out);
 /** Connected AP stations (RPC to the co-processor). Returns count. */
 int wifi_ap_clients(wifi_client_t *out, int max);

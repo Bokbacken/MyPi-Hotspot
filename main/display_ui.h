@@ -33,3 +33,5 @@ void display_draw_wifi_icon(int cx, int cy, uint16_t color);
 esp_err_t display_ui_init(void);
 /** Stop the status screen task (the last frame stays on the panel). */
 void display_ui_stop(void);
+/** Emergency mode screen: option index (RESCUE_OPT_*) at touch point (x, y), or -1. */
+int display_ui_rescue_hit(int x, int y);

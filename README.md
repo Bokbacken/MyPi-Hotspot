@@ -119,6 +119,7 @@ MyPi-Hotspot/
     ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
     ├── display_font.h/.c Classic 5×7 ASCII font (Adafruit GFX glcdfont) + up/down arrows
     ├── display_ui.h/.c   Text/icon drawing and the LCD status screen task (redraw every 2 s)
+    ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
     ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
     ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
     ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
@@ -424,6 +425,46 @@ uplink IP (green, or red *No uplink*), uplink SSID + channel, AP clients + chann
 uplink throughput (live in cyan, peak in yellow, Mbit/s) and the traffic log state once it has been used.
 While the status screen runs, touch drawing is disabled (touch events still appear in the web UI).
 *Not yet verified on hardware.*
+
+### Emergency mode (Ethernet rescue, v0.7.0)
+
+Ethernet-only access when Wi-Fi or the ESP32-C5 is unusable. Runtime only - a
+reboot always returns to normal operation (nothing is stored in NVS).
+
+**Entering it**
+
+* **Manually:** swipe down on the LCD (at least 60 px, mostly vertical) within
+  10 s of power-on. The status screen shows a countdown
+  `Swipe down: emergency mode (Ns)` while the window is open. The swipe is
+  detected from the rotation-corrected touch coordinates, so it works with the
+  180-degree mounting too.
+* **Automatically** when the C5 fails completely:
+  * `esp_wifi_init()` / Wi-Fi start fails, or `esp_wifi_init()` has not returned
+    after 30 s;
+  * ESP-Hosted posts `ESP_HOSTED_EVENT_TRANSPORT_FAILURE` (SDIO slave
+    unresponsive);
+  * 3 consecutive failed RPC health checks (`esp_hosted_get_coprocessor_fwversion`
+    every 60 s).
+  Checks are paused while the LCD shows a P4/C5 OTA update.
+
+**What happens**
+
+1. The Wi-Fi AP interface is taken down at once (no RPC, so it works with a dead
+   C5) and the AP radio is stopped in the background. NAPT and the LAN bridge stop.
+2. Ethernet gets its own IP stack: in LAN (bridge) mode a netif is created at
+   runtime; in WAN mode the existing one is reused. The saved Ethernet mode is not
+   changed.
+3. The LCD shows 5 buttons: **DHCP** (preselected; the obtained IP is shown in
+   large text) and a static `<AP subnet>.32/24` for each of the 4 AP subnets
+   (`AP_SUBNET_BASE`, e.g. `192.168.4.32`, gateway `.1`). Tap another button to
+   switch at any time.
+4. The web UI is reachable at `http://<that IP>/`; the status page shows an
+   `EMERGENCY MODE` row and `/api/status` has `eth.rescue`. STA profiles, C5
+   update (`/c5update`), P4 update (`/update`) and reboot work as usual. Starting
+   the AP is blocked until reboot (it would clash with the static subnet).
+
+For a laptop connected directly with a cable: choose e.g. `192.168.4.32` on the
+LCD and give the laptop a static `192.168.4.x/24` (not .1 or .32).
 
 ### Known limitations (read this)
 

@@ -6,6 +6,8 @@
 #include "diag.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
+#include "esp_hosted_event.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -20,6 +22,7 @@
 #include "net.h"
 #include "nvs.h"
 #include "profiles.h"
+#include "rescue.h"
 #include "sdkconfig.h"
 #include "web.h"
 
@@ -134,6 +137,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_ap_clients = 0;
             if (s_ap_cur.nat) net_napt(s_ap, true);
             eth_bridge_start();     // LAN mode: wired clients join the AP subnet
+            if (rescue_active()) {
+                ESP_LOGW(TAG, "AP started during emergency mode - stopping it again");
+                wifi_rescue_stop_ap();
+            }
             break;
         case WIFI_EVENT_AP_STOP:
             ESP_LOGI(TAG, "AP stopped");
@@ -555,6 +562,28 @@ esp_err_t wifi_ap_start(int slot)
     return err;
 }
 
+static void ap_stop_task(void *arg)
+{
+    esp_err_t err = wifi_ap_stop();     // may block/fail if the C5 is dead
+    ESP_LOGW(TAG, "Rescue: AP radio stop: %s", esp_err_to_name(err));
+    vTaskDelete(NULL);
+}
+
+void wifi_rescue_stop_ap(void)
+{
+    eth_bridge_stop();
+    if (s_ap && esp_netif_is_netif_up(s_ap)) {
+        // Take the AP subnet off the IP stack right away (no RPC), so a static
+        // Ethernet rescue IP in the same subnet routes correctly even if the C5 hangs.
+        net_napt(s_ap, false);
+        esp_netif_action_stop(s_ap, NULL, 0, NULL);
+        ESP_LOGW(TAG, "Rescue: AP interface down");
+    }
+    if (s_ap_running && xTaskCreate(ap_stop_task, "ap_stop", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Rescue: cannot create AP stop task");
+    }
+}
+
 esp_err_t wifi_ap_stop(void)
 {
     if (!s_lock || !lock()) return ESP_ERR_TIMEOUT;
@@ -856,11 +885,54 @@ static void refresh_ap_channel(void)
         if (_e != ESP_OK) {                                                         \
             ESP_LOGE(TAG, "[FAIL] %s: %s", #expr, esp_err_to_name(_e));             \
             diag_set_wifi(WIFI_STATE_INIT_FAILED, NULL, 0);                         \
+            rescue_request(RESCUE_REASON_C5_INIT_FAIL);                             \
             vTaskDelete(NULL);                                                      \
             return;                                                                 \
         }                                                                           \
         ESP_LOGD(TAG, "[ OK ] %s", #expr);                                          \
     } while (0)
+
+#define C5_INIT_TIMEOUT_S       30      // esp_wifi_init() normally returns within a few seconds
+#define C5_HEALTH_PERIOD_S      60      // RPC health check interval once Wi-Fi runs
+#define C5_HEALTH_MAX_FAILS     3       // consecutive failures before emergency mode
+
+static void on_hosted_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (id != ESP_HOSTED_EVENT_TRANSPORT_FAILURE) return;
+    if (diag_ota_ui_visible()) {
+        ESP_LOGW(TAG, "ESP-Hosted transport failure during OTA - ignored");
+        return;
+    }
+    ESP_LOGE(TAG, "ESP-Hosted transport failure: C5 co-processor unresponsive");
+    rescue_request(RESCUE_REASON_C5_TRANSPORT);
+}
+
+static void on_init_timeout(void *arg)
+{
+    ESP_LOGE(TAG, "esp_wifi_init() still running after %d s - C5 co-processor not responding", C5_INIT_TIMEOUT_S);
+    rescue_request(RESCUE_REASON_C5_INIT_TIMEOUT);
+}
+
+/** Periodic RPC to the C5 (called from wifi_task); counts consecutive failures. */
+static void c5_health_check(void)
+{
+    static int64_t s_next_us;
+    static int s_fails;
+    int64_t now = esp_timer_get_time();
+    if (now < s_next_us || rescue_active() || diag_ota_ui_visible()) return;
+    s_next_us = now + (int64_t)C5_HEALTH_PERIOD_S * 1000000;
+    if (!lock()) return;    // busy with another RPC: not a failure
+    esp_hosted_coprocessor_fwver_t ver = {0};
+    int r = esp_hosted_get_coprocessor_fwversion(&ver);
+    unlock();
+    if (r == ESP_OK) {
+        s_fails = 0;
+        return;
+    }
+    s_fails++;
+    ESP_LOGW(TAG, "C5 health check failed (err %d), %d/%d", r, s_fails, C5_HEALTH_MAX_FAILS);
+    if (s_fails >= C5_HEALTH_MAX_FAILS) rescue_request(RESCUE_REASON_C5_NO_RESPONSE);
+}
 
 static void wifi_task(void *arg)
 {
@@ -890,9 +962,21 @@ static void wifi_task(void *arg)
     net_stats_register(NET_IF_STA, s_sta);
     net_stats_register(NET_IF_AP, s_ap);
 
+    // Emergency mode triggers: SDIO transport failure, init timeout/failure, health check.
+    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID, on_hosted_event, NULL);
+    esp_timer_handle_t init_timer = NULL;
+    const esp_timer_create_args_t targs = {.callback = on_init_timeout, .name = "c5_init_wd"};
+    if (esp_timer_create(&targs, &init_timer) == ESP_OK) {
+        esp_timer_start_once(init_timer, (uint64_t)C5_INIT_TIMEOUT_S * 1000000);
+    }
+
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t init_err = esp_wifi_init(&cfg);
+    if (init_timer) {
+        esp_timer_stop(init_timer);
+        esp_timer_delete(init_timer);
+    }
     s_cp.wifi_init_ok = init_err == ESP_OK;
     log_hosted_info();      // also on failure: the C5 OTA page (/c5update) uses this info
     TRY(init_err);
@@ -902,7 +986,8 @@ static void wifi_task(void *arg)
     TRY(esp_event_handler_register(IP_EVENT, IP_EVENT_ASSIGNED_IP_TO_CLIENT, on_event, NULL));
 
     int boot_ap = ap_profile_boot_slot();
-    bool want_ap = boot_ap >= 0 || CONFIG_MYPI_AP_AUTOSTART;
+    bool want_ap = (boot_ap >= 0 || CONFIG_MYPI_AP_AUTOSTART) && !rescue_active();
+    if (rescue_active()) ESP_LOGW(TAG, "Emergency mode active - AP not started");
     if (want_ap) {
         esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
         if (err != ESP_OK) {
@@ -979,6 +1064,7 @@ static void wifi_task(void *arg)
                 }
             }
         }
+        c5_health_check();
         // Only re-read the AP channel when the STA channel changed: each read is an
         // RPC to the C5 (and ESP-Hosted 3.0.9 logs get_config as "set_config").
         static uint8_t s_ap_ch_checked_for = 0xFF;

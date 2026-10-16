@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "net.h"
+#include "rescue.h"
 #include "wifi.h"
 
 static const char *TAG = "display_ui";
@@ -25,6 +26,8 @@ static const char *TAG = "display_ui";
 
 static TaskHandle_t s_task;
 static volatile bool s_stop;
+
+static void draw_centered(int y, const char *s, uint16_t fg, int scale);
 
 // ---------------------------------------------------------------------------
 // Drawing primitives
@@ -194,6 +197,97 @@ static void draw_status(void)
         }
     }
 
+    // Row 9: boot-time hint for emergency mode.
+    int left = rescue_swipe_seconds_left();
+    if (left > 0) {
+        snprintf(buf, sizeof(buf), "Swipe down: emergency mode (%ds)", left);
+        display_draw_str(0, 150, buf, COL_ORANGE, COL_BLACK, 1);
+    }
+
+    display_flush();
+    display_unlock();
+}
+
+// ---------------------------------------------------------------------------
+// Emergency (rescue) mode: Ethernet-only, 5 touch buttons
+// ---------------------------------------------------------------------------
+
+#define RB_X0   8
+#define RB_X1   231
+#define RB_Y0   86
+#define RB_H    38
+#define RB_GAP  6
+
+int display_ui_rescue_hit(int x, int y)
+{
+    if (x < RB_X0 || x > RB_X1 || y < RB_Y0) return -1;
+    int i = (y - RB_Y0) / (RB_H + RB_GAP);
+    int off = (y - RB_Y0) % (RB_H + RB_GAP);
+    return i < RESCUE_OPT_COUNT && off < RB_H ? i : -1;
+}
+
+/** Cheap signature of everything shown, so the screen is only redrawn on change. */
+static uint32_t rescue_signature(const rescue_state_t *r, const eth_info_t *e)
+{
+    uint32_t h = (uint32_t)r->option * 31u + (r->busy ? 7u : 0u) + (uint32_t)r->err * 131u;
+    h = h * 33u + (e->link_up ? 1u : 0u) + (e->has_ip ? 2u : 0u) + (uint32_t)e->speed_mbps;
+    for (const char *p = e->ip; *p; p++) h = h * 33u + (uint8_t)*p;
+    return h;
+}
+
+static void draw_rescue(bool force)
+{
+    static uint32_t s_sig;
+    rescue_state_t r;
+    eth_info_t e;
+    rescue_get(&r);
+    eth_get_info(&e);
+    uint32_t sig = rescue_signature(&r, &e);
+    if (!force && sig == s_sig) return;
+    s_sig = sig;
+    char buf[48];
+
+    display_lock();
+    display_fill_screen(COL_BLACK);
+    draw_centered(2, "EMERGENCY MODE", COL_RED, 2);
+    snprintf(buf, sizeof(buf), "Reason: %s", rescue_reason_text(r.reason));
+    draw_centered(22, buf, COL_GRAY, 1);
+
+    if (!e.initialized) {
+        snprintf(buf, sizeof(buf), "Ethernet error: %.24s", e.error[0] ? e.error : "not initialized");
+        draw_centered(34, buf, COL_RED, 1);
+    } else if (!e.link_up) {
+        draw_centered(34, "Ethernet: no link (check cable)", COL_RED, 1);
+    } else {
+        snprintf(buf, sizeof(buf), "Ethernet: link up %d Mbit/s%s", e.speed_mbps, r.busy ? "  applying..." : "");
+        draw_centered(34, buf, COL_GREEN, 1);
+    }
+
+    // Current address: large, plus the web UI hint.
+    bool ip_ok = e.rescue && e.has_ip && e.ip[0] && strcmp(e.ip, "0.0.0.0") != 0;
+    if (r.err != ESP_OK) {
+        snprintf(buf, sizeof(buf), "Failed: %.30s", esp_err_to_name(r.err));
+        draw_centered(50, buf, COL_RED, 1);
+    } else if (ip_ok) {
+        draw_centered(48, e.ip, COL_CYAN, 2);
+        snprintf(buf, sizeof(buf), "Web UI: http://%s/", e.ip);
+        draw_centered(70, buf, COL_WHITE, 1);
+    } else {
+        draw_centered(48, r.option == RESCUE_OPT_DHCP ? "DHCP: waiting..." : "No IP yet", COL_YELLOW, 2);
+        draw_centered(70, "Tap an option below", COL_GRAY, 1);
+    }
+
+    for (int i = 0; i < RESCUE_OPT_COUNT; i++) {
+        int y0 = RB_Y0 + i * (RB_H + RB_GAP), y1 = y0 + RB_H - 1;
+        bool sel = i == r.option;
+        char label[20];
+        rescue_option_label(i, label, sizeof(label));
+        uint16_t fill = sel ? (i == RESCUE_OPT_DHCP ? COL_CYAN : COL_GREEN) : COL_BLACK;
+        display_fill_rect(RB_X0, y0, RB_X1 + 1, y1 + 1, fill);
+        display_draw_rect_outline(RB_X0, y0, RB_X1, y1, sel ? fill : COL_WHITE);
+        int w = (int)strlen(label) * CHAR_W * 2;
+        display_draw_str((LCD_H_RES - w) / 2, y0 + (RB_H - CHAR_H * 2) / 2, label, sel ? COL_BLACK : COL_WHITE, fill, 2);
+    }
     display_flush();
     display_unlock();
 }
@@ -327,11 +421,17 @@ static void ui_task(void *arg)
 {
     TickType_t last = xTaskGetTickCount();
     bool ota_shown = false;
+    bool rescue_shown = false;
     int ticks = 0;
     while (!s_stop) {
         if (diag_ota_ui_visible()) {
             draw_ota(!ota_shown);
             ota_shown = true;
+            rescue_shown = false;
+        } else if (rescue_active()) {
+            draw_rescue(!rescue_shown || ota_shown);    // redraws only on change
+            rescue_shown = true;
+            ota_shown = false;
         } else {
             if (ota_shown) {
                 // Leaving the OTA view: wipe it, then redraw the status screen right away.

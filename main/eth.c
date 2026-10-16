@@ -30,6 +30,8 @@ static esp_netif_t *s_netif;
 static eth_mode_t s_mode = ETH_MODE_LAN;
 static eth_mode_t s_saved_mode = ETH_MODE_LAN;
 static volatile bool s_init, s_link, s_has_ip;
+static volatile bool s_rescue;      // emergency mode: standalone netif, runtime only (not stored)
+static volatile bool s_rescue_dhcp;
 static char s_err[64];
 
 const char *eth_mode_name(eth_mode_t m) { return m == ETH_MODE_WAN ? "wan" : "lan"; }
@@ -82,7 +84,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         case ETHERNET_EVENT_DISCONNECTED:
             s_link = false;
-            if (s_mode == ETH_MODE_WAN) s_has_ip = false;
+            if (s_mode == ETH_MODE_WAN && !(s_rescue && !s_rescue_dhcp)) s_has_ip = false;
             ESP_LOGW(TAG, "Link down");
             break;
         case ETHERNET_EVENT_STOP:
@@ -94,8 +96,8 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *ev = data;
         s_has_ip = true;
-        ESP_LOGI(TAG, "WAN got IP " IPSTR " (gw " IPSTR ") - Ethernet is now the uplink", IP2STR(&ev->ip_info.ip),
-                 IP2STR(&ev->ip_info.gw));
+        ESP_LOGI(TAG, "%s got IP " IPSTR " (gw " IPSTR ") - Ethernet is now the uplink", s_rescue ? "Rescue" : "WAN",
+                 IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
         esp_netif_set_default_netif(s_netif);
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {
         s_has_ip = false;
@@ -289,6 +291,47 @@ bool eth_bridge_active(void) { return s_bridge_on; }
         }                                                                           \
     } while (0)
 
+static esp_err_t create_netif(void)
+{
+    esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
+    base.route_prio = 200;      // preferred over Wi-Fi STA (100) as uplink
+    esp_netif_config_t ncfg = {.base = &base, .driver = NULL, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH};
+    s_netif = esp_netif_new(&ncfg);
+    if (!s_netif) {
+        snprintf(s_err, sizeof(s_err), "esp_netif_new failed");
+        return ESP_FAIL;
+    }
+    esp_netif_set_hostname(s_netif, CONFIG_MYPI_HOSTNAME);
+    ETRY(esp_netif_attach(s_netif, esp_eth_new_netif_glue(s_eth)));
+    ETRY(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_event, NULL));
+    ETRY(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, on_event, NULL));
+    net_stats_register(NET_IF_ETH, s_netif);
+    return ESP_OK;
+}
+
+/** Rescue mode: DHCP client, or static a.b.c.d/24 (gateway a.b.c.1). */
+static esp_err_t apply_rescue_ip(bool dhcp, uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    esp_err_t err;
+    if (dhcp) {
+        s_has_ip = false;
+        esp_netif_dhcpc_stop(s_netif);   // restart so a fresh lease is requested
+        err = esp_netif_dhcpc_start(s_netif);
+        if (err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) err = ESP_OK;
+        ESP_LOGW(TAG, "Rescue: Ethernet DHCP client (%s)", esp_err_to_name(err));
+        return err;
+    }
+    esp_netif_dhcpc_stop(s_netif);   // "already stopped" is fine; also leaves INIT -> STOPPED
+    esp_netif_ip_info_t ip = {0};
+    esp_netif_set_ip4_addr(&ip.ip, a, b, c, d);
+    esp_netif_set_ip4_addr(&ip.netmask, 255, 255, 255, 0);
+    esp_netif_set_ip4_addr(&ip.gw, a, b, c, 1);
+    err = esp_netif_set_ip_info(s_netif, &ip);
+    s_has_ip = err == ESP_OK;
+    ESP_LOGW(TAG, "Rescue: Ethernet static IP %u.%u.%u.%u/24 (%s)", a, b, c, d, esp_err_to_name(err));
+    return err;
+}
+
 esp_err_t eth_init(void)
 {
     load_mode();
@@ -339,24 +382,42 @@ esp_err_t eth_init(void)
         return ESP_OK;
     }
 
-    esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
-    base.route_prio = 200;      // preferred over Wi-Fi STA (100) as uplink
-    esp_netif_config_t ncfg = {.base = &base, .driver = NULL, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH};
-    s_netif = esp_netif_new(&ncfg);
-    if (!s_netif) {
-        snprintf(s_err, sizeof(s_err), "esp_netif_new failed");
-        return ESP_FAIL;
-    }
-    esp_netif_set_hostname(s_netif, CONFIG_MYPI_HOSTNAME);
-    ETRY(esp_netif_attach(s_netif, esp_eth_new_netif_glue(s_eth)));
-    ETRY(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_event, NULL));
-    ETRY(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, on_event, NULL));
-    net_stats_register(NET_IF_ETH, s_netif);
+    ETRY(create_netif());
     ETRY(esp_eth_start(s_eth));
     s_init = true;
     s_err[0] = 0;
     return ESP_OK;
 }
+
+esp_err_t eth_rescue_apply(bool dhcp, uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    if (!s_init) {
+        ESP_LOGE(TAG, "Rescue: Ethernet driver not initialized (%s)", s_err[0] ? s_err : "unknown error");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_netif) {
+        // LAN (bridge) mode has no netif: stop the bridge and give Ethernet its own IP stack.
+        ESP_LOGW(TAG, "Rescue: switching Ethernet from L2 bridge to a standalone interface");
+        eth_bridge_stop();
+        bool promisc = false;
+        ETRY(esp_eth_stop(s_eth));
+        s_link = false;
+        esp_eth_ioctl(s_eth, ETH_CMD_S_PROMISCUOUS, &promisc);
+        ETRY(create_netif());   // attaching the glue replaces the bridge input path
+        s_mode = ETH_MODE_WAN;  // active mode only; NVS keeps the saved mode
+        s_rescue = true;
+        s_rescue_dhcp = dhcp;
+        ETRY(apply_rescue_ip(dhcp, a, b, c, d));
+        ETRY(esp_eth_start(s_eth));     // START/CONNECTED events bring the netif up
+        return ESP_OK;
+    }
+    s_mode = ETH_MODE_WAN;
+    s_rescue = true;
+    s_rescue_dhcp = dhcp;
+    return apply_rescue_ip(dhcp, a, b, c, d);
+}
+
+bool eth_rescue_active(void) { return s_rescue; }
 
 void eth_get_info(eth_info_t *o)
 {
@@ -366,6 +427,8 @@ void eth_get_info(eth_info_t *o)
     o->saved_mode = s_saved_mode;
     o->link_up = s_link;
     o->has_ip = s_has_ip;
+    o->rescue = s_rescue;
+    o->rescue_dhcp = s_rescue_dhcp;
     strlcpy(o->error, s_err, sizeof(o->error));
     // LAN mode is a pure L2 bridge port: no IP/gateway of its own (device IP is on the AP netif).
     if (s_mode == ETH_MODE_WAN) {
@@ -387,7 +450,7 @@ void eth_get_info(eth_info_t *o)
     o->bridge_drops = s_br_drop;
     o->bridge_inject_drops = s_br_inject_drop;
     esp_netif_ip_info_t ip;
-    if (s_mode == ETH_MODE_WAN && s_netif && esp_netif_get_ip_info(s_netif, &ip) == ESP_OK) {
+    if (s_netif && esp_netif_get_ip_info(s_netif, &ip) == ESP_OK) {
         snprintf(o->ip, sizeof(o->ip), IPSTR, IP2STR(&ip.ip));
         snprintf(o->gw, sizeof(o->gw), IPSTR, IP2STR(&ip.gw));
     }
