@@ -979,9 +979,15 @@ static void wifi_task(void *arg)
                 }
             }
         }
-        if (s_ap_running && lock()) {
+        // Only re-read the AP channel when the STA channel changed: each read is an
+        // RPC to the C5 (and ESP-Hosted 3.0.9 logs get_config as "set_config").
+        static uint8_t s_ap_ch_checked_for = 0xFF;
+        if (s_ap_running && s_sta_channel != s_ap_ch_checked_for && lock()) {
             refresh_ap_channel();
+            s_ap_ch_checked_for = s_sta_channel;
             unlock();
+        } else if (!s_ap_running) {
+            s_ap_ch_checked_for = 0xFF;
         }
     }
 }
