@@ -325,6 +325,10 @@ esp_err_t touch_read(touch_point_t *pt)
     uint16_t y = ((d[4] & 0x0F) << 8) | d[5];
     pt->x = x < LCD_H_RES ? x : LCD_H_RES - 1;
     pt->y = y < LCD_V_RES ? y : LCD_V_RES - 1;
+    if (display_get_rotated()) {
+        pt->x = LCD_H_RES - 1 - pt->x;
+        pt->y = LCD_V_RES - 1 - pt->y;
+    }
     return ESP_OK;
 }
 

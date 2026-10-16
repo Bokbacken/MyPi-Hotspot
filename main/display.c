@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "diag.h"
 
 #ifdef CONFIG_MYPI_LCD_INVERT_COLOR
@@ -40,6 +41,11 @@ static uint16_t *s_fb;          // Full framebuffer, LCD_H_RES * LCD_V_RES, in P
 static uint16_t *s_dma_buf[2];  // Ping-pong bounce buffers in internal DMA memory
 static SemaphoreHandle_t s_trans_done;
 static SemaphoreHandle_t s_lock;    // Recursive: serializes drawing + flushing between tasks
+static volatile bool s_rotated;     // 180-degree rotation (panel mirror X+Y), read by touch.c
+
+#define ROT_NVS_NS  "mypi"
+#define ROT_NVS_KEY "lcd_rot"
+static bool load_rotated(void);
 
 // Dirty rectangle (inclusive). s_dirty_x0 > s_dirty_x1 means "nothing dirty".
 static int s_dirty_x0 = LCD_H_RES, s_dirty_y0 = LCD_V_RES, s_dirty_x1 = -1, s_dirty_y1 = -1;
@@ -204,6 +210,11 @@ esp_err_t display_init(void)
         diag_set_lcd_id("skipped (enable debug mode and reboot to read)");
     }
     STEP(esp_lcd_panel_invert_color(s_panel, LCD_INVERT), LCD_INVERT ? "invert_color(true)" : "invert_color(false)");
+    s_rotated = load_rotated();
+    // Hypothesis: the 240x320 portrait panel fills the whole ST7789 GRAM (240x320),
+    // so mirroring X+Y needs no set_gap() offset. If the picture is shifted when
+    // rotated, a gap of (0, 0) vs. (0, 80) is the first thing to check.
+    STEP(esp_lcd_panel_mirror(s_panel, s_rotated, s_rotated), s_rotated ? "mirror(true, true) - rotated 180" : "mirror(false, false)");
     STEP(esp_lcd_panel_disp_on_off(s_panel, true), "disp_on (DISPON)");
 
     display_fill_screen(COLOR_BLACK);
@@ -318,6 +329,55 @@ void display_draw_line(int x0, int y0, int x1, int y1, int thickness, uint16_t c
 }
 
 static esp_err_t flush_locked(void);
+
+static bool load_rotated(void)
+{
+#ifdef CONFIG_MYPI_LCD_ROTATE_180
+    uint8_t v = 1;
+#else
+    uint8_t v = 0;
+#endif
+    nvs_handle_t h;
+    if (nvs_open(ROT_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, ROT_NVS_KEY, &v);     // keeps the Kconfig default if not found
+        nvs_close(h);
+    }
+    return v != 0;
+}
+
+bool display_get_rotated(void)
+{
+    return s_rotated;
+}
+
+esp_err_t display_set_rotated(bool rotated)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ROT_NVS_NS, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, ROT_NVS_KEY, rotated ? 1 : 0);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not save rotation to NVS: %s", esp_err_to_name(err));
+    // Under the display lock no other task is drawing or flushing; the framebuffer
+    // keeps its logical layout, so a full flush redraws the picture rotated.
+    display_lock();
+    esp_err_t e2 = ESP_OK;
+    if (s_panel) {
+        e2 = esp_lcd_panel_mirror(s_panel, rotated, rotated);
+        if (e2 == ESP_OK) {
+            s_rotated = rotated;
+            mark_dirty(0, 0, LCD_H_RES - 1, LCD_V_RES - 1);
+            e2 = flush_locked();
+        }
+    } else {
+        s_rotated = rotated;
+    }
+    display_unlock();
+    ESP_LOGI(TAG, "Rotation 180: %s (mirror/flush %s)", rotated ? "on" : "off", esp_err_to_name(e2));
+    return err != ESP_OK ? err : e2;
+}
 
 esp_err_t display_flush(void)
 {

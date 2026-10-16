@@ -98,6 +98,14 @@ menu "MyPi-Hotspot"
             help
                 Enable if red and blue appear swapped.
 
+        config MYPI_LCD_ROTATE_180
+            bool "Rotate screen and touch 180 degrees by default"
+            default n
+            help
+                Default for the 180-degree rotation (display mirrored in X and Y,
+                touch coordinates flipped). Can be changed at runtime in the web UI;
+                the web UI setting is saved in NVS and overrides this default.
+
     endmenu
 
     menu "Touch"

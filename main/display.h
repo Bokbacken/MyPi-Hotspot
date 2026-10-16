@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "pins.h"   // All GPIO assignments (VERIFY BEFORE FLASHING)
@@ -53,3 +54,8 @@ void display_unlock(void);
 
 /** Push the changed (dirty) region of the framebuffer to the panel. */
 esp_err_t display_flush(void);
+
+/** Rotate the picture 180 degrees (saved in NVS, applied immediately with a full redraw).
+ *  Touch coordinates follow via display_get_rotated(). */
+esp_err_t display_set_rotated(bool rotated);
+bool display_get_rotated(void);

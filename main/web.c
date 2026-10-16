@@ -8,6 +8,7 @@
 
 #include "cJSON.h"
 #include "diag.h"
+#include "display.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_chip_info.h"
@@ -83,6 +84,8 @@ static const char INDEX_HTML[] =
 "AP DTIM period (0=default=1) <input type=number id='ap-dtim' min=0 max=255 style='width:5em'><br>"
 "<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
 "<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
+"<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
+"<small>(applied immediately, saved across reboots)</small></p>"
 "<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
@@ -118,6 +121,7 @@ static const char INDEX_HTML[] =
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
 "let r=await (await fetch('/api/radio')).json();$('rsb').value=r.sta_bw;$('rab').value=r.ap_bw;setProtoMask('sta',r.sta_proto);setProtoMask('ap',r.ap_proto);"
+"let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
 "$('band-mode').value=r.band_mode;$('tx-power').value=r.tx_power_dbm;$('ap-beacon').value=r.ap_beacon_tu;$('ap-dtim').value=r.ap_dtim;protoHint();"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value='';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
@@ -140,6 +144,7 @@ static const char INDEX_HTML[] =
 "function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(default, no ax)'}"
 "async function saveRadio(){await post('/api/radio',{sta_bw:+$('rsb').value,ap_bw:+$('rab').value,sta_proto:buildProtoMask('sta'),ap_proto:buildProtoMask('ap'),"
 "band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_beacon_tu:+$('ap-beacon').value,ap_dtim:+$('ap-dtim').value})}"
+"async function saveRot(){await post('/api/display',{rotate:$('lrot').checked?1:0})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
 "async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
@@ -419,6 +424,7 @@ static esp_err_t status_get(httpd_req_t *req)
 
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "firmware", app->version);
+    cJSON_AddNumberToObject(cJSON_AddObjectToObject(j, "display"), "rotate", display_get_rotated() ? 1 : 0);
     cJSON_AddStringToObject(j, "idf", app->idf_ver);
     cJSON_AddStringToObject(j, "chip", chipstr);
     cJSON_AddStringToObject(j, "reset_reason", diag_reset_reason_name());
@@ -1163,6 +1169,16 @@ static void radio_field(const cJSON *j, const char *k, int lo, int hi, uint8_t *
     *dst = (uint8_t)x;
 }
 
+// POST /api/display {"rotate":0|1} - rotate screen and touch 180 degrees (saved in NVS, applied now)
+static esp_err_t api_display_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int rot = jint(j, "rotate", -1);
+    cJSON_Delete(j);
+    if (rot != 0 && rot != 1) return send_result(req, ESP_ERR_INVALID_ARG, NULL, "rotate must be 0 or 1");
+    return send_result(req, display_set_rotated(rot == 1), rot ? "rotated 180" : "normal orientation", NULL);
+}
+
 // POST /api/radio {sta_bw,ap_bw (0-3), sta_proto,ap_proto (bitmask), band_mode, tx_power_dbm,
 // ap_beacon_tu, ap_dtim} - missing keys keep the saved value; applied after reboot
 static esp_err_t api_radio_post(httpd_req_t *req)
@@ -1337,6 +1353,7 @@ esp_err_t web_start(void)
         { .uri = "/api/eth",            .method = HTTP_POST, .handler = api_eth_post },
         { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
         { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
+        { .uri = "/api/display",        .method = HTTP_POST, .handler = api_display_post },
         { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
         { .uri = "/api/netstats/reset", .method = HTTP_POST, .handler = api_netstats_reset },
         { .uri = "/api/netstats/log/start", .method = HTTP_POST, .handler = api_netlog_start },
