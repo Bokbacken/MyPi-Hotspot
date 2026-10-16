@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "logbuf.h"
+#include "pintest.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "web";
@@ -36,7 +37,7 @@ static const char INDEX_HTML[] =
 "td{padding:2px 10px 2px 0;vertical-align:top}td:first-child{color:#999}"
 "pre{background:#000;color:#9f9;padding:8px;height:45vh;overflow:auto;font-size:12px;white-space:pre-wrap}"
 ".bad{color:#f66}.ok{color:#6f6}</style></head><body>"
-"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | "
+"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/pins'>Wiring diagnostics</a> | "
 "<a href='/api/status'>/api/status</a> | <a href='/api/log'>/api/log</a></p>"
 "<table id='t'></table><h2 style='font-size:1.1em'>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
 "<h2 style='font-size:1.1em'>Log <label style='font-size:.8em'><input type='checkbox' id='follow' checked> follow</label></h2>"
@@ -80,9 +81,82 @@ static const char UPDATE_HTML[] =
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
 "s.textContent='Uploading '+f.size+' bytes...';x.send(f)}</script></body></html>";
 
+static const char PINS_HTML[] =
+"<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>MyPi-Hotspot pins</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
+"a{color:#6cf}pre{background:#000;color:#9f9;padding:8px;font-size:12px;white-space:pre-wrap}"
+"td{padding:3px 8px}button{margin:0 2px}</style></head><body>"
+"<h1 style='font-size:1.3em'>Wiring diagnostics</h1><p><a href='/'>&larr; Status</a></p>"
+"<h2 style='font-size:1.1em'>Boot-time wiring check</h2><pre id='r'></pre>"
+"<h2 style='font-size:1.1em'>Manual pin control</h2>"
+"<p>Set a pin HIGH/LOW and measure it with a multimeter at the LCD module (against GND): HIGH should be ~3.3 V, LOW ~0 V. "
+"<b>This detaches the pin from SPI/I2C until reboot.</b></p><table id='t'></table>"
+"<p><button onclick=\"fetch('/api/reboot',{method:'POST'}).then(()=>document.getElementById('o').textContent='Rebooting...')\">Reboot</button></p>"
+"<p id='o'></p><script>"
+"fetch('/api/pins').then(r=>r.json()).then(j=>{document.getElementById('r').textContent=j.report;"
+"document.getElementById('t').innerHTML=j.names.split(',').map(n=>'<tr><td>'+n+'</td><td>'+"
+"['high','low','in','inpd'].map(m=>\"<button onclick=\\\"setp('\"+n+\"','\"+m+\"')\\\">\"+m+'</button>').join('')+"
+"\"</td><td id='v_\"+n+\"'></td></tr>\").join('')});"
+"function setp(n,m){fetch('/api/pin?name='+n+'&mode='+m).then(r=>r.text()).then(t=>document.getElementById('v_'+n).textContent=t)}"
+"</script></body></html>";
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+static esp_err_t pins_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, PINS_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_pins_get(httpd_req_t *req)
+{
+    char *rep = malloc(2048);
+    if (!rep) return httpd_resp_send_500(req);
+    pintest_report(rep, 2048);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "report", rep);
+    cJSON_AddStringToObject(j, "names", pintest_names());
+    free(rep);
+    char *out = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+    if (!out) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+    free(out);
+    return err;
+}
+
+static esp_err_t api_pin_get(httpd_req_t *req)
+{
+    char q[64], name[16] = "", mode[8] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "name", name, sizeof(name)) != ESP_OK ||
+        httpd_query_key_value(q, "mode", mode, sizeof(mode)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: /api/pin?name=LCD_RESET&mode=high|low|in|inpd");
+    }
+    int level = -1;
+    esp_err_t err = pintest_set(name, mode, &level);
+    char out[64];
+    if (err == ESP_OK) {
+        snprintf(out, sizeof(out), "%s -> %s, reads %d", name, mode, level);
+    } else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        snprintf(out, sizeof(out), "error: %s", esp_err_to_name(err));
+    }
+    return httpd_resp_sendstr(req, out);
+}
+
+static void reboot_task(void *arg);
+
+static esp_err_t api_reboot_post(httpd_req_t *req)
+{
+    httpd_resp_sendstr(req, "rebooting");
+    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
 
 static esp_err_t index_get(httpd_req_t *req)
 {
@@ -276,6 +350,7 @@ esp_err_t web_start(void)
     cfg.stack_size = 8192;
     cfg.recv_wait_timeout = 15;
     cfg.lru_purge_enable = true;
+    cfg.max_uri_handlers = 16;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[FAIL] httpd_start: %s", esp_err_to_name(err));
@@ -287,6 +362,10 @@ esp_err_t web_start(void)
         { .uri = "/api/log",    .method = HTTP_GET,  .handler = log_get },
         { .uri = "/update",     .method = HTTP_GET,  .handler = update_get },
         { .uri = "/update",     .method = HTTP_POST, .handler = update_post },
+        { .uri = "/pins",       .method = HTTP_GET,  .handler = pins_get },
+        { .uri = "/api/pins",   .method = HTTP_GET,  .handler = api_pins_get },
+        { .uri = "/api/pin",    .method = HTTP_GET,  .handler = api_pin_get },
+        { .uri = "/api/reboot", .method = HTTP_POST, .handler = api_reboot_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);

@@ -7,7 +7,7 @@ CONFIG_IDF_TARGET="esp32p4"
 
 # --- Chip revision ---
 # The ESP32-P4-NANO-WIFI6-DB ships with ESP32-P4 rev v3.1 silicon.
-# Support for rev <3.0 and >=3.0 is mutually exclusive (requires ESP-IDF >= v5.5.2).
+# Support for rev <3.0 and >=3.0 is mutually exclusive (ESP-IDF >= v6.1 defaults to rev v3.x; kept explicit here).
 # Disabling this targets rev v3.x; a rev <3.0 build is rejected by the v3.x bootloader.
 # CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
 CONFIG_ESP32P4_REV_MIN_300=y
@@ -25,7 +25,7 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # --- PSRAM ---
 # ESP32-P4 uses hex-mode PSRAM (the P4 equivalent of "octal" on the S3).
 CONFIG_SPIRAM=y
-# 200 MHz is marked experimental in IDF v5.5; 80 MHz is the stable choice.
+# 200 MHz is marked experimental; 80 MHz is the stable choice.
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 

@@ -59,6 +59,32 @@ menu "MyPi-Hotspot"
                 show color bars before the hello-world UI.
     endmenu
 
+    menu "Touch"
+        config MYPI_TOUCH_I2C_KHZ
+            int "Touch I2C clock (kHz)"
+            range 10 400
+            default 100
+            help
+                I2C clock for the CST816D on TP_SDA/TP_SCL. 100 kHz is robust with
+                jumper wires and the bus shared with the on-board codec.
+
+        config MYPI_TOUCH_USE_INT
+            bool "Use TP_INT interrupt (read only when the controller signals)"
+            default y
+            help
+                The CST816 goes to sleep when idle and then does not answer on I2C.
+                With this enabled the firmware waits for a TP_INT falling edge
+                instead of polling a sleeping chip. Disable to poll continuously.
+
+        config MYPI_TOUCH_VERBOSE_I2C_LOGS
+            bool "Show I2C driver error logs"
+            default n
+            help
+                The I2C driver prints one error per failed transaction, which can
+                flood the console. When disabled, the touch driver prints its own
+                rate-limited summary instead.
+    endmenu
+
     menu "Diagnostics"
         config MYPI_HEARTBEAT_INTERVAL_S
             int "Serial heartbeat interval (seconds)"

@@ -19,6 +19,7 @@
 #include "esp_ota_ops.h"
 #include "logbuf.h"
 #include "nvs_flash.h"
+#include "pintest.h"
 #include "wifi.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -27,7 +28,7 @@
 
 static const char *TAG = "main";
 
-#define POLL_INTERVAL_MS    10
+#define IDLE_WAIT_MS        1000
 #define TAP_MAX_DRIFT_PX    10
 #define DOT_RADIUS_PX       8
 #define LINE_THICKNESS_PX   3
@@ -45,6 +46,9 @@ void app_main(void)
         ESP_LOGW(TAG, "Log ring buffer allocation failed; web log disabled");
     }
     diag_print_boot_banner();
+
+    // Wiring check must run before the SPI/I2C drivers claim the module pins.
+    pintest_boot_check();
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -94,16 +98,21 @@ void app_main(void)
     bool dragging = false;
     int start_x = 0, start_y = 0;   // Where the finger went down
     int last_x = 0, last_y = 0;     // Last position seen while pressed
-    int read_errors = 0;
-
     while (true) {
+        // Idle: block until TP_INT fires (or 1 s passes). Finger down: poll every 10 ms.
+        if (!touch_wait(was_pressed, IDLE_WAIT_MS)) {
+            continue;   // No touch activity; don't poke a sleeping controller
+        }
         touch_point_t pt;
         if (touch_read(&pt) != ESP_OK) {
-            // Occasional NACKs are normal; only log periodically.
-            if (++read_errors % 100 == 1) {
-                ESP_LOGW(TAG, "Touch read failed (%d errors so far)", read_errors);
+            // touch.c counts, rate-limits logging and recovers the bus.
+            // Back off so a dead bus doesn't spin the CPU.
+            uint32_t n = touch_consecutive_errors();
+            vTaskDelay(pdMS_TO_TICKS(n > 20 ? 500 : 50));
+            if (was_pressed && n >= 3) {
+                was_pressed = false;   // Treat as finger lifted; don't draw a stale tap
+                dragging = false;
             }
-            vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
             continue;
         }
 
@@ -149,6 +158,5 @@ void app_main(void)
         if (display_ok) {
             display_flush();
         }
-        vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
     }
 }

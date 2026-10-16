@@ -148,7 +148,7 @@ If esptool-js fails with *"Serial data stream stopped: possible serial noise or 
 
 ## Build & flash quick-start
 
-Requires **ESP-IDF v5.5.2 or newer** (tested with v5.5.6, target `esp32p4`). The board uses
+Requires **ESP-IDF v6.1 or newer** (tested with v6.1, target `esp32p4`). The board uses
 ESP32-P4 **rev v3.1** silicon; older IDF releases only support rev <3.0 and the bootloader will
 refuse to start. `sdkconfig.defaults` sets `CONFIG_ESP32P4_REV_MIN_300=y` (rev v3.x) and
 `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y`. If you change IDF version or `sdkconfig.defaults`, run
@@ -174,7 +174,7 @@ Wi-Fi credentials, hostname, LCD SPI clock / color options and diagnostics are s
 
 ```bash
 # 1. Load the ESP-IDF environment (path depends on where you installed it)
-. ~/esp/esp-idf/export.sh          # Windows: run "ESP-IDF 5.5 CMD/PowerShell" from the Start menu
+. ~/esp/esp-idf/export.sh          # Windows: use the ESP-IDF 6.1 shell installed by the ESP-IDF Installation Manager (EIM)
 
 # 2. Select the chip (only needed once)
 idf.py set-target esp32p4
@@ -265,7 +265,7 @@ keep working without Wi-Fi.
 |---|---|
 | esptool-js: *"Serial data stream stopped: possible serial noise or corruption"* | Baudrate too high for the CH343 bridge — select **115200** before **Connect**, connect without a USB hub, try another data cable |
 | Board does not connect | Enter download mode: hold **BOOT**, tap **RESET**, release **BOOT** |
-| Boot loop, `chip revision` error from bootloader | Built with IDF < 5.5.2 or for rev < 3.0 — rebuild with IDF ≥ 5.5.2 after `idf.py fullclean` |
+| Boot loop, `chip revision` error from bootloader | Built for rev < 3.0 or with an old IDF — rebuild with IDF ≥ 6.1 after `idf.py fullclean` |
 | `partition table` / `invalid header` errors after upgrading from v0.1 | Old layout still in flash — flash the full merged image at `0x0` |
 
 #### Dark or wrong screen
