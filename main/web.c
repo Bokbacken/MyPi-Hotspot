@@ -57,11 +57,14 @@ static const char INDEX_HTML[] =
 "row('SPI clock',(s.spi_clock_hz/1e6)+' MHz')+row('LCD ID read',s.lcd_id)+"
 "row('Frames flushed',s.frames_flushed+' (errors '+s.flush_errors+')')+"
 "row('Touch',s.touch_status,s.touch_status.startsWith('ok')?'ok':'bad')+row('Touch events',s.touch_events)+"
-"row('OTA',s.ota_status);"
+"row('OTA',s.ota_status)+"
+"row('Debug mode',(s.debug?'ON':'off')+\" <button onclick='dbg(\"+(s.debug?0:1)+\")'>\"+(s.debug?'Turn off':'Turn on')+"
+"\"</button> <small>(DEBUG logs, 5 s heartbeat; boot checks run after a reboot)</small>\");"
 "document.getElementById('touch').textContent=s.touch_history.join('\\n')||'(none yet)';"
 "let l=await (await fetch('/api/log')).text();let p=document.getElementById('log');p.textContent=l;"
 "if(document.getElementById('follow').checked)p.scrollTop=p.scrollHeight;"
 "}catch(e){document.getElementById('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
+"function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
 "tick();setInterval(tick,2000);</script></body></html>";
 
 static const char UPDATE_HTML[] =
@@ -155,6 +158,21 @@ static esp_err_t api_pin_get(httpd_req_t *req)
 
 static void reboot_task(void *arg);
 
+// POST /api/debug?on=1|0 - switch debug mode (saved in NVS, survives reboot).
+static esp_err_t api_debug_post(httpd_req_t *req)
+{
+    char q[16], v[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "on", v, sizeof(v)) != ESP_OK || (v[0] != '0' && v[0] != '1')) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: POST /api/debug?on=1|0");
+    }
+    esp_err_t err = diag_set_debug(v[0] == '1');
+    char out[64];
+    snprintf(out, sizeof(out), "debug %s (saved: %s)", v[0] == '1' ? "on" : "off", esp_err_to_name(err));
+    return httpd_resp_sendstr(req, out);
+}
+
 static esp_err_t api_reboot_post(httpd_req_t *req)
 {
     httpd_resp_sendstr(req, "rebooting");
@@ -217,6 +235,7 @@ static esp_err_t status_get(httpd_req_t *req)
         if (e[0]) cJSON_AddItemToArray(hist, cJSON_CreateString(e));
     }
     cJSON_AddStringToObject(j, "ota_status", st->ota_status);
+    cJSON_AddBoolToObject(j, "debug", diag_debug_enabled());
     free(st);
 
     char *out = cJSON_PrintUnformatted(j);
@@ -370,10 +389,11 @@ esp_err_t web_start(void)
         { .uri = "/api/pins",   .method = HTTP_GET,  .handler = api_pins_get },
         { .uri = "/api/pin",    .method = HTTP_GET,  .handler = api_pin_get },
         { .uri = "/api/reboot", .method = HTTP_POST, .handler = api_reboot_post },
+        { .uri = "/api/debug",  .method = HTTP_POST, .handler = api_debug_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);
     }
-    ESP_LOGI(TAG, "[ OK ] HTTP server on port 80");
+    ESP_LOGI(TAG, "HTTP server on port 80");
     return ESP_OK;
 }

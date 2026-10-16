@@ -31,12 +31,13 @@
 static const char *TAG = "display";
 
 // Rows per SPI transfer. The full frame lives in PSRAM; each band is copied
-// (and byte-swapped) into a small internal DMA-capable buffer before sending.
+// (and byte-swapped) into one of two internal DMA-capable buffers. While one
+// band is on the wire the CPU prepares the next one in the other buffer.
 #define FLUSH_BAND_ROWS 40
 
 static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;          // Full framebuffer, LCD_H_RES * LCD_V_RES, in PSRAM
-static uint16_t *s_dma_buf;     // Bounce buffer in internal DMA memory
+static uint16_t *s_dma_buf[2];  // Ping-pong bounce buffers in internal DMA memory
 static SemaphoreHandle_t s_trans_done;
 
 // Dirty rectangle (inclusive). s_dirty_x0 > s_dirty_x1 means "nothing dirty".
@@ -71,7 +72,7 @@ static bool on_color_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_e
             diag_set_display_status("failed at '%s': %s", what, esp_err_to_name(_e)); \
             return _e;                                                              \
         }                                                                           \
-        ESP_LOGI(TAG, "[ OK ] %s", what);                                           \
+        ESP_LOGD(TAG, "[ OK ] %s", what);                                           \
     } while (0)
 
 static esp_lcd_panel_io_handle_t s_io;
@@ -79,7 +80,7 @@ static esp_lcd_panel_io_handle_t s_io;
 static void set_backlight(int level, const char *why)
 {
     gpio_set_level(PIN_LCD_BL, level);
-    ESP_LOGI(TAG, "LCD_BL (GPIO%d) -> %d (%s)", PIN_LCD_BL, level, why);
+    ESP_LOGD(TAG, "LCD_BL (GPIO%d) -> %d (%s)", PIN_LCD_BL, level, why);
 }
 
 // Try to read ST7789 ID/status registers over MISO. On the Waveshare module the
@@ -119,7 +120,7 @@ esp_err_t display_init(void)
 {
     diag_set_display_status("initializing");
     diag_set_spi_clock(LCD_PIXEL_CLOCK_HZ);
-    ESP_LOGI(TAG, "Pins: SCLK=%d MOSI=%d MISO=%d SD_CS=%d LCD_CS=%d LCD_DC=%d LCD_RESET=%d LCD_BL=%d",
+    ESP_LOGD(TAG, "Pins: SCLK=%d MOSI=%d MISO=%d SD_CS=%d LCD_CS=%d LCD_DC=%d LCD_RESET=%d LCD_BL=%d",
              PIN_SCLK, PIN_MOSI, PIN_MISO, PIN_SD_CS, PIN_LCD_CS, PIN_LCD_DC, PIN_LCD_RESET, PIN_LCD_BL);
     ESP_LOGI(TAG, "SPI clock %d MHz, mode 0, invert=%d, order=%s, %dx%d",
              CONFIG_MYPI_LCD_SPI_CLOCK_MHZ, LCD_INVERT, LCD_BGR ? "BGR" : "RGB", LCD_H_RES, LCD_V_RES);
@@ -150,8 +151,9 @@ esp_err_t display_init(void)
     STEP(s_fb ? ESP_OK : ESP_ERR_NO_MEM, "framebuffer alloc (PSRAM)");
 
     const size_t band_bytes = LCD_H_RES * FLUSH_BAND_ROWS * sizeof(uint16_t);
-    s_dma_buf = heap_caps_malloc(band_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    STEP(s_dma_buf ? ESP_OK : ESP_ERR_NO_MEM, "DMA bounce buffer alloc (internal)");
+    s_dma_buf[0] = heap_caps_malloc(band_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    s_dma_buf[1] = heap_caps_malloc(band_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    STEP(s_dma_buf[0] && s_dma_buf[1] ? ESP_OK : ESP_ERR_NO_MEM, "2x DMA bounce buffer alloc (internal)");
 
     spi_bus_config_t bus_cfg = {
         .sclk_io_num = PIN_SCLK,
@@ -184,7 +186,11 @@ esp_err_t display_init(void)
 
     STEP(esp_lcd_panel_reset(s_panel), "panel reset (LCD_RESET pulse)");
     STEP(esp_lcd_panel_init(s_panel), "panel init (SLPOUT, COLMOD, MADCTL)");
-    read_panel_ids();
+    if (diag_debug_enabled()) {
+        read_panel_ids();
+    } else {
+        diag_set_lcd_id("skipped (enable debug mode and reboot to read)");
+    }
     STEP(esp_lcd_panel_invert_color(s_panel, LCD_INVERT), LCD_INVERT ? "invert_color(true)" : "invert_color(false)");
     STEP(esp_lcd_panel_disp_on_off(s_panel, true), "disp_on (DISPON)");
 
@@ -192,8 +198,9 @@ esp_err_t display_init(void)
     STEP(display_flush(), "first full-screen flush (black)");
     set_backlight(1, "on after first flush");
 
-    ESP_LOGI(TAG, "ST7789 %dx%d ready, framebuffer %u bytes in PSRAM",
-             LCD_H_RES, LCD_V_RES, (unsigned)(LCD_H_RES * LCD_V_RES * sizeof(uint16_t)));
+    ESP_LOGI(TAG, "ST7789 %dx%d ready, SPI %d MHz, framebuffer %u bytes in PSRAM",
+             LCD_H_RES, LCD_V_RES, CONFIG_MYPI_LCD_SPI_CLOCK_MHZ,
+             (unsigned)(LCD_H_RES * LCD_V_RES * sizeof(uint16_t)));
     diag_set_display_status("ok (SPI writes complete; cannot confirm the panel shows them)");
     return ESP_OK;
 }
@@ -310,12 +317,16 @@ esp_err_t display_flush(void)
     const int w = x1 - x0 + 1;
     const int band_rows = (LCD_H_RES * FLUSH_BAND_ROWS) / w;  // Rows that fit in the bounce buffer
 
-    for (int y = y0; y <= y1; y += band_rows) {
+    xSemaphoreTake(s_trans_done, 0);   // Drop a stale "done" left over from an aborted flush
+    bool in_flight = false;   // A color transfer has been queued but not yet confirmed done
+    int buf = 0;
+    for (int y = y0; y <= y1; y += band_rows, buf ^= 1) {
         int rows = y1 - y + 1;
         if (rows > band_rows) rows = band_rows;
 
-        // Copy region into the DMA buffer, swapping to big-endian (ST7789 wire order).
-        uint16_t *dst = s_dma_buf;
+        // Copy region into the free DMA buffer, swapping to big-endian (ST7789 wire
+        // order). This overlaps with the previous band still being sent.
+        uint16_t *dst = s_dma_buf[buf];
         for (int row = 0; row < rows; row++) {
             const uint16_t *src = &s_fb[(y + row) * LCD_H_RES + x0];
             for (int i = 0; i < w; i++) {
@@ -324,20 +335,29 @@ esp_err_t display_flush(void)
             }
         }
 
+        // Previous band must be finished before the next window command is sent
+        // (and before its buffer is refilled on the following iteration).
+        if (in_flight && xSemaphoreTake(s_trans_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGE(TAG, "SPI color transfer timeout (>1 s) before rows %d-%d - DMA done callback never fired",
+                     y, y + rows - 1);
+            diag_frame_flushed(false);
+            return ESP_ERR_TIMEOUT;
+        }
+        in_flight = false;
+
         // x_end / y_end are exclusive in esp_lcd.
-        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x0, y, x1 + 1, y + rows, s_dma_buf);
+        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x0, y, x1 + 1, y + rows, s_dma_buf[buf]);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "draw_bitmap failed at rows %d-%d: %s", y, y + rows - 1, esp_err_to_name(err));
             diag_frame_flushed(false);
             return err;
         }
-        // Wait for the DMA transfer before reusing the bounce buffer.
-        if (xSemaphoreTake(s_trans_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE(TAG, "SPI color transfer timeout (>1 s) at rows %d-%d - DMA done callback never fired",
-                     y, y + rows - 1);
-            diag_frame_flushed(false);
-            return ESP_ERR_TIMEOUT;
-        }
+        in_flight = true;
+    }
+    if (in_flight && xSemaphoreTake(s_trans_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "SPI color transfer timeout (>1 s) on last band - DMA done callback never fired");
+        diag_frame_flushed(false);
+        return ESP_ERR_TIMEOUT;
     }
 
     s_dirty_x0 = LCD_H_RES;

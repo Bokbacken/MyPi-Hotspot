@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "esp_err.h"
+
 // Shared runtime status, written by the display/touch/Wi-Fi modules and read by
 // the serial heartbeat and the web UI.
 
@@ -48,6 +50,15 @@ void diag_print_boot_banner(void);
 
 /** Start the periodic serial heartbeat task. */
 void diag_start_heartbeat(void);
+
+/**
+ * Debug mode: DEBUG-level app logs, 5 s heartbeat and the boot-time checks
+ * (wiring check, panel ID read, I2C scan, test pattern). Stored in NVS.
+ * diag_debug_load() must run after nvs_flash_init().
+ */
+void diag_debug_load(void);
+bool diag_debug_enabled(void);
+esp_err_t diag_set_debug(bool on);
 
 /** Thread-safe copy of the current status. */
 void diag_get(diag_status_t *out);

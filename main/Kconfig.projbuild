@@ -32,11 +32,12 @@ menu "MyPi-Hotspot"
         config MYPI_LCD_SPI_CLOCK_MHZ
             int "LCD SPI clock (MHz)"
             range 1 80
-            default 10
+            default 40
             help
-                SPI pixel clock for the ST7789. 10 MHz is a conservative,
-                diagnostic-friendly default (works with long jumper wires).
-                Raise to 40 MHz once the display is confirmed working.
+                SPI pixel clock for the ST7789. 40 MHz is a stable working value
+                with short (10-20 cm) jumper wires and gives ~30 ms per full-screen
+                refresh. Lower to 20 MHz if you see noise, shifted pixels or wrong
+                colors. The ST7789 write spec is ~62 MHz; above that is out of spec.
 
         config MYPI_LCD_INVERT_COLOR
             bool "Invert colors (INVON)"
@@ -51,22 +52,18 @@ menu "MyPi-Hotspot"
             help
                 Enable if red and blue appear swapped.
 
-        config MYPI_LCD_TEST_PATTERN
-            bool "Show startup test pattern"
-            default y
-            help
-                Cycle full-screen red/green/blue/white/black (~1 s each) and
-                show color bars before the hello-world UI.
     endmenu
 
     menu "Touch"
         config MYPI_TOUCH_I2C_KHZ
             int "Touch I2C clock (kHz)"
             range 10 400
-            default 100
+            default 400
             help
-                I2C clock for the CST816D on TP_SDA/TP_SCL. 100 kHz is robust with
-                jumper wires and the bus shared with the on-board codec.
+                I2C clock for the CST816D on TP_SDA/TP_SCL. 400 kHz (Fast-mode) is the
+                rated maximum of both the CST816D and the on-board ES8311 codec that
+                shares the bus. Lower to 100 kHz if the touch error counter on the
+                web status page starts climbing.
 
         config MYPI_TOUCH_USE_INT
             bool "Use TP_INT interrupt (read only when the controller signals)"
@@ -86,10 +83,23 @@ menu "MyPi-Hotspot"
     endmenu
 
     menu "Diagnostics"
+        config MYPI_DEBUG_MODE_DEFAULT
+            bool "Debug mode on by default"
+            default n
+            help
+                Debug mode can be switched on/off at runtime on the web status page
+                (stored in NVS, survives reboot). This option only sets the value
+                used before anything has been stored.
+                With debug mode on: DEBUG-level logs from the app (touch DOWN/MOVE,
+                init steps, pin levels), a heartbeat every 5 s, and at boot the
+                wiring check, panel ID read, I2C bus scan and color test pattern.
+
         config MYPI_HEARTBEAT_INTERVAL_S
-            int "Serial heartbeat interval (seconds)"
+            int "Serial heartbeat interval (seconds, normal mode)"
             range 1 3600
-            default 5
+            default 60
+            help
+                In debug mode the heartbeat is printed every 5 s instead.
 
         config MYPI_LOG_BUFFER_SIZE
             int "In-RAM log ring buffer size (bytes)"

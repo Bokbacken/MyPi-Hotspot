@@ -85,7 +85,7 @@ static void check_bus_lines(void)
     esp_rom_delay_us(50);
     int sda = gpio_get_level(PIN_TP_SDA);
     int scl = gpio_get_level(PIN_TP_SCL);
-    ESP_LOGI(TAG, "Idle line levels: TP_SDA=%d TP_SCL=%d (both should be 1)", sda, scl);
+    ESP_LOGD(TAG, "Idle line levels: TP_SDA=%d TP_SCL=%d (both should be 1)", sda, scl);
     if (scl == 0) {
         ESP_LOGE(TAG, "TP_SCL is stuck LOW - check wiring/short on GPIO%d", PIN_TP_SCL);
     }
@@ -169,7 +169,7 @@ static void update_status(void)
 
 esp_err_t touch_init(void)
 {
-    ESP_LOGI(TAG, "Pins: TP_SDA=%d TP_SCL=%d TP_INT=%d TP_RST=%d addr=0x%02X, %d Hz",
+    ESP_LOGD(TAG, "Pins: TP_SDA=%d TP_SCL=%d TP_INT=%d TP_RST=%d addr=0x%02X, %d Hz",
              PIN_TP_SDA, PIN_TP_SCL, PIN_TP_INT, PIN_TP_RST, TOUCH_I2C_ADDR, TOUCH_I2C_HZ);
     diag_set_touch_status("initializing");
 
@@ -196,20 +196,22 @@ esp_err_t touch_init(void)
         diag_set_touch_status("I2C bus init failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "[ OK ] I2C bus (port %d)", TOUCH_I2C_PORT);
+    ESP_LOGD(TAG, "[ OK ] I2C bus (port %d)", TOUCH_I2C_PORT);
 
-    bus_scan();
+    if (diag_debug_enabled()) {
+        bus_scan();
+    }
 
     err = i2c_master_probe(s_bus, TOUCH_I2C_ADDR, 50);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "[FAIL] CST816D did not ACK at 0x%02X (%s) - check TP_SDA/TP_SCL wiring",
                  TOUCH_I2C_ADDR, esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "[ OK ] CST816D ACK at 0x%02X", TOUCH_I2C_ADDR);
+        ESP_LOGD(TAG, "[ OK ] CST816D ACK at 0x%02X", TOUCH_I2C_ADDR);
     }
 
     if (read_regs(REG_CHIP_ID, &s_chip_id, 1) == ESP_OK && read_regs(REG_FW_VERSION, &s_fw, 1) == ESP_OK) {
-        ESP_LOGI(TAG, "[ OK ] CST816 chip ID 0x%02X, FW 0x%02X", s_chip_id, s_fw);
+        ESP_LOGD(TAG, "[ OK ] CST816 chip ID 0x%02X, FW 0x%02X", s_chip_id, s_fw);
     } else {
         ESP_LOGW(TAG, "[FAIL] Could not read CST816 chip ID / FW version");
     }
@@ -230,7 +232,7 @@ esp_err_t touch_init(void)
         }
         if (ierr == ESP_OK && serr == ESP_OK && gpio_isr_handler_add(PIN_TP_INT, tp_int_isr, NULL) == ESP_OK) {
             s_int_enabled = true;
-            ESP_LOGI(TAG, "[ OK ] TP_INT interrupt on GPIO%d (idle level %d)", PIN_TP_INT,
+            ESP_LOGD(TAG, "[ OK ] TP_INT interrupt on GPIO%d (idle level %d)", PIN_TP_INT,
                      gpio_get_level(PIN_TP_INT));
         } else {
             ESP_LOGW(TAG, "[FAIL] TP_INT interrupt setup (%s/%s) - falling back to polling",
@@ -246,6 +248,8 @@ esp_err_t touch_init(void)
         }
     }
     update_status();
+    ESP_LOGI(TAG, "CST816 ready: ID 0x%02X FW 0x%02X, I2C %d kHz, %s", s_chip_id, s_fw,
+             TOUCH_I2C_HZ / 1000, s_int_enabled ? "TP_INT interrupt" : "polling");
     return ESP_OK;
 }
 

@@ -5,3 +5,7 @@ idf_component_register(
              esp_wifi esp_netif esp_event nvs_flash esp_http_server app_update esp_app_format
              esp_psram spi_flash log
 )
+
+# Compile DEBUG-level logs into the app so debug mode can enable them at runtime
+# (the global maximum stays INFO, so ESP-IDF components are not affected).
+target_compile_definitions(${COMPONENT_LIB} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_DEBUG)

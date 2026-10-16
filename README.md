@@ -3,23 +3,25 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Current version: **0.2.0-debug** — the display/touch **hello world** plus diagnostics, Wi-Fi,
-a web status page and over-the-air (OTA) updates, so the board can be debugged without a serial cable.
+Current version: **0.4.0** — the display/touch **hello world** plus Wi-Fi, a web status page and
+over-the-air (OTA) updates. Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
+are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
 |---|---|
-| Boot | Boot banner on serial, LCD test pattern (R/G/B/white/black + color bars), then navy blue |
+| Boot | Boot banner on serial, then navy blue screen (debug mode: wiring check + color test pattern first) |
 | Tap (finger down + up, < 10 px movement) | Filled circle (radius 8 px) in a **random color** at the touch point |
 | Drag / swipe | **Black** line follows the finger |
-| Any touch event | Logged to the serial console at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) and to the web page |
-| Every 5 s | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
+| Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
+| Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
 | Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the IP from the log): status, log, OTA upload |
 
 No LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C, and ESP-Hosted for Wi-Fi.
 A failing display or touch controller is logged but does **not** stop Wi-Fi/web, so you can always
 read the diagnostics remotely.
 
-> ⚠️ Not yet tested on real hardware. Treat the first flash as a diagnostic run and check the log.
+> v0.4.0 raises the LCD SPI clock to 40 MHz and the touch I2C clock to 400 kHz. If the screen shows
+> noise or the touch error counter climbs, lower them in menuconfig (20 MHz / 100 kHz).
 
 ---
 
@@ -40,9 +42,9 @@ read the diagnostics remotely.
 > proposed pins avoid strapping pins (34–38), USB-JTAG (24/25) and the Wi-Fi co-processor.
 > Set a pin to `-1` in `pins.h` if you leave that wire unconnected.
 
-> ⚠️ **Power the module from ONE supply pin only.** With VCC connected (on top of the other wiring)
-> the screen stayed dark and the touch I2C bus timed out constantly; after disconnecting VCC the
-> display, touch dots and drag lines all worked immediately. The module has an on-board regulator
+> ⚠️ **Power the module from the 3V3 pin only (confirmed).** Earlier both VCC (fed with 5 V) and
+> 3V3 were connected: the screen stayed dark and the touch I2C bus timed out constantly. With VCC
+> disconnected and only 3V3 wired, the display, touch dots and drag lines all work. The module has an on-board regulator
 > and a level translator whose pull-ups follow the module supply, so feeding VCC *and* the 3V3 pin
 > puts two regulators in parallel and can shift the logic levels away from the ESP32-P4's 3.3 V.
 > Never let the module pull the P4 pins up to 5 V — they are not 5 V tolerant.
@@ -53,20 +55,20 @@ LCD and the module's microSD slot (`SD_CS`), which is why `MISO` exists.
 | Module pin | Bus | Function | ESP32-P4 GPIO | Status |
 |---|---|---|---|---|
 | VCC | — | Supply input (3.3 V/5 V) to the module's on-board regulator | **leave unconnected** | confirmed |
-| 3V3 | — | Module 3.3 V rail (input, or output when VCC is fed) | 3V3 | to be confirmed |
+| 3V3 | — | Module 3.3 V rail — the only supply wire | 3V3 | confirmed |
 | GND | — | Ground | GND | — |
-| SCLK | SPI | SPI clock | **GPIO23** | proposed |
-| MOSI | SPI | Data to LCD / SD | **GPIO5** | proposed |
-| MISO | SPI | Data from SD card (LCD is write-only) | **GPIO4** | proposed |
-| SD_CS | SPI | microSD chip select (held high) | **GPIO32** | proposed |
+| SCLK | SPI | SPI clock | GPIO23 | confirmed |
+| MOSI | SPI | Data to LCD / SD | GPIO5 | confirmed |
+| MISO | SPI | Data from SD card (LCD is write-only) | GPIO4 | wired, SD not used yet |
+| SD_CS | SPI | microSD chip select (held high) | GPIO32 | wired, SD not used yet |
 | LCD_CS | SPI | LCD chip select | GPIO20 | confirmed |
 | LCD_DC | — | LCD data / command | GPIO21 | confirmed |
-| LCD_RESET | — | LCD hardware reset (active low) | **GPIO26** | proposed |
+| LCD_RESET | — | LCD hardware reset (active low) | GPIO26 | confirmed |
 | LCD_BL | — | Backlight (high = on) | GPIO22 | confirmed |
 | TP_SDA | I2C | Touch data | GPIO7 | confirmed |
 | TP_SCL | I2C | Touch clock | GPIO8 | confirmed |
-| TP_INT | — | Touch interrupt (active low, polled for now) | **GPIO3** | proposed |
-| TP_RST | — | Touch reset (active low) | **GPIO2** | proposed |
+| TP_INT | — | Touch interrupt (active low, wakes the touch loop) | GPIO3 | confirmed |
+| TP_RST | — | Touch reset (active low) | GPIO2 | confirmed |
 
 ### ESP32-P4-NANO GPIO overview
 
@@ -113,9 +115,9 @@ MyPi-Hotspot/
     ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns
     ├── main.c            app_main: init, touch loop, tap/drag logic, OTA rollback confirm
     ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
-    ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, test pattern, ID reads
+    ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
     ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
-    ├── diag.h/.c         Boot banner, shared status struct, heartbeat task
+    ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
     ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
     ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
     ├── wifi.h/.c         Wi-Fi STA over ESP-Hosted, reconnect backoff, RSSI, mDNS
@@ -172,11 +174,12 @@ Wi-Fi credentials, hostname, LCD SPI clock / color options and diagnostics are s
 | `CONFIG_MYPI_WIFI_SSID` / `CONFIG_MYPI_WIFI_PASSWORD` | `TOFTA` / `bokbacken` | Station mode |
 | `CONFIG_MYPI_WIFI_BACKOFF_MAX_S` | 60 | Reconnect backoff 1 s → max |
 | `CONFIG_MYPI_HOSTNAME` | `mypi-hotspot` | DHCP + mDNS name (`mypi-hotspot.local`) |
-| `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ` | 10 | Deliberately slow for jumper wires; try 40 once the image is stable |
+| `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ` | 40 | ~30 ms per full frame; lower to 20 if you see noise (ST7789 spec max ~62) |
 | `CONFIG_MYPI_LCD_INVERT_COLOR` | y | ST7789 panels usually need inversion |
 | `CONFIG_MYPI_LCD_BGR_ORDER` | n | Swap if red and blue are exchanged |
-| `CONFIG_MYPI_LCD_TEST_PATTERN` | y | Full-screen colors + color bars at boot |
-| `CONFIG_MYPI_HEARTBEAT_INTERVAL_S` | 5 | Seconds between heartbeat lines (1–3600) |
+| `CONFIG_MYPI_TOUCH_I2C_KHZ` | 400 | Fast-mode, max for CST816D and the ES8311 sharing the bus; lower to 100 if touch errors climb |
+| `CONFIG_MYPI_DEBUG_MODE_DEFAULT` | n | Debug mode before anything is saved; normally toggled on the web page |
+| `CONFIG_MYPI_HEARTBEAT_INTERVAL_S` | 60 | Seconds between heartbeat lines in normal mode (5 s in debug mode) |
 | `CONFIG_MYPI_LOG_BUFFER_SIZE` | 16384 | RAM log ring buffer (PSRAM) |
 
 > Credentials are compiled into the firmware. Do not publish binaries built with private credentials.
@@ -210,27 +213,40 @@ Exit the monitor with `Ctrl+]`.
 
 ### Expected serial output
 
-Abbreviated; every init step is logged as `[ OK ]` or `[FAIL] <step>: <error>`.
+Abbreviated, normal mode. Failures are always logged (`[FAIL] <step>: <error>`); the `[ OK ]` per step,
+pin lists and touch events only appear in debug mode.
 
 ```
 I (...) diag: ==================================================
-I (...) diag:  MyPi-Hotspot firmware 0.3.1
+I (...) diag:  MyPi-Hotspot firmware 0.4.0
 I (...) diag:  Chip: esp32p4, 2 core(s), revision v3.1
 I (...) diag:  Reset reason: power-on (1)
 I (...) diag:  Running partition: ota_0 @ 0x020000 (6144 KB)
 I (...) diag: ==================================================
+I (...) diag: Debug mode off (Kconfig default) - toggle on the web status page
 I (...) wifi: Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds
-I (...) display: Pins: SCLK=23 MOSI=5 MISO=4 SD_CS=32 LCD_CS=20 LCD_DC=21 LCD_RESET=26 LCD_BL=22
-I (...) display: SPI clock 10 MHz, mode 0, invert=1, order=RGB, 240x320
-I (...) display: ST7789 240x320 ready, framebuffer 153600 bytes in PSRAM
-I (...) display: Test pattern start
-I (...) main: Screen filled navy blue: ESP_OK
-I (...) touch: Pins: TP_SDA=7 TP_SCL=8 TP_INT=3 TP_RST=2 addr=0x15
+I (...) display: SPI clock 40 MHz, mode 0, invert=1, order=RGB, 240x320
+I (...) display: ST7789 240x320 ready, SPI 40 MHz, framebuffer 153600 bytes in PSRAM
+I (...) touch: CST816 ready: ID 0x.. FW 0x.., I2C 400 kHz, TP_INT interrupt
 I (...) wifi: Got IP 192.168.1.42 (gw 192.168.1.1, mask 255.255.255.0)
 I (...) wifi: Web UI: http://192.168.1.42/  or  http://mypi-hotspot.local/
-I (...) diag: HB up=0h00m10s heap=...K(min ...K) psram=...K wifi=connected ip=192.168.1.42 rssi=-55 touch=0 frames=12 flush_err=0
-I (...) main: TAP   x=120 y=160 color=0x5A3F
+I (...) diag: HB up=0h01m00s heap=...K(min ...K) psram=...K wifi=connected ip=192.168.1.42 rssi=-55 touch=0 frames=2 flush_err=0
 ```
+
+### Debug mode
+
+The diagnostics from the bring-up are kept, but are off by default. Turn them on with the
+**Debug mode → Turn on** button on the web status page (or `curl -X POST "http://mypi-hotspot.local/api/debug?on=1"`).
+The setting is stored in NVS and survives reboots and OTA updates.
+
+| Takes effect | What debug mode adds |
+|---|---|
+| Immediately | DEBUG-level logs from the app: every init step `[ OK ]`, pin lists, I2C line levels, touch `DOWN`/`DRAG`/`MOVE`/`UP`/`TAP` |
+| Immediately | Heartbeat every 5 s instead of 60 s |
+| After a reboot | Boot-time wiring check (shown at `/pins`), panel ID read, I2C bus scan, color test pattern |
+
+Always on, regardless of debug mode: the web status page, `/api/log`, OTA, error/warning logs, the
+touch/flush error counters and manual pin control at `/pins`.
 
 ---
 
@@ -244,7 +260,8 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | `/api/status` | Same data as JSON |
 | `/api/log` | The RAM log buffer as plain text (boot log included, oldest first) |
 | `/update` | OTA upload form |
-| `/pins` | Wiring diagnostics: boot-time pin check (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
+| `/api/debug?on=1\|0` (POST) | Switch debug mode on/off (saved in NVS) |
+| `/pins` | Wiring diagnostics: boot-time pin check (debug mode only) (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
 
 ## OTA updates
 
@@ -284,10 +301,12 @@ Check the serial log first — each display step is logged.
 
 | Symptom | Likely cause |
 |---|---|
-| Backlight on, screen dark **and** touch I2C timeouts | Module powered through both VCC and 3V3 — disconnect VCC (see [Wiring](#wiring-display-module--esp32-p4-nano)) |
+| Noise, shifted pixels or wrong colors after updating to v0.4.0 | SPI clock too high for the wiring — set `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ=20` |
+| Backlight on, screen dark **and** touch I2C timeouts | Module powered through both VCC (5 V) and 3V3 — disconnect VCC, use 3V3 only (see [Wiring](#wiring-display-module--esp32-p4-nano)) |
 | Backlight off | `LCD_BL (GPIO22) -> 1` missing in log, or LCD_BL wire/VCC not connected |
 | Backlight on, screen stays black/white, log shows `[ OK ]` | Wrong SCLK/MOSI/LCD_CS/LCD_DC, or LCD_RESET stuck low — check `main/pins.h`; try `CONFIG_MYPI_LCD_SPI_CLOCK_MHZ=1` |
 | `SPI color transfer timeout` | SPI/DMA problem — check wiring and lower the SPI clock |
+| `LCD ID read: skipped` on the web page | Normal — the panel ID is only read in debug mode |
 | `Panel ID reads all 0x00/0xFF` warning | Expected on the Waveshare 2" module: MISO serves the TF card, the panel is write-only. Not an error by itself |
 | `/pins`: every pin except LCD_BL "held HIGH" | Expected — the module's level translator pulls all signal lines up to the module supply. Feed the module from one supply pin only |
 | `/pins`: a pin is "floating" | That wire probably does not reach the module |

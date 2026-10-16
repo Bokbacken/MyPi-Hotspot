@@ -121,6 +121,11 @@ void pintest_boot_check(void)
 
 size_t pintest_report(char *buf, size_t len)
 {
+    if (s_report_len == 0) {
+        return snprintf(buf, len, "Boot-time wiring check was skipped (debug mode off).\n"
+                                  "Turn debug mode on from the status page and reboot to run it.\n"
+                                  "Manual pin control below works either way.\n");
+    }
     size_t n = s_report_len < len - 1 ? s_report_len : len - 1;
     memcpy(buf, s_report, n);
     buf[n] = 0;

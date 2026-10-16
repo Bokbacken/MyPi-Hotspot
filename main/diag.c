@@ -15,6 +15,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -181,11 +182,81 @@ void diag_print_boot_banner(void)
     ESP_LOGI(TAG, "==================================================");
 }
 
+// ---------------------------------------------------------------------------
+// Debug mode
+// ---------------------------------------------------------------------------
+
+#define DEBUG_HEARTBEAT_S   5
+#define NVS_NAMESPACE       "mypi"
+#define NVS_KEY_DEBUG       "debug"
+
+static volatile bool s_debug;
+
+// App log tags switched between INFO and DEBUG. (main/CMakeLists.txt compiles this
+// component with LOG_LOCAL_LEVEL=DEBUG so the ESP_LOGD calls exist in the binary.)
+static const char *const DEBUG_TAGS[] = { "main", "display", "touch", "pintest", "wifi", "web", "diag" };
+
+static void apply_debug_levels(void)
+{
+    for (size_t i = 0; i < sizeof(DEBUG_TAGS) / sizeof(DEBUG_TAGS[0]); i++) {
+        esp_log_level_set(DEBUG_TAGS[i], s_debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
+    }
+}
+
+void diag_debug_load(void)
+{
+#ifdef CONFIG_MYPI_DEBUG_MODE_DEFAULT
+    bool on = true;
+#else
+    bool on = false;
+#endif
+    const char *source = "Kconfig default";
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t v;
+        if (nvs_get_u8(h, NVS_KEY_DEBUG, &v) == ESP_OK) {
+            on = v != 0;
+            source = "saved setting";
+        }
+        nvs_close(h);
+    }
+    s_debug = on;
+    apply_debug_levels();
+    ESP_LOGI(TAG, "Debug mode %s (%s) - toggle on the web status page", on ? "ON" : "off", source);
+}
+
+bool diag_debug_enabled(void)
+{
+    return s_debug;
+}
+
+esp_err_t diag_set_debug(bool on)
+{
+    s_debug = on;
+    apply_debug_levels();
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_DEBUG, on ? 1 : 0);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "Debug mode %s (saved: %s)", on ? "ON" : "off", esp_err_to_name(err));
+    return err;
+}
+
 static void heartbeat_task(void *arg)
 {
     diag_status_t st;
+    int64_t last = esp_timer_get_time();
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_MYPI_HEARTBEAT_INTERVAL_S * 1000));
+        // Check once per second so a debug-mode toggle takes effect quickly.
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        int64_t interval_us = (int64_t)(s_debug ? DEBUG_HEARTBEAT_S : CONFIG_MYPI_HEARTBEAT_INTERVAL_S) * 1000000;
+        if (esp_timer_get_time() - last < interval_us) {
+            continue;
+        }
+        last = esp_timer_get_time();
         diag_get(&st);
         uint64_t up = esp_timer_get_time() / 1000000ULL;
         ESP_LOGI(TAG, "HB up=%lluh%02llum%02llus heap=%uK(min %uK) psram=%uK wifi=%s ip=%s rssi=%d touch=%lu frames=%lu flush_err=%lu",

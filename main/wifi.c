@@ -125,7 +125,7 @@ static void start_mdns(void)
             vTaskDelete(NULL);                                                      \
             return;                                                                 \
         }                                                                           \
-        ESP_LOGI(TAG, "[ OK ] %s", #expr);                                          \
+        ESP_LOGD(TAG, "[ OK ] %s", #expr);                                          \
     } while (0)
 
 static void wifi_task(void *arg)
