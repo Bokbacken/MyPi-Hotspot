@@ -8,6 +8,10 @@ idf_component_register(
              esp_psram spi_flash log esp_eth lwip
 )
 
+if(CONFIG_MYPI_UI_LVGL)
+    target_sources(${COMPONENT_LIB} PRIVATE "mypi_ui/lvgl_view.c" "ui_lvgl_port.c")
+endif()
+
 # Compile DEBUG-level logs into the app so debug mode can enable them at runtime
 # (the global maximum stays INFO, so ESP-IDF components are not affected).
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_DEBUG)

@@ -6,6 +6,12 @@ Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO
 Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
 [Next steps and UI conventions](docs/NEXT_STEPS.md) · [MyPi platform direction](docs/ARCHITECTURE.md)
 
+**MyPi LVGL migration groundwork:** the default local UI remains unchanged.
+An opt-in LVGL home status viewport starts the shared MyPi platform migration,
+keeping backend/API, touch, OTA and rescue paths intact.
+See [migration boundaries](docs/ARCHITECTURE.md#first-lvgl-migration-increment)
+for the build option, UTF-8/font limitations and validation plan.
+
 Current firmware release: **0.8.1** — the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
 a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.1 (logo/header on top of the v0.8.0 UI) builds cleanly but is not yet hardware-tested. Diagnostics
