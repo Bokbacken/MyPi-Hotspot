@@ -4,6 +4,11 @@ This document separates the Hotspot interface work in this branch from ideas tha
 still need design, implementation, and testing. The UI changes have not been run on
 the ESP32-P4 display or on device hardware; they are not evidence of a hardware test.
 
+The accepted [MyPi platform direction](ARCHITECTURE.md) governs future migration:
+LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
+identity, and preserved backend/API contracts. The implementation notes below
+describe the transitional UI, not an LVGL implementation.
+
 ## Implemented in this Hotspot update
 
 - The 240×320 ST7789 LCD home screen shows uplink state, AP/client state, Ethernet,
@@ -57,8 +62,9 @@ unrelated private files.
 ## Proposed cross-project policy
 
 - Keep a small shared MyPi token and asset specification, then render it with each
-  platform's native display and web stack. Do not require identical screen geometry,
-  LVGL, or a common application implementation.
+  platform's display and web stack. LVGL is the chosen future local graphical UI
+  direction on supported devices; identical screen geometry or a common application
+  implementation is not required.
 - Use the character-wheel keyboard on small local displays. Prefer a conventional
   full keyboard when a larger display has enough room and its input method makes one
   practical. Keep password entry masked, provide deliberate reveal only where useful,
