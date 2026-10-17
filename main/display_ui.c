@@ -578,6 +578,10 @@ static void wheel_submit(void)
         strlcpy(s_wheel_message, "Password: 8-63 bytes or empty", sizeof(s_wheel_message));
         return;
     }
+    if (sta_profile_find(s_input_ssid) >= 0) {
+        strlcpy(s_wheel_message, "SSID exists; edit via web", sizeof(s_wheel_message));
+        return;
+    }
     int slot = -1;
     for (int i = 0; i < STA_PROFILE_MAX; i++) {
         sta_profile_t existing;
