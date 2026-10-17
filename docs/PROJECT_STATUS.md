@@ -104,6 +104,49 @@ All builds up to v0.7.0 have passed on hardware. Repeat this list after each cha
 
 ## Next steps
 
+### PR #4 scope clarification — approved MyPi identity (2026-10-17)
+
+This updates the planned scope of [PR #4](https://github.com/Bokbacken/MyPi-Hotspot/pull/4)
+(`copilot/upgrade-lcd-web-interface`), not the v0.7.0 hardware-tested snapshot above.
+
+- **Canonical artwork:** the two μ/π logo variants uploaded and approved by the
+  user in the task conversation are the primary visual reference for the MyPi
+  family and the Hotspot LCD/web redesign. Both are approved variants of the same
+  identity, not proposals to redraw or replace.
+- **Asset handoff:** the uploaded image files are not present in this checkout.
+  Before embedding artwork, obtain those exact files through an accessible
+  attachment or repository asset and record their source and filenames. Do not
+  invent replacement artwork, approximate the mark with font glyphs, or depend
+  on inaccessible private Companion assets. Approval is settled; importing and
+  verifying the actual files remains pending.
+- **LCD target:** use an approved variant in the home/header treatment, preserving
+  its proportions and legibility at the small display's resolution. Any scaled
+  or device-format export must derive from the approved artwork, not a new logo.
+- **Web target:** use the same approved identity in shared page chrome across
+  the overview, separate task pages, OTA pages and pins page. Embed assets locally
+  in firmware; branding must not depend on a CDN or an Internet connection.
+- **Family language:** retain the serial-bit-pattern divider with the project
+  name beneath it: `H` on the LCD and `Hotspot` on the web, framed as 8N1 (start
+  bit, eight LSB-first data bits, stop bit). The divider complements the approved
+  μ/π identity; it does not replace the logo.
+- **Existing follow-up stays in scope:** repair character-wheel input using the
+  Companion user guide as a behavioral reference where accessible, including
+  touch interaction, editing, UTF-8 storage and character display. Split web
+  navigation into actual pages rather than section-anchor scrolling, with
+  logical task names and a consistent flow. Branding is a scope clarification,
+  not a replacement for either feature.
+- **Delivery constraints:** retain native ESP-IDF/C and the existing OTA/rescue
+  paths. No bootloader, partition-table or NVS-layout changes are required by
+  this branding decision. Future firmware builds must still fit the existing OTA
+  app partition and pass the regression checklist above.
+
+Completion requires the exact approved assets to be available and embedded,
+consistent LCD/web branding checked against both source variants, and the
+character-wheel, page navigation and OTA/rescue behavior validated. This scope
+note does not claim that those implementation or hardware checks are complete.
+
+### Existing performance follow-up
+
 - Throughput tuning, experiment #1: `WIFI_RMT_STATIC_TX_BUFFER_NUM` 32–64 on the P4,
   measured with iperf against the baseline.
 - Further buffer/queue experiments based on the buffer findings above.
