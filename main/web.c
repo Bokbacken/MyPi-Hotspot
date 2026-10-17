@@ -325,7 +325,7 @@ static esp_err_t ui_css_get(httpd_req_t *req)
     httpd_resp_set_type(req, "text/css");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, _binary_web_ui_css_start,
-                           _binary_web_ui_css_end - _binary_web_ui_css_start);
+                           _binary_web_ui_css_end - _binary_web_ui_css_start - 1);
 }
 
 static esp_err_t ui_js_get(httpd_req_t *req)
@@ -333,7 +333,7 @@ static esp_err_t ui_js_get(httpd_req_t *req)
     httpd_resp_set_type(req, "application/javascript");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, _binary_web_ui_js_start,
-                           _binary_web_ui_js_end - _binary_web_ui_js_start);
+                           _binary_web_ui_js_end - _binary_web_ui_js_start - 1);
 }
 
 static esp_err_t pins_get(httpd_req_t *req)
