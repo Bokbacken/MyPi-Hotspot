@@ -38,6 +38,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   background: #14253b;
 }
 .mypi-divider { min-width: 0; text-align: center; }
+.mypi-logo { display: block; height: 32px; width: auto; margin: 0 auto .3rem; }
 .mypi-divider svg {
   display: block;
   width: min(100%, 850px);

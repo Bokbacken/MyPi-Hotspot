@@ -6,9 +6,9 @@ Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO
 Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
 [Next steps and UI conventions](docs/NEXT_STEPS.md) · [MyPi platform direction](docs/ARCHITECTURE.md)
 
-Current firmware release: **0.8.0** — a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
+Current firmware release: **0.8.1** — the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
-a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.0 (new LCD/web UI) builds cleanly but is not yet hardware-tested. Diagnostics
+a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.1 (logo/header on top of the v0.8.0 UI) builds cleanly but is not yet hardware-tested. Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
@@ -135,6 +135,8 @@ MyPi-Hotspot/
 │   ├── ui_layout.h       LCD semantic colors, menu geometry and touch hit helpers
 │   ├── ui_serial.h       Shared 8N1 byte framing and waveform geometry
 │   ├── ui_input.h        UTF-8 wheel encoding and Wi-Fi passphrase length helpers
+│   ├── header_logo.h     Generated μ/π logo: 16 px LCD alpha map + 32 px web PNG (tools/render_header_logo.py)
+│   ├── header_font.h     Generated antialiased LCD `Hotspot` title (tools/render_header_font.py)
 │   ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
 │   ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
 │   ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
@@ -156,8 +158,8 @@ copied through a small internal DMA buffer in 40-row bands.
 
 ## Flash a prebuilt binary (no ESP-IDF needed)
 
-Every push is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)),
-once that workflow file is present in the repo.
+Every push and pull request is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)).
+The build artifact contains the OTA application image `mypi_hotspot.bin` and the merged full-flash image.
 
 > **Upgrading from the old hello world?** v0.2 moved the partition table from `0x8000` to `0xA000`
 > and added two OTA slots, so the **first** flash must be the full `mypi-hotspot-merged.bin` at
@@ -170,6 +172,9 @@ once that workflow file is present in the repo.
 3. In **Chrome or Edge** open <https://espressif.github.io/esptool-js/>, click **Connect**, pick the
    serial port, add `mypi-hotspot-merged.bin` at address **`0x0`**, and click **Program**.
 4. Press **RESET** on the board. Use the page's **Console** tab (115200 baud) to see the log.
+
+For an existing installation, upload the artifact's **`mypi_hotspot.bin`** through the device's
+**Update** page. Do not upload the merged full-flash image through OTA.
 
 Alternative with Python only: `pip install esptool` then
 `esptool.py --chip esp32p4 -p <PORT> write_flash 0x0 mypi-hotspot-merged.bin`.

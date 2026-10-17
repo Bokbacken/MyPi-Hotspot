@@ -52,12 +52,12 @@ divider encodes each character of the case-sensitive word `Hotspot` the same way
 Future MyPi projects should use their own identifying first letter/word and preserve
 this framing rule.
 
-The exact merged Greek micro/mu + pi logo artwork was not available in the public
-Hotspot checkout, and the private Companion repository could not be read in this
-task. No substitute mark has been invented. Transfer only the approved logo artwork
-and the minimum reproducible assets needed for this public project before claiming
-that the actual MyPi logo is present. Do not copy Companion application code or
-unrelated private files.
+The approved μ/π logo is checked in as `MyPi.png` and `MyPi-transparent.png` in the
+repository root. `tools/render_header_logo.py` (Pillow) turns the transparent artwork's
+alpha channel into the 16 px LCD mark and the 32 px web data URI in `main/header_logo.h`;
+`tools/render_header_font.py` renders the antialiased LCD `Hotspot` title in
+`main/header_font.h` (DejaVu Sans Bold, see `assets/DejaVu-LICENSE.txt`).
+`tests/test_header_logo.py` checks that the generated header matches the artwork.
 
 ## Proposed cross-project policy
 

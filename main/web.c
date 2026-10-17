@@ -43,8 +43,12 @@ extern const char _binary_web_ui_css_end[];
 extern const char _binary_web_ui_js_start[];
 extern const char _binary_web_ui_js_end[];
 
+// Approved MyPi logo (white, transparent PNG data URI from tools/render_header_logo.py).
+#include "header_logo.h"
+
 #define MYPI_BRAND_HEADER \
     "<header class='mypi-brand'><div class='mypi-divider'>" \
+    "<img class='mypi-logo' src='" HEADER_LOGO_URI "' alt='MyPi' width='40' height='32'>" \
     "<svg data-text='Hotspot'></svg><span class='mypi-project'>Hotspot</span></div>" \
     "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/'>Dashboard</a>" \
     "<a href='/update'>P4 OTA</a><a href='/c5update'>C5 OTA</a><a href='/pins'>Pins</a></nav></header>"

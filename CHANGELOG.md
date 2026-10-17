@@ -5,6 +5,24 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.1 — Integrate PR #5/#6 into the 0.8.0 UI (builds, not hardware-tested)
+- Resolves the overlapping UI branches (PR #5 LCD wheel/routed web views, PR #6
+  header/logo) against 0.8.0. LVGL will replace the local rendering
+  (`docs/ARCHITECTURE.md`), so only one transitional implementation is kept.
+- Kept from 0.8.0: LCD home/menu/scan/password/AP/clients/traffic/Ethernet/system
+  views, tap navigation, AP-stop confirmation, `ui_input.h` character wheel,
+  single-page web dashboard with `/ui.css` + `/ui.js`, and the host tests.
+- Added from PR #6: the approved μ/π logo (`MyPi-transparent.png`) as a white mark in
+  the LCD home header (16 px) and in all web headers (32 px), the antialiased DejaVu
+  Sans Bold `Hotspot` LCD title, the LCD Wi-Fi icon colored by STA RSSI (dark red
+  < -80 dBm, red < -70, orange < -60, yellow < -40, green), the generators
+  `tools/render_header_logo.py` / `tools/render_header_font.py`, the font license,
+  and `tests/test_header_logo.py`.
+- Dropped as duplicates: `char_wheel.c/.h` and its drag-capture touch API (PR #5),
+  the routed `/wifi`, `/access-point`, ... web views (PR #5), and PR #6's inline
+  BRAND_STYLE/BRAND_HEADER/BRAND_SCRIPT web header. The branches stay in git history.
+- Backend, APIs, OTA/rescue touch priority, rotation and wiring diagnostics unchanged.
+
 ## 0.8.0 — MyPi interface update (builds, not hardware-tested)
 - Branded LCD home and menu views, asynchronous local Wi-Fi scan/connect, UTF-8
   character wheel, client/traffic/Ethernet/system views, and explicit AP-stop
