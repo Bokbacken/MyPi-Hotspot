@@ -3,6 +3,24 @@
 Snapshot: 2026-10-16, firmware **v0.7.0**. See `CHANGELOG.md` for the per-version list
 and `README.md` for wiring, flashing and usage.
 
+## Verified baseline checkpoint — 2026-10-17
+
+The user reports that all implemented core functions have been verified on real
+hardware and explicitly approves the current baseline for commit.
+
+This checkpoint preserves firmware **v0.7.0** at main commit
+[`f51d4dd6f9a7b07e8440a131082d9223f2348042`](https://github.com/Bokbacken/MyPi-Hotspot/commit/f51d4dd6f9a7b07e8440a131082d9223f2348042).
+The hardware-tested functionality listed below is already committed on `main`;
+this is a documentation-only checkpoint, not a new firmware release.
+
+UI, character-wheel, page-navigation, logo and header follow-ups in PRs
+[#4](https://github.com/Bokbacken/MyPi-Hotspot/pull/4),
+[#5](https://github.com/Bokbacken/MyPi-Hotspot/pull/5) and
+[#6](https://github.com/Bokbacken/MyPi-Hotspot/pull/6) remain separate and untouched.
+No follow-up code is imported or newly marked hardware-tested by this checkpoint.
+Firmware sources, versions, build configuration, partition tables, bootloader and
+P4/C5 OTA paths are unchanged.
+
 ## What the device does today
 
 | Area | Status |
