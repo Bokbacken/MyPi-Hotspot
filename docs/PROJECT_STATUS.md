@@ -14,9 +14,9 @@ and `README.md` for wiring, flashing and usage.
 | Ethernet LAN (L2 bridge to AP) / WAN (DHCP uplink) | HW-tested |
 | OTA of the P4 (`/update`) and of the C5 slave (`/c5update`) | HW-tested |
 | Traffic stats, peak rates, CSV log, iperf2 on port 5001 | HW-tested |
-| OTA progress on the LCD (v0.6.3) | Untested |
-| P4 SDIO RX staging slots = 4, tuned C5 slave queues (v0.6.3) | Untested, not measured |
-| Ethernet emergency mode (v0.7.0) | Untested |
+| OTA progress on the LCD (v0.6.3) | HW-tested |
+| P4 SDIO RX staging slots = 4, tuned C5 slave queues (v0.6.3) | HW-tested; throughput vs. baseline not yet recorded here |
+| Ethernet emergency mode (v0.7.0) | HW-tested |
 
 ## Architecture in short
 
@@ -70,16 +70,19 @@ and `README.md` for wiring, flashing and usage.
 - Avoid strapping pins 34–38 for peripherals; LCD SPI moved to GPIO23/GPIO5.
 - OTA over a 128K TCP window needs a larger recvmbox, otherwise uploads stall.
 
-## Open test checklist
+## Regression checklist (run for every new build)
 
-1. Flash v0.7.0 via `/update`; confirm the version on the status page.
+All builds up to v0.7.0 have passed on hardware. Repeat this list after each change.
+
+
+1. Flash via `/update`; confirm the new version on the status page.
 2. Emergency mode: swipe down within 10 s → emergency screen with 5 buttons.
 3. DHCP option with a cable to a router → IP shown on LCD, web UI reachable.
 4. Static `192.168.4.32` with a laptop set to `192.168.4.x/24` directly on the port.
 5. Switch between options while emergency mode is active.
 6. Simulate a dead C5 (hold it in reset at boot) → emergency mode within ~30 s.
 7. OTA progress view on the LCD for both `/update` and `/c5update`.
-8. Flash the tuned C5 slave via `/c5update` and run iperf against the v0.5.3 baseline.
+8. Run iperf (port 5001) and compare with the v0.5.3 baseline and the previous build.
 
 ## Next steps
 
