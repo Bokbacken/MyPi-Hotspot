@@ -448,6 +448,9 @@ static void draw_wheel(void)
     const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
     const char *value = s_input_password ? s_input_pass : s_input_ssid;
+    int visible_chars = (s_wheel_layout.preview.w - 6) / CHAR_W;
+    int skip = utf8_count(value) - visible_chars;
+    while (skip-- > 0) value += utf8_char_size((const unsigned char *)value);
     make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
     int count = wheel_count(s_wheel.range);
     display_fill_screen(COL_BLACK);
