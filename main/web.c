@@ -38,6 +38,17 @@ static volatile bool s_ota_busy;
 static volatile bool s_c5_ota_busy;
 static char s_c5_ota_status[64] = "idle";
 
+extern const char _binary_web_ui_css_start[];
+extern const char _binary_web_ui_css_end[];
+extern const char _binary_web_ui_js_start[];
+extern const char _binary_web_ui_js_end[];
+
+#define MYPI_BRAND_HEADER \
+    "<header class='mypi-brand'><div class='mypi-divider'>" \
+    "<svg data-text='Hotspot'></svg><span class='mypi-project'>Hotspot</span></div>" \
+    "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/'>Dashboard</a>" \
+    "<a href='/update'>P4 OTA</a><a href='/c5update'>C5 OTA</a><a href='/pins'>Pins</a></nav></header>"
+
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
@@ -52,30 +63,32 @@ static const char INDEX_HTML[] =
 "pre{background:#000;color:#9f9;padding:8px;height:45vh;overflow:auto;font-size:12px;white-space:pre-wrap}"
 "input,select,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}input{width:9em}"
 "fieldset{border:1px solid #444;margin:.5em 0}#msg{color:#fc6}"
-".bad{color:#f66}.ok{color:#6f6}</style></head><body>"
-"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/c5update'>C5 co-processor update</a> | "
-"<a href='/pins'>Wiring diagnostics</a> | "
-"<a href='/api/status'>/api/status</a> | <a href='/api/log'>/api/log</a></p>"
+".bad{color:#f66}.ok{color:#6f6}</style><link rel='stylesheet' href='/ui.css'></head><body>"
+MYPI_BRAND_HEADER
+"<nav class='nav-tiles' aria-label='Dashboard sections'><a href='#overview'>Overview</a><a href='#traffic'>Traffic</a>"
+"<a href='#wifi'>Wi-Fi uplink</a><a href='#access-point'>Access point</a><a href='#ethernet'>Ethernet</a>"
+"<a href='#system'>System</a><a href='#diagnostics'>Diagnostics</a></nav>"
+"<h1>Hotspot control panel</h1><p><a href='/api/status'>Status API</a> | <a href='/api/log'>Device log</a></p>"
 "<p id='msg'></p>"
-"<table id='t'></table>"
-"<h2>Network traffic</h2><table id='ns'></table>"
+"<h2 id='overview'>Overview</h2><table id='t'></table>"
+"<h2 id='traffic'>Network traffic</h2><table id='ns'></table>"
 "<p><button onclick='resetPeaks()'>Reset peaks</button> <button id='lb' onclick='logToggle()'>Start log</button> "
 "<button onclick='dlLog()'>Download CSV</button> <span id='lst'></span></p>"
-"<h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
+"<h2 id='wifi'>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
 "<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
 "<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
 "<fieldset><legend>Edit STA profile</legend>Slot <select id='ss'></select> SSID <input id='sn'> "
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
 "Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
-"<h2>Access point (AP profiles)</h2><p id='aps'></p>"
+"<h2 id='access-point'>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
 "<fieldset><legend>Edit AP profile</legend>Slot <select id='as'></select> SSID <input id='an'> "
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
-"<h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
+"<h2 id='system'>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
 "<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
 "STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
 "AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
@@ -87,14 +100,14 @@ static const char INDEX_HTML[] =
 "<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
-"<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
+"<h2 id='ethernet'>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
 "<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
 "<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
 "<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
 "NAT path: put a phone/PC on the AP and run an internet speed test.</small></p>"
-"<h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
+"<h2 id='diagnostics'>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
 "<h2>Log <label style='font-size:.8em'><input type='checkbox' id='follow' style='width:auto' checked> follow</label></h2>"
 "<pre id='log'></pre><script>"
 "function $(i){return document.getElementById(i)}"
@@ -135,10 +148,10 @@ static const char INDEX_HTML[] =
 "subnet:+$('asub').value,nat:$('anat').checked,on_boot:$('aboot').checked});ld()}"
 "async function delS(i){if(confirm('Delete STA profile '+i+'?')){await post('/api/profile/del',{slot:i});ld()}}"
 "async function delA(i){if(confirm('Delete AP profile '+i+'?')){await post('/api/approfile/del',{slot:i});ld()}}"
-"async function conn(i){await post('/api/connect',{slot:i});ld()}"
-"async function disc(){await post('/api/disconnect');ld()}"
-"async function apStart(i){await post('/api/ap/start',{slot:i})}"
-"async function apStop(){await post('/api/ap/stop')}"
+"async function conn(i){if(!confirm('Connecting may interrupt the current uplink. Continue?'))return;await post('/api/connect',{slot:i});ld()}"
+"async function disc(){if(!confirm('Disconnect the Wi-Fi uplink? AP clients may lose internet access.'))return;await post('/api/disconnect');ld()}"
+"async function apStart(i){if(confirm('Starting this profile may replace the running AP and disconnect clients. Continue?'))await post('/api/ap/start',{slot:i})}"
+"async function apStop(){if(confirm('Stop the access point and disconnect its clients?'))await post('/api/ap/stop')}"
 "const PBITS={b:1,g:2,n:4,a:16,ac:32};"
 "function buildProtoMask(p){let m=0;for(let k in PBITS)if($(p+'-proto-'+k).checked)m|=PBITS[k];return m}"
 "function setProtoMask(p,m){for(let k in PBITS)$(p+'-proto-'+k).checked=!!(m&PBITS[k])}"
@@ -152,8 +165,8 @@ static const char INDEX_HTML[] =
 "async function ipStop(){await post('/api/iperf/stop')}"
 "async function scan(){$('sc').innerHTML='<tr><td>scanning...</td></tr>';try{let s=await (await fetch('/api/scan')).json();"
 "$('sc').innerHTML=tr(['SSID','RSSI','Ch','Auth','Saved'],1)+s.networks.map(n=>tr([esc(n.ssid),n.rssi,n.channel,n.auth,"
-"n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',e,'bad')}}"
-"async function tick(){try{"
+"n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',esc(e),'bad')}}"
+"let tickBusy=false;async function tick(){if(tickBusy)return;tickBusy=true;try{"
 "let s=await (await fetch('/api/status')).json();"
 "$('t').innerHTML="
 "row('Firmware',s.firmware)+row('ESP-IDF',s.idf)+row('Chip',s.chip)+row('Reset reason',s.reset_reason)+"
@@ -162,7 +175,7 @@ static const char INDEX_HTML[] =
 "row('PSRAM free',(s.psram_free/1024).toFixed(0)+' KB')+"
 "row('Uplink',s.uplink,s.uplink=='none'?'bad':'ok')+"
 "row('Wi-Fi STA',s.wifi_state+' (SSID '+esc(s.ssid)+', profile '+s.sta_profile+', retries '+s.wifi_retries+')',s.wifi_state=='connected'?'ok':'bad')+"
-"row('STA IP',s.ip)+row('RSSI',s.rssi+' dBm')+"
+"row('STA IP',s.ip)+row('Management address',s.ap.running?s.ap.ip:(s.eth.mode=='wan'&&s.eth.has_ip?s.eth.ip:'-'))+row('RSSI',s.rssi+' dBm')+"
 "row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', '+chText(s.ap)+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
 "(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
 "(s.eth.rescue&&s.eth.rescue.active?row('EMERGENCY MODE','Ethernet only ('+esc(s.eth.rescue.reason)+'), option '+esc(s.eth.rescue.option)+(s.eth.rescue.error?' - error '+esc(s.eth.rescue.error):'')+'. Wi-Fi AP stopped; reboot to leave.','bad'):'')+"
@@ -206,19 +219,20 @@ static const char INDEX_HTML[] =
 "if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
 "let l=await (await fetch('/api/log')).text();let q=$('log');q.textContent=l;"
 "if($('follow').checked)q.scrollTop=q.scrollHeight;"
-"}catch(e){$('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
+"}catch(e){$('t').innerHTML=row('Error','device unreachable: '+esc(e),'bad');for(let id of ['ns','sp','sc','ap','cl','rd'])$(id).textContent='';$('aps').textContent='Device unreachable';$('es').textContent='Device unreachable';$('is').textContent='Device unreachable';$('log').textContent='Device unreachable'}finally{tickBusy=false}}"
 "function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
 "let logRun=false;"
 "function resetPeaks(){fetch('/api/netstats/reset',{method:'POST'}).then(tick)}"
 "function logToggle(){fetch('/api/netstats/log/'+(logRun?'stop':'start'),{method:'POST'}).then(tick)}"
 "function dlLog(){location='/api/netstats/log'}"
 "for(let i=0;i<10;i++)$('ss').innerHTML+='<option>'+i+'</option>';for(let i=0;i<4;i++)$('as').innerHTML+='<option>'+i+'</option>';"
-"ld();tick();setInterval(tick,2000);</script></body></html>";
+"ld();tick();setInterval(tick,2000);</script><script src='/ui.js' defer></script></body></html>";
 
 static const char UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot OTA</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
-"a{color:#6cf}progress{width:100%;height:1.5em}</style></head><body>"
+"a{color:#6cf}progress{width:100%;height:1.5em}</style><link rel='stylesheet' href='/ui.css'></head><body>"
+MYPI_BRAND_HEADER
 "<h1 style='font-size:1.3em'>Firmware update (OTA)</h1>"
 "<p>Upload the <b>app image</b> <code>mypi_hotspot.bin</code> (a.k.a. <code>mypi-hotspot-*-ota.bin</code>), "
 "<b>not</b> the merged full-flash image.</p>"
@@ -238,13 +252,14 @@ static const char UPDATE_HTML[] =
 "x.timeout=180000;x.ontimeout=()=>s.textContent='No answer from the device within 3 min. Check /api/log, then power-cycle and retry (or flash via USB).';"
 "x.onload=()=>{if(x.status!=200){clearInterval(pt);pt=0}s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',15000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
-"s.textContent='Uploading 0% ('+f.size+' bytes)...';x.send(f)}</script></body></html>";
+"s.textContent='Uploading 0% ('+f.size+' bytes)...';x.send(f)}</script><script src='/ui.js' defer></script></body></html>";
 
 static const char C5UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot C5 update</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
 "a{color:#6cf}progress{width:100%;height:1.5em}td{padding:2px 10px 2px 0}td:first-child{color:#999}"
-".bad{color:#f66}.ok{color:#6f6}.warn{color:#fc6}</style></head><body>"
+".bad{color:#f66}.ok{color:#6f6}.warn{color:#fc6}</style><link rel='stylesheet' href='/ui.css'></head><body>"
+MYPI_BRAND_HEADER
 "<h1 style='font-size:1.3em'>Co-processor (ESP32-C5) firmware update</h1><p><a href='/'>&larr; Status</a></p>"
 "<table id='t'></table>"
 "<p>Upload the ESP-Hosted <b>slave</b> app image for the C5: <code>network_adapter.bin</code> "
@@ -255,17 +270,17 @@ static const char C5UPDATE_HTML[] =
 "A 3.x host (v0.6.0+) cannot reach a 2.x slave, so the upload then fails cleanly: flash the C5 over USB instead.</p>"
 "<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash C5</button>"
 "<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p>"
-"<script>const $=i=>document.getElementById(i);"
+"<script>const $=i=>document.getElementById(i);function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
 "let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
 "let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
 "done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
 "if(o.phase=='done'||o.phase=='failed'){clearInterval(pt);pt=0}}).catch(()=>{pb=0;s.textContent='Device is rebooting...'})}"
 
 "fetch('/api/status').then(r=>r.json()).then(j=>{let c=j.coproc||{};let v=c.fw_valid?c.fw:'unknown';"
-"$('t').innerHTML='<tr><td>Chip</td><td>'+(c.target||'?')+' (id '+c.chip_id+')</td></tr>'"
-"+'<tr><td>Slave firmware</td><td>'+v+'</td></tr><tr><td>Host component</td><td>'+c.host+'</td></tr>'"
+"$('t').innerHTML='<tr><td>Chip</td><td>'+esc(c.target||'?')+' (id '+c.chip_id+')</td></tr>'"
+"+'<tr><td>Slave firmware</td><td>'+esc(v)+'</td></tr><tr><td>Host component</td><td>'+esc(c.host)+'</td></tr>'"
 "+'<tr><td>Match</td><td class='+(c.version_match?'ok':'bad')+'>'+(c.version_match?'yes':'NO')+'</td></tr>'"
-"+'<tr><td>OTA</td><td>'+(j.c5_ota_status||'-')+'</td></tr>'});"
+"+'<tr><td>OTA</td><td>'+esc(j.c5_ota_status||'-')+'</td></tr>'});"
 "function up(){let f=$('f').files[0];let s=$('s');if(!f){s.textContent='Choose a file first';return}"
 "if(!confirm('Flash '+f.name+' to the C5 co-processor?'))return;"
 "let x=new XMLHttpRequest();x.open('POST','/api/c5update');x.setRequestHeader('Content-Type','application/octet-stream');"
@@ -275,14 +290,15 @@ static const char C5UPDATE_HTML[] =
 "x.timeout=300000;x.ontimeout=()=>s.textContent='No answer from the device within 5 min. Check /api/log, then power-cycle and retry.';"
 "x.onload=()=>{if(x.status!=200){clearInterval(pt);pt=0}s.textContent=x.status+': '+x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};"
 "x.onerror=()=>s.textContent='Upload failed (connection error)';"
-"s.textContent='Uploading '+f.size+' bytes (slow: ~1-3 min)...';x.send(f)}</script></body></html>";
+"s.textContent='Uploading '+f.size+' bytes (slow: ~1-3 min)...';x.send(f)}</script><script src='/ui.js' defer></script></body></html>";
 
 static const char PINS_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot pins</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
 "a{color:#6cf}pre{background:#000;color:#9f9;padding:8px;font-size:12px;white-space:pre-wrap}"
-"td{padding:3px 8px}button{margin:0 2px}</style></head><body>"
-"<h1 style='font-size:1.3em'>Wiring diagnostics</h1><p><a href='/'>&larr; Status</a></p>"
+"td{padding:3px 8px}button{margin:0 2px}</style><link rel='stylesheet' href='/ui.css'></head><body>"
+MYPI_BRAND_HEADER
+"<h1 style='font-size:1.3em'>Wiring diagnostics</h1><p><a href='/'>&larr; Dashboard</a></p>"
 "<h2 style='font-size:1.1em'>Boot-time wiring check</h2><pre id='r'></pre>"
 "<h2 style='font-size:1.1em'>Manual pin control</h2>"
 "<p>Set a pin HIGH/LOW and measure it with a multimeter at the LCD module (against GND): HIGH should be ~3.3 V, LOW ~0 V. "
@@ -298,11 +314,27 @@ static const char PINS_HTML[] =
 "['high','low','in','inpd'].map(m=>\"<button onclick=\\\"setp('\"+n+\"','\"+m+\"')\\\">\"+m+'</button>').join('')+"
 "\"</td><td id='v_\"+n+\"'></td></tr>\").join('')});"
 "function setp(n,m){fetch('/api/pin?name='+n+'&mode='+m).then(r=>r.text()).then(t=>document.getElementById('v_'+n).textContent=t)}"
-"</script></body></html>";
+"</script><script src='/ui.js' defer></script></body></html>";
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+static esp_err_t ui_css_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, _binary_web_ui_css_start,
+                           _binary_web_ui_css_end - _binary_web_ui_css_start - 1);
+}
+
+static esp_err_t ui_js_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, _binary_web_ui_js_start,
+                           _binary_web_ui_js_end - _binary_web_ui_js_start - 1);
+}
 
 static esp_err_t pins_get(httpd_req_t *req)
 {
@@ -1373,6 +1405,8 @@ esp_err_t web_start(void)
     }
     const httpd_uri_t uris[] = {
         { .uri = "/",           .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/ui.css",     .method = HTTP_GET,  .handler = ui_css_get },
+        { .uri = "/ui.js",      .method = HTTP_GET,  .handler = ui_js_get },
         { .uri = "/api/status", .method = HTTP_GET,  .handler = status_get },
         { .uri = "/api/log",    .method = HTTP_GET,  .handler = log_get },
         { .uri = "/update",     .method = HTTP_GET,  .handler = update_get },

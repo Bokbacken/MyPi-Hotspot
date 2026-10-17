@@ -1,0 +1,29 @@
+#pragma once
+
+#define MYPI_UI_BG          0x0000
+#define MYPI_UI_TEXT        0xFFFF
+#define MYPI_UI_MUTED       0x8410
+#define MYPI_UI_ORANGE      0xFD20
+#define MYPI_UI_GREEN       0x07E0
+#define MYPI_UI_RED         0xF800
+#define MYPI_UI_CYAN        0x07FF
+#define MYPI_UI_YELLOW      0xFFE0
+
+#define MYPI_UI_MENU_X0     8
+#define MYPI_UI_MENU_X1     231
+#define MYPI_UI_MENU_Y0     40
+#define MYPI_UI_MENU_ROW_H  34
+#define MYPI_UI_MENU_GAP    3
+
+static inline int mypi_ui_row_hit(int y, int y0, int height, int gap, int count)
+{
+    if (y < y0 || height <= 0 || gap < 0 || count <= 0) return -1;
+    int stride = height + gap;
+    int row = (y - y0) / stride;
+    return row < count && (y - y0) % stride < height ? row : -1;
+}
+
+static inline int mypi_ui_button_hit(int x, int y, int x0, int y0, int x1, int y1)
+{
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}

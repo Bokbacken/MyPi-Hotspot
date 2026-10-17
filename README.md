@@ -3,25 +3,34 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
+[Next steps and UI conventions](docs/NEXT_STEPS.md)
 
-Current version: **0.7.0** — an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an **LCD status screen** with an OTA progress view, Wi-Fi uplink + own access point
+Current firmware release: **0.8.0** — a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
-a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
+a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.0 (new LCD/web UI) builds cleanly but is not yet hardware-tested. Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
 |---|---|
-| Boot | Boot banner on serial, then navy blue screen (debug mode: wiring check + color test pattern first) |
-| Tap (finger down + up, < 10 px movement) | Filled circle (radius 8 px) in a **random color** at the touch point |
-| Drag / swipe | **Black** line follows the finger |
+| Boot | Boot banner on serial, then the LCD status home screen (debug mode: wiring check + color test pattern first) |
+| Tap **OPEN MENU** | Open Wi-Fi, AP, clients, traffic, Ethernet, or system/display views |
+| Wi-Fi uplink → scan → network | Saved profiles connect directly; a new network opens the local password character wheel, then saves and requests connection |
+| AP → **STOP AP...** | Show an explicit disconnect confirmation; Back/navigation leaves the AP running |
+| Swipe down during first 10 s | Enter Ethernet emergency mode (>= 60 px, rotation-corrected coordinates) |
 | Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
-| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the IP from the log): status, log, OTA upload |
+| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): dashboard, settings, diagnostics, OTA |
 
 No LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C, and ESP-Hosted for Wi-Fi.
 A failing display or touch controller is logged but does **not** stop Wi-Fi/web, so you can always
 read the diagnostics remotely.
+
+The display and web divider use generated 8N1 serial waveforms (`H` on the LCD and
+`Hotspot` on the web). The shared web styles/scripts are local embedded assets; see
+[local UI navigation, asset maintenance, validation, and future ideas](docs/NEXT_STEPS.md).
+The exact merged μ/π logo asset is not present in this checkout; the private Companion
+asset could not be accessed for this update, so no substitute logo has been used.
 
 > v0.4.0 raises the LCD SPI clock to 40 MHz and the touch I2C clock to 400 kHz. If the screen shows
 > noise or the touch error counter climbs, lower them in menuconfig (20 MHz / 100 kHz).
@@ -112,25 +121,30 @@ MyPi-Hotspot/
 ├── CMakeLists.txt        Top-level ESP-IDF project file (PROJECT_VER)
 ├── sdkconfig.defaults    Chip rev v3.x, CPU 400 MHz, PSRAM, 16 MB flash, custom partitions, rollback, ESP-Hosted
 ├── partitions.csv        nvs, otadata, phy_init, ota_0 (6 MB), ota_1 (6 MB), storage (FAT)
-└── main/
-    ├── CMakeLists.txt
-    ├── Kconfig.projbuild Project options (menuconfig → "MyPi-Hotspot")
-    ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns, iperf
-    ├── main.c            app_main: init, status screen start, touch loop, OTA rollback confirm
-    ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
-    ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
-    ├── display_font.h/.c Classic 5×7 ASCII font (Adafruit GFX glcdfont) + up/down arrows
-    ├── display_ui.h/.c   Text/icon drawing and the LCD status screen task (redraw every 2 s)
-    ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
-    ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
-    ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
-    ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
-    ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
-    ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
-    ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
-    ├── net.h/.c          NAPT, DHCP server setup, traffic counters + peaks, traffic log (PSRAM), iperf server
-    ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (L2 bridge to the AP) or WAN (uplink)
-    └── web.h/.c          HTTP server: status page, JSON API, log, OTA upload, network API
+├── main/
+│   ├── CMakeLists.txt
+│   ├── Kconfig.projbuild Project options (menuconfig → "MyPi-Hotspot")
+│   ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns, iperf
+│   ├── main.c            app_main: init, status screen start, touch loop, OTA rollback confirm
+│   ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
+│   ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
+│   ├── display_font.h/.c Classic 5×7 ASCII font (Adafruit GFX glcdfont) + up/down arrows
+│   ├── display_ui.h/.c   LCD status, navigable menus, UTF-8 password wheel, rescue and OTA views
+│   ├── ui_layout.h       LCD semantic colors, menu geometry and touch hit helpers
+│   ├── ui_serial.h       Shared 8N1 byte framing and waveform geometry
+│   ├── ui_input.h        UTF-8 wheel encoding and Wi-Fi passphrase length helpers
+│   ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
+│   ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
+│   ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
+│   ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
+│   ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
+│   ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
+│   ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
+│   ├── net.h/.c          NAPT, DHCP server setup, traffic counters + peaks, traffic log (PSRAM), iperf server
+│   ├── eth.h/.c          Ethernet (EMAC + IP101): LAN (L2 bridge to the AP) or WAN (uplink)
+│   ├── web.h/.c          HTTP server: dashboard, JSON API, log, OTA upload, network API
+│   └── web_ui.css/.js    Locally embedded shared web theme and generated serial waveform
+└── tests/                Host-runnable framing, geometry, and credential primitive tests
 ```
 
 The framebuffer (150 KB) lives in PSRAM. Only the changed ("dirty") rectangle is sent to the panel,
