@@ -5,6 +5,42 @@
 #include <stdint.h>
 #include <string.h>
 
+#define MYPI_WHEEL_ASCII_COUNT 95
+#define MYPI_WHEEL_LATIN_COUNT (0x250 - 0xA0)
+#define MYPI_WHEEL_COUNT       (MYPI_WHEEL_ASCII_COUNT + MYPI_WHEEL_LATIN_COUNT)
+
+static inline uint32_t mypi_wheel_codepoint(int index)
+{
+    if (index < 0 || index >= MYPI_WHEEL_COUNT) return 0;
+    return index < MYPI_WHEEL_ASCII_COUNT ? (uint32_t)(0x20 + index) :
+           (uint32_t)(0xA0 + index - MYPI_WHEEL_ASCII_COUNT);
+}
+
+static inline int mypi_wheel_step(int index, int delta)
+{
+    int next = (index + delta) % MYPI_WHEEL_COUNT;
+    return next < 0 ? next + MYPI_WHEEL_COUNT : next;
+}
+
+static inline int mypi_wheel_range_count(int range)
+{
+    return range == 0 ? MYPI_WHEEL_ASCII_COUNT : MYPI_WHEEL_LATIN_COUNT;
+}
+
+static inline uint32_t mypi_wheel_range_codepoint(int range, int index)
+{
+    int count = mypi_wheel_range_count(range);
+    if (index < 0 || index >= count) return 0;
+    return range == 0 ? (uint32_t)(0x20 + index) : (uint32_t)(0xA0 + index);
+}
+
+static inline int mypi_wheel_step_range(int range, int index, int delta)
+{
+    int count = mypi_wheel_range_count(range);
+    int next = (index + delta) % count;
+    return next < 0 ? next + count : next;
+}
+
 static inline bool mypi_utf8_append(char *text, size_t capacity, uint32_t codepoint)
 {
     if (!text || !capacity || codepoint > 0x10FFFF ||

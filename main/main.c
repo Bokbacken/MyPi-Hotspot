@@ -175,6 +175,8 @@ void app_main(void)
             } else {
                 if (status_ui) {
                     display_ui_handle_tap(start_x, start_y);
+                    ESP_LOGD(TAG, "TAP UI x=%3d y=%3d", start_x, start_y);
+                    diag_touch_event("ui tap %d,%d", start_x, start_y);
                 } else {
                     uint16_t color = random_color();
                     display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);

@@ -54,6 +54,19 @@ static void test_waveform_geometry(void)
 static void test_password_utf8_and_length(void)
 {
     char password[64] = "";
+    assert(mypi_wheel_codepoint(0) == 0x20);
+    assert(mypi_wheel_codepoint(MYPI_WHEEL_ASCII_COUNT - 1) == 0x7E);
+    assert(mypi_wheel_codepoint(MYPI_WHEEL_ASCII_COUNT) == 0xA0);
+    assert(mypi_wheel_codepoint(MYPI_WHEEL_COUNT - 1) == 0x24F);
+    assert(mypi_wheel_codepoint(MYPI_WHEEL_COUNT) == 0);
+    assert(mypi_wheel_step(0, -1) == MYPI_WHEEL_COUNT - 1);
+    assert(mypi_wheel_step(MYPI_WHEEL_COUNT - 1, 1) == 0);
+    assert(mypi_wheel_range_count(0) == MYPI_WHEEL_ASCII_COUNT);
+    assert(mypi_wheel_range_count(1) == MYPI_WHEEL_LATIN_COUNT);
+    assert(mypi_wheel_range_codepoint(1, 0) == 0xA0);
+    assert(mypi_wheel_range_codepoint(1, MYPI_WHEEL_LATIN_COUNT - 1) == 0x24F);
+    assert(mypi_wheel_step_range(1, 0, -1) == MYPI_WHEEL_LATIN_COUNT - 1);
+    assert(mypi_wheel_step_range(0, MYPI_WHEEL_ASCII_COUNT - 1, 1) == 0);
     assert(mypi_wifi_pass_length_valid(password));
     assert(mypi_utf8_append(password, sizeof(password), 0x00E5));
     assert(strcmp(password, "\xC3\xA5") == 0);
@@ -66,6 +79,13 @@ static void test_password_utf8_and_length(void)
     assert(mypi_wifi_pass_length_valid(""));
     assert(!mypi_wifi_pass_length_valid(
         "0123456789012345678901234567890123456789012345678901234567890123"));
+
+    char max_password[64] = "";
+    for (int i = 0; i < 61; i++) assert(mypi_utf8_append(max_password, sizeof(max_password), 'a'));
+    assert(mypi_utf8_append(max_password, sizeof(max_password), 0x00E5));
+    assert(strlen(max_password) == 63 && mypi_wifi_pass_length_valid(max_password));
+    assert(!mypi_utf8_append(max_password, sizeof(max_password), 0x00E5));
+    assert(mypi_utf8_backspace(max_password) && strlen(max_password) == 61);
 }
 
 static void test_touch_geometry(void)

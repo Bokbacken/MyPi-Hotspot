@@ -2,8 +2,19 @@
 
 All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 `PROJECT_VER` in `CMakeLists.txt`. "HW-tested" means the change has run on the real
-board; "untested" means it builds cleanly but has not been verified on hardware.
+board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
+
+## Unreleased — MyPi interface update (not hardware-tested)
+- Branded LCD home and menu views, asynchronous local Wi-Fi scan/connect, UTF-8
+  character wheel, client/traffic/Ethernet/system views, and explicit AP-stop
+  confirmation.
+- Shared offline web theme and generated 8N1 serial waveform (`Hotspot`) for the
+  dashboard, both OTA pages, and pins diagnostics.
+- Host tests cover serial framing/waveform geometry, touch geometry, wheel and
+  credential primitives. ESP-IDF build and device validation remain outstanding.
+- The private Companion logo asset was inaccessible; the exact merged μ/π mark has
+  not been added and must not be considered implemented.
 
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the

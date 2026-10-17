@@ -32,9 +32,6 @@ static const char *TAG = "display_ui";
 #define UART_X          ((LCD_H_RES - MYPI_UART_BITS_PER_BYTE * UART_BIT_W) / 2)
 #define SCAN_MAX        8
 #define CLIENT_MAX      8
-#define WHEEL_ASCII_COUNT 95
-#define WHEEL_LATIN_COUNT (0x250 - 0xA0)
-#define WHEEL_COUNT     (WHEEL_ASCII_COUNT + WHEEL_LATIN_COUNT)
 #define MENU_BUTTON_Y0  280
 #define MENU_BUTTON_Y1  315
 
@@ -69,6 +66,7 @@ typedef struct {
     char password_ssid[33];
     char password[64];
     int wheel_index;
+    int wheel_set;
     wifi_client_t clients[CLIENT_MAX];
     int client_count;
 } ui_state_t;
@@ -191,7 +189,7 @@ static bool ui_queue_job(ui_job_type_t type, int slot, const char *ssid, const c
 static void ui_worker(void *arg)
 {
     (void)arg;
-    for (;;) {
+    while (!s_stop) {
         ui_job_t job = {0};
         portENTER_CRITICAL(&s_ui_mux);
         if (s_job_pending) {
@@ -279,6 +277,8 @@ static void ui_worker(void *arg)
         ui_set_message(message, false);
         memset(&job, 0, sizeof(job));
     }
+    s_worker_task = NULL;
+    vTaskDelete(NULL);
 }
 
 static void ui_snapshot(ui_state_t *out)
@@ -319,10 +319,9 @@ static void draw_page_title(const char *title)
     display_draw_rect_outline(8, 28, LCD_H_RES - 9, 28, MYPI_UI_ORANGE);
 }
 
-static uint32_t wheel_codepoint(int index)
+static uint32_t wheel_codepoint(int range, int index)
 {
-    return index < WHEEL_ASCII_COUNT ? (uint32_t)(0x20 + index) :
-           (uint32_t)(0xA0 + index - WHEEL_ASCII_COUNT);
+    return mypi_wheel_range_codepoint(range, index);
 }
 
 static void draw_home(const ui_state_t *ui)
@@ -444,9 +443,10 @@ static void draw_wifi_scan(const ui_state_t *ui)
 
 static void draw_password(const ui_state_t *ui)
 {
-    uint32_t cp = wheel_codepoint(ui->wheel_index);
+    uint32_t cp = wheel_codepoint(ui->wheel_set, ui->wheel_index);
     char label[24];
-    if (cp < 0x7F) snprintf(label, sizeof(label), "Character: %c", (char)cp);
+    if (cp == 0x20) strlcpy(label, "Character U+0020 (space)", sizeof(label));
+    else if (cp < 0x7F) snprintf(label, sizeof(label), "Character: %c", (char)cp);
     else snprintf(label, sizeof(label), "Character U+%04lX", (unsigned long)cp);
     display_lock();
     display_fill_screen(MYPI_UI_BG);
@@ -461,10 +461,11 @@ static void draw_password(const ui_state_t *ui)
     display_draw_str(8, 76, mask, MYPI_UI_TEXT, MYPI_UI_BG, 1);
     display_draw_str(8, 104, label, MYPI_UI_TEXT, MYPI_UI_BG, 2);
     if (ui->message[0]) display_draw_str(8, 133, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
-    draw_button(8, 150, 59, 184, "<", MYPI_UI_MUTED);
-    draw_button(64, 150, 115, 184, ">", MYPI_UI_MUTED);
-    draw_button(120, 150, 173, 184, "ADD", MYPI_UI_GREEN);
-    draw_button(178, 150, 231, 184, "DEL", MYPI_UI_RED);
+    draw_button(8, 150, 47, 184, "PREV", MYPI_UI_MUTED);
+    draw_button(51, 150, 90, 184, "NEXT", MYPI_UI_MUTED);
+    draw_button(94, 150, 143, 184, ui->wheel_set ? "LATIN" : "ASCII", MYPI_UI_CYAN);
+    draw_button(147, 150, 190, 184, "ADD", MYPI_UI_GREEN);
+    draw_button(194, 150, 231, 184, "DEL", MYPI_UI_RED);
     draw_button(8, 207, 231, 238, "SAVE + CONNECT", MYPI_UI_ORANGE);
     draw_button(8, 245, 231, 276, "OPEN NETWORK", MYPI_UI_CYAN);
     draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "CANCEL", MYPI_UI_MUTED);
@@ -475,7 +476,9 @@ static void draw_password(const ui_state_t *ui)
 static void draw_ap(const ui_state_t *ui)
 {
     wifi_ap_info_t ap;
+    ap_profile_t profiles[AP_PROFILE_MAX] = {0};
     wifi_get_ap_info(&ap);
+    for (int i = 0; i < AP_PROFILE_MAX; i++) ap_profile_get(i, &profiles[i]);
     display_lock();
     display_fill_screen(MYPI_UI_BG);
     draw_page_title("Access point");
@@ -490,12 +493,12 @@ static void draw_ap(const ui_state_t *ui)
     draw_button(8, 78, 231, 112, "START DEFAULT AP", MYPI_UI_GREEN);
     for (int i = 0; i < AP_PROFILE_MAX; i++) {
         char label[32];
-        ap_profile_t profile = {0};
-        if (ap_profile_get(i, &profile) && profile.valid) snprintf(label, sizeof(label), "Start: %.25s", profile.ssid);
+        if (profiles[i].valid) snprintf(label, sizeof(label), "Start: %.25s", profiles[i].ssid);
         else snprintf(label, sizeof(label), "AP profile %d (empty)", i);
-        draw_button(8, 92 + i * 34, 231, 120 + i * 34, label, profile.valid ? MYPI_UI_TEXT : MYPI_UI_MUTED);
+        draw_button(8, 116 + i * 28, 231, 139 + i * 28, label,
+                    profiles[i].valid ? MYPI_UI_TEXT : MYPI_UI_MUTED);
     }
-    draw_button(8, 232, 231, 264, "STOP AP...", MYPI_UI_RED);
+    draw_button(8, 230, 231, 258, "STOP AP...", MYPI_UI_RED);
     if (ui->message[0]) display_draw_str(8, 264, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
     draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
     display_flush();
@@ -637,6 +640,7 @@ void display_ui_handle_tap(int x, int y)
                     memset(s_ui.password, 0, sizeof(s_ui.password));
                     strlcpy(s_ui.password_ssid, selected.ssid, sizeof(s_ui.password_ssid));
                     s_ui.wheel_index = 1;
+                    s_ui.wheel_set = 0;
                     s_ui.message[0] = '\0';
                     portEXIT_CRITICAL(&s_ui_mux);
                     ui.view = UI_PASSWORD;
@@ -648,24 +652,27 @@ void display_ui_handle_tap(int x, int y)
         if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) {
             memset(ui.password, 0, sizeof(ui.password));
             ui.view = UI_WIFI_SCAN;
-        } else if (mypi_ui_button_hit(x, y, 8, 150, 59, 184)) {
-            ui.wheel_index = (ui.wheel_index + WHEEL_COUNT - 1) % WHEEL_COUNT;
-        } else if (mypi_ui_button_hit(x, y, 64, 150, 115, 184)) {
-            ui.wheel_index = (ui.wheel_index + 1) % WHEEL_COUNT;
-        } else if (mypi_ui_button_hit(x, y, 120, 150, 173, 184)) {
-            if (!mypi_utf8_append(ui.password, sizeof(ui.password), wheel_codepoint(ui.wheel_index))) {
+        } else if (mypi_ui_button_hit(x, y, 8, 150, 47, 184)) {
+            ui.wheel_index = mypi_wheel_step_range(ui.wheel_set, ui.wheel_index, -1);
+        } else if (mypi_ui_button_hit(x, y, 51, 150, 90, 184)) {
+            ui.wheel_index = mypi_wheel_step_range(ui.wheel_set, ui.wheel_index, 1);
+        } else if (mypi_ui_button_hit(x, y, 94, 150, 143, 184)) {
+            ui.wheel_set = 1 - ui.wheel_set;
+            ui.wheel_index = 0;
+        } else if (mypi_ui_button_hit(x, y, 147, 150, 190, 184)) {
+            if (!mypi_utf8_append(ui.password, sizeof(ui.password), wheel_codepoint(ui.wheel_set, ui.wheel_index))) {
                 strlcpy(ui.message, "Password is at the 63-byte limit", sizeof(ui.message));
             } else {
                 ui.message[0] = '\0';
             }
-        } else if (mypi_ui_button_hit(x, y, 178, 150, 231, 184)) {
+        } else if (mypi_ui_button_hit(x, y, 194, 150, 231, 184)) {
             mypi_utf8_backspace(ui.password);
             ui.message[0] = '\0';
         } else if (mypi_ui_button_hit(x, y, 8, 207, 231, 238) ||
                    mypi_ui_button_hit(x, y, 8, 245, 231, 276)) {
             bool open = y >= 245;
             if (open) ui.password[0] = '\0';
-            if (!mypi_wifi_pass_length_valid(ui.password)) {
+            if (!open && (!ui.password[0] || !mypi_wifi_pass_length_valid(ui.password))) {
                 strlcpy(ui.message, "Use 8-63 UTF-8 bytes, or Open network", sizeof(ui.message));
             } else {
                 ui_queue_job(UI_JOB_CONNECT, -1, ui.password_ssid, ui.password);
@@ -676,19 +683,20 @@ void display_ui_handle_tap(int x, int y)
         portENTER_CRITICAL(&s_ui_mux);
         strlcpy(s_ui.password, ui.password, sizeof(s_ui.password));
         s_ui.wheel_index = ui.wheel_index;
+        s_ui.wheel_set = ui.wheel_set;
         strlcpy(s_ui.message, ui.message, sizeof(s_ui.message));
         portEXIT_CRITICAL(&s_ui_mux);
         break;
     case UI_AP:
         if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
         else if (mypi_ui_button_hit(x, y, 8, 78, 231, 112)) ui_queue_job(UI_JOB_AP_START, -1, NULL, NULL);
-        else if (mypi_ui_button_hit(x, y, 8, 92, 231, 226)) {
-            int slot = (y - 92) / 34;
+        else if (mypi_ui_row_hit(y, 116, 24, 4, AP_PROFILE_MAX) >= 0 && x >= 8 && x <= 231) {
+            int slot = mypi_ui_row_hit(y, 116, 24, 4, AP_PROFILE_MAX);
             ap_profile_t profile;
             if (slot >= 0 && slot < AP_PROFILE_MAX && ap_profile_get(slot, &profile) && profile.valid) {
                 ui_queue_job(UI_JOB_AP_START, slot, NULL, NULL);
             }
-        } else if (mypi_ui_button_hit(x, y, 8, 232, 231, 264)) ui.view = UI_AP_STOP_CONFIRM;
+        } else if (mypi_ui_button_hit(x, y, 8, 230, 231, 258)) ui.view = UI_AP_STOP_CONFIRM;
         break;
     case UI_AP_STOP_CONFIRM:
         if (mypi_ui_button_hit(x, y, 8, 170, 231, 220)) {
