@@ -493,7 +493,7 @@ static void draw_ap(const ui_state_t *ui)
     draw_button(8, 78, 231, 112, "START DEFAULT AP", MYPI_UI_GREEN);
     for (int i = 0; i < AP_PROFILE_MAX; i++) {
         char label[32];
-        if (profiles[i].valid) snprintf(label, sizeof(label), "Start: %.25s", profiles[i].ssid);
+        if (profiles[i].valid) snprintf(label, sizeof(label), "Start: %.24s", profiles[i].ssid);
         else snprintf(label, sizeof(label), "AP profile %d (empty)", i);
         draw_button(8, 116 + i * 28, 231, 139 + i * 28, label,
                     profiles[i].valid ? MYPI_UI_TEXT : MYPI_UI_MUTED);

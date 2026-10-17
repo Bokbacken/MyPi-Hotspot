@@ -6,9 +6,9 @@ Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO
 Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
 [Next steps and UI conventions](docs/NEXT_STEPS.md)
 
-Current firmware release: **0.7.0** — an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
+Current firmware release: **0.8.0** — a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
-a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). UI changes after v0.7.0 still need build and hardware validation. Diagnostics
+a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.0 (new LCD/web UI) builds cleanly but is not yet hardware-tested. Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
