@@ -4,7 +4,7 @@ Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO
 **Waveshare 2" capacitive touch LCD**.
 
 Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
-[Next steps and UI conventions](docs/NEXT_STEPS.md)
+[Next steps and UI conventions](docs/NEXT_STEPS.md) · [MyPi platform direction](docs/ARCHITECTURE.md)
 
 Current firmware release: **0.8.0** — a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
@@ -22,7 +22,9 @@ are quiet by default and can be switched on at any time with **debug mode** (see
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
 | Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): dashboard, settings, diagnostics, OTA |
 
-No LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C, and ESP-Hosted for Wi-Fi.
+The current firmware uses no LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C,
+and ESP-Hosted for Wi-Fi. [LVGL is the chosen future MyPi UI direction](docs/ARCHITECTURE.md),
+not implemented in this firmware.
 A failing display or touch controller is logged but does **not** stop Wi-Fi/web, so you can always
 read the diagnostics remotely.
 
