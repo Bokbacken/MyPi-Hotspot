@@ -490,6 +490,9 @@ static void draw_wheel(void)
     const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
     const char *value = s_input_password ? s_input_pass : s_input_ssid;
+    int visible_chars = (s_wheel_layout.preview.w - 6) / CHAR_W;
+    int skip = utf8_count(value) - visible_chars;
+    while (skip-- > 0) value += utf8_char_size((const unsigned char *)value);
     make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
     int count = wheel_count(s_wheel.range);
     display_fill_screen(COL_BLACK);
@@ -618,6 +621,10 @@ static void wheel_submit(void)
     }
     if (pass_len && (pass_len < 8 || pass_len > 63)) {
         strlcpy(s_wheel_message, "Password: 8-63 bytes or empty", sizeof(s_wheel_message));
+        return;
+    }
+    if (sta_profile_find(s_input_ssid) >= 0) {
+        strlcpy(s_wheel_message, "SSID exists; edit via web", sizeof(s_wheel_message));
         return;
     }
     int slot = -1;
