@@ -1,59 +1,122 @@
-# MyPi-Hotspot — next steps and active visions
+# MyPi interface and next steps
 
-This document separates current Hotspot work from ideas that need independent design,
-hardware verification, or a separate project. Research items are not implemented
-features or performance guarantees.
+This document separates the Hotspot interface work in this branch from ideas that
+still need design, implementation, and testing. The UI changes have not been run on
+the ESP32-P4 display or on device hardware; they are not evidence of a hardware test.
 
-## MyPi product family
+The accepted [MyPi platform direction](ARCHITECTURE.md) governs future migration:
+LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
+identity, and preserved backend/API contracts. The implementation notes below
+describe the transitional UI, not an LVGL implementation.
 
-- Keep the μ/π identity and project-specific serial divider as shared design concepts.
-  The LCD uses the `H` character as 8N1 (start bit, eight data bits LSB-first, one stop
-  bit); web pages encode `Hotspot` the same way. No Companion artwork is copied here.
-- Use a character wheel on small touch displays. Prefer a full keyboard only when the
-  available display area makes it practical.
-- The Wi-Fi credential wheel has seven UTF-8 character ranges. Horizontal swipes change
-  ranges; vertical swipes move the selection live, with password text masked by default.
-- Keep the normal display, OTA progress, and emergency/rescue screens distinct. OTA
-  and rescue continue to take priority over ordinary navigation and input.
+## Implemented in this Hotspot update
 
-## Hotspot UI direction
+- The 240×320 ST7789 LCD home screen shows uplink state, AP/client state, Ethernet,
+  traffic, and a web-management address separately from the active uplink address.
+- The local menu opens Wi-Fi uplink, AP, clients, traffic, Ethernet, and system/display
+  views. Leaving the AP view does not stop the AP. Stopping it requires a separate
+  confirmation because connected clients will be disconnected.
+- The Wi-Fi flow scans in a worker task, lets the user select a network, then uses a
+  character wheel to save and request a connection. Saved networks can be selected
+  directly. The wheel masks the password, supports printable ASCII and Latin Unicode
+  code points U+00A0–U+024F, and encodes selected characters as UTF-8. It accepts
+  WPA passphrases of 8–63 UTF-8 bytes and has a separate open-network action. No
+  password is drawn, returned by an API, or logged by this flow.
+- Normal-screen touch coordinates use the existing rotation-corrected input. OTA
+  retains touch priority, and the existing boot rescue swipe and rescue screen remain
+  ahead of normal menu handling.
+- Web pages use local, offline CSS/JavaScript shared by the dashboard, P4/C5 OTA, and
+  pins pages. The dashboard has task links, responsive layout, keyboard focus styling,
+  and a `Hotspot` divider generated from ASCII bytes framed as 8N1 UART data.
 
-Current web views are Overview, Wi-Fi, Access point, Ethernet, Traffic, System / display,
-Diagnostics, Update, C5 update, and Pins. The LCD Wi-Fi wheel can create a new STA
-profile; the browser remains the place for advanced profile, radio, Ethernet, and
-diagnostic settings.
+The first scan result page shows up to eight networks; additional results require a
+future paging/scrolling interaction. If all ten STA profile slots are occupied, use
+the web interface to free a slot before saving a new network. The LCD font is ASCII;
+for a selected non-ASCII wheel character it shows its `U+` code point while storing
+the correct UTF-8 bytes.
 
-Future refinements can bring traffic, clients, Ethernet state, and system information
-into a more consistent LCD menu without making navigation stop the AP. Stopping the AP
-must remain an explicit action.
+## Visual identity and asset maintenance
 
-## Dual-C5 research
+The Hotspot implementation keeps the existing ESP-IDF C/`esp_lcd` renderer and uses
+semantic RGB565 names in `main/ui_layout.h`. Shared web colors, spacing, controls, and
+responsive rules live in `main/web_ui.css`; serial framing and SVG path construction
+live in `main/web_ui.js`. ESP-IDF embeds these source assets through
+`main/CMakeLists.txt`, so the checked-in CSS and JavaScript are the source of truth and
+the firmware build reproduces the served assets without a separate generator, CDN, or
+network dependency.
 
-Investigate a P4 with two C5 radios as a separate prototype:
+UART dividers are data, not decorative bit strings: each ASCII byte is framed by one
+low start bit, eight data bits least-significant-bit first, and one high stop bit.
+The LCD encodes `H` as `0000100101` in left-to-right transmission order; the web
+divider encodes each character of the case-sensitive word `Hotspot` the same way.
+Future MyPi projects should use their own identifying first letter/word and preserve
+this framing rule.
 
-- Verify the target board schematic and available P4 SDMMC slots/pins before changing
-  the current single-C5 wiring or firmware.
-- Evaluate independent radios for a Hotspot WAN/STA link and LAN/AP link. Keep reusable
-  radio transport/control concepts separate from product policy rather than assuming
-  that ESP-Hosted already provides a multi-slave API.
-- Do not rely on 80 MHz Wi-Fi channels for C5. The potential benefit is separate radio
-  resources and independent channel choice; measure real throughput before setting a
-  target.
+The approved μ/π logo is checked in as `MyPi.png` and `MyPi-transparent.png` in the
+repository root. `tools/render_header_logo.py` (Pillow) turns the transparent artwork's
+alpha channel into the 16 px LCD mark and the 32 px web data URI in `main/header_logo.h`;
+`tools/render_header_font.py` renders the antialiased LCD `Hotspot` title in
+`main/header_font.h` (DejaVu Sans Bold, see `assets/DejaVu-LICENSE.txt`).
+`tests/test_header_logo.py` checks that the generated header matches the artwork.
 
-## Industrial AGV client and Layer-2 transport
+## Proposed cross-project policy
 
-A possible future project is an Ethernet-connected industrial client that maintains
-connectivity while roaming. Its goal is make-before-break: keep the current radio path
-active until a second STA link is established, then switch the active path. Define
-measurable continuity targets (packet loss, interruption, latency, and session survival)
-before selecting an implementation.
+- Keep a small shared MyPi token and asset specification, then render it with each
+  platform's display and web stack. LVGL is the chosen future local graphical UI
+  direction on supported devices; identical screen geometry or a common application
+  implementation is not required.
+- Use the character-wheel keyboard on small local displays. Prefer a conventional
+  full keyboard when a larger display has enough room and its input method makes one
+  practical. Keep password entry masked, provide deliberate reveal only where useful,
+  and preserve Unicode credentials without silent conversion or truncation.
+- Keep the serial divider meaningful and project-specific. A project's initial uses
+  the framed 8N1 character; longer web dividers frame each character in the project
+  name. Generate patterns from bytes and keep bit-order/framing tests with the code.
+- Keep persistent connectivity visible during navigation, distinguish management
+  addresses from uplink addresses, and separate temporary action feedback from
+  connection state. Navigation must not implicitly stop a service.
+- Add readable text and focus/touch states alongside color, and keep web assets local
+  so setup and recovery remain usable without Internet access.
 
-Multiple Ethernet-attached devices may require a Layer-2 tunnel to a fixed peer rather
-than ordinary routing/NAT. Investigate addressing and identity continuity, tunnel
-security, MTU, packet ordering/duplication, failure recovery, and the infrastructure
-endpoint as a dedicated architecture effort. This is not a Hotspot feature commitment.
+## Validation ideas before a Hotspot release
 
-## Companion recovery idea
+1. Build with the supported ESP-IDF v6.1 environment and verify the generated
+   `/ui.css` and `/ui.js` resources on the device.
+2. Exercise the LCD at normal and 180-degree rotation: home, every menu row, scan
+   selection, password-wheel boundaries, UTF-8 entry/backspace, profile-slot-full
+   feedback, AP start/stop confirmation, and Back while AP clients remain connected.
+3. Measure touch target comfort and text legibility on the actual 240×320 LCD. Confirm
+   the management address is distinct and easy to find with and without an uplink.
+4. Test Wi-Fi scan/connect latency, C5 unavailable behavior, existing profile password
+   preservation, web polling during edits, mobile/desktop layouts, and both P4 and C5
+   OTA pages.
+5. Retest the existing OTA touch priority, all five Ethernet rescue choices, rescue
+   entry window, rescue coordinate rotation, and C5-failure automatic rescue.
 
-A Companion emergency/recovery mode may be useful, but should be Wi-Fi-oriented for
-that product and designed separately from Hotspot's Ethernet rescue behavior.
+Host-runnable primitive checks (no ESP-IDF installation required):
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -I main tests/test_ui_primitives.c -o /tmp/mypi-ui-primitives
+/tmp/mypi-ui-primitives
+node --check main/web_ui.js
+node tests/test_web_ui.js
+```
+
+## Deferred vision: Companion Wi-Fi emergency recovery
+
+This is design work only; it is not implemented in Hotspot or Companion. Companion's
+future recovery path should be Wi-Fi-oriented rather than reusing Hotspot's Ethernet
+rescue. Design it to:
+
+- require a deliberate, recognizable recovery entry gesture or boot-time choice;
+- expose a clearly named recovery access point and an easy-to-find local management
+  address, with an explicit explanation that normal connectivity is being repaired;
+- let the owner inspect and repair saved Wi-Fi profiles without displaying stored
+  credentials by default, writing them to logs, or requiring a destructive reset;
+- make disruptive actions explicit and recoverable; and
+- provide a safe, visible exit/reversion path that returns to normal Wi-Fi operation
+  and confirms the result.
+
+The SSID, address, entry gesture, timeout, profile-editing workflow, credential
+protection, and failure/reversion behavior all need review and usability testing
+before that separate Companion task is implemented.

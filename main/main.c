@@ -109,7 +109,6 @@ void app_main(void)
 
     bool was_pressed = false;
     bool dragging = false;
-    bool wheel_touch = false;
     int start_x = 0, start_y = 0;   // Where the finger went down
     int last_x = 0, last_y = 0;     // Last position seen while pressed
     while (true) {
@@ -126,7 +125,6 @@ void app_main(void)
             if (was_pressed && n >= 3) {
                 was_pressed = false;   // Treat as finger lifted; don't draw a stale tap
                 dragging = false;
-                wheel_touch = false;
             }
             continue;
         }
@@ -134,7 +132,6 @@ void app_main(void)
             // OTA view owns the panel: ignore touches (no drawing, no tap/drag events).
             was_pressed = pt.pressed;
             dragging = false;
-            wheel_touch = false;
             continue;
         }
 
@@ -143,7 +140,6 @@ void app_main(void)
             start_x = last_x = pt.x;
             start_y = last_y = pt.y;
             dragging = false;
-            wheel_touch = !rescue_active() && display_ui_touch_begin(pt.x, pt.y);
             ESP_LOGD(TAG, "DOWN  x=%3d y=%3d", pt.x, pt.y);
             diag_touch_event("down %d,%d", pt.x, pt.y);
         } else if (pt.pressed && was_pressed) {
@@ -160,40 +156,33 @@ void app_main(void)
                 last_x = pt.x;
                 last_y = pt.y;
             }
-            if (wheel_touch) display_ui_touch_move(pt.x, pt.y);
         } else if (!pt.pressed && was_pressed) {
             // Finger up
-            bool captured_by_wheel = wheel_touch;
-            wheel_touch = false;
-            if (captured_by_wheel && !rescue_active()) {
-                display_ui_touch(start_x, start_y, last_x, last_y, dragging);
-            }
             if (dragging) {
                 ESP_LOGD(TAG, "UP    drag end x=%3d y=%3d", last_x, last_y);
                 diag_touch_event("drag %d,%d -> %d,%d", start_x, start_y, last_x, last_y);
                 // Swipe down within the boot window -> emergency mode. Uses the (rotation
                 // corrected) coordinates, not the controller gesture, which ignores rotation.
                 int dy = last_y - start_y, dx = abs(last_x - start_x);
-                if (!rescue_active() && dy >= SWIPE_MIN_PX &&
-                    dx < dy && rescue_swipe_seconds_left() > 0) {
+                if (!rescue_active() && dy >= SWIPE_MIN_PX && dx < dy && rescue_swipe_seconds_left() > 0) {
                     ESP_LOGW(TAG, "Swipe down within %d s of boot - entering emergency mode", RESCUE_SWIPE_WINDOW_S);
                     rescue_request(RESCUE_REASON_SWIPE);
-                } else if (!rescue_active() && !captured_by_wheel) {
-                    display_ui_touch(start_x, start_y, last_x, last_y, true);
                 }
             } else if (rescue_active()) {
                 int opt = display_ui_rescue_hit(start_x, start_y);
                 diag_touch_event("rescue tap %d,%d -> option %d", start_x, start_y, opt);
                 if (opt >= 0) rescue_select(opt);
-            } else if (captured_by_wheel) {
-                // The wheel consumed this tap.
-            } else if (display_ui_touch(start_x, start_y, last_x, last_y, false)) {
-                // The status screen or character wheel consumed the tap.
             } else {
-                uint16_t color = random_color();
-                if (!status_ui) display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
-                ESP_LOGD(TAG, "TAP   x=%3d y=%3d color=0x%04X", start_x, start_y, color);
-                diag_touch_event("tap %d,%d color 0x%04X", start_x, start_y, color);
+                if (status_ui) {
+                    display_ui_handle_tap(start_x, start_y);
+                    ESP_LOGD(TAG, "TAP UI x=%3d y=%3d", start_x, start_y);
+                    diag_touch_event("ui tap %d,%d", start_x, start_y);
+                } else {
+                    uint16_t color = random_color();
+                    display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
+                    ESP_LOGD(TAG, "TAP   x=%3d y=%3d color=0x%04X", start_x, start_y, color);
+                    diag_touch_event("tap %d,%d color 0x%04X", start_x, start_y, color);
+                }
             }
             if (pt.gesture != TOUCH_GESTURE_NONE) {
                 ESP_LOGD(TAG, "      controller gesture: %s (0x%02X)", touch_gesture_name(pt.gesture), pt.gesture);

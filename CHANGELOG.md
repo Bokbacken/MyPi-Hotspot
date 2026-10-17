@@ -2,28 +2,38 @@
 
 All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 `PROJECT_VER` in `CMakeLists.txt`. "HW-tested" means the change has run on the real
-board; "untested" means it builds cleanly but has not been verified on hardware.
+board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
-## Unreleased — LCD and web UI refinement (not hardware-tested)
-- Add an LCD Wi-Fi character wheel with range tabs, tap/drag navigation, UTF-8-safe
-  input, masked-by-default password display, and saving through the STA profile store.
-- Split the embedded dashboard into routed Overview, Wi-Fi, Access point, Ethernet,
-  Traffic, System / display, and Diagnostics views; preserve the existing API and OTA routes.
-- Add a responsive shared navigation/branding header and a GitHub Actions ESP-IDF
-  build artifact containing the OTA application image.
-- Refine the shared header to a single Hotspot/status row and full `Hotspot` 8N1
-  waveform: 18 + 6 pixels on LCD, 52 + 6 CSS pixels on web. Home content and routes
-  are unchanged.
-- Keep LCD/web headers dark with white lettering; use antialiased DejaVu Sans
-  Bold for the LCD title only, leaving home fields and wheel lettering unchanged.
-  LCD Wi-Fi color now reflects STA RSSI: dark red below -80 dBm, red to -70,
-  orange to -60, yellow to -40, then green. Disconnected/unknown RSSI is gray;
-  web retains its dBm status text.
-- Embed the approved root `MyPi-transparent.png` artwork as a white mark on
-  LCD/web headers. Crop only transparent margins; preserve proportions at 16px
-  LCD and 32px CSS height. Reproduce offline assets with
-  `python tools/render_header_logo.py` (Pillow 13.0.0); no runtime image hosting.
+## 0.8.1 — Integrate PR #5/#6 into the 0.8.0 UI (builds, not hardware-tested)
+- Resolves the overlapping UI branches (PR #5 LCD wheel/routed web views, PR #6
+  header/logo) against 0.8.0. LVGL will replace the local rendering
+  (`docs/ARCHITECTURE.md`), so only one transitional implementation is kept.
+- Kept from 0.8.0: LCD home/menu/scan/password/AP/clients/traffic/Ethernet/system
+  views, tap navigation, AP-stop confirmation, `ui_input.h` character wheel,
+  single-page web dashboard with `/ui.css` + `/ui.js`, and the host tests.
+- Added from PR #6: the approved μ/π logo (`MyPi-transparent.png`) as a white mark in
+  the LCD home header (16 px) and in all web headers (32 px), the antialiased DejaVu
+  Sans Bold `Hotspot` LCD title, the LCD Wi-Fi icon colored by STA RSSI (dark red
+  < -80 dBm, red < -70, orange < -60, yellow < -40, green), the generators
+  `tools/render_header_logo.py` / `tools/render_header_font.py`, the font license,
+  and `tests/test_header_logo.py`.
+- Dropped as duplicates: `char_wheel.c/.h` and its drag-capture touch API (PR #5),
+  the routed `/wifi`, `/access-point`, ... web views (PR #5), and PR #6's inline
+  BRAND_STYLE/BRAND_HEADER/BRAND_SCRIPT web header. The branches stay in git history.
+- Backend, APIs, OTA/rescue touch priority, rotation and wiring diagnostics unchanged.
+
+## 0.8.0 — MyPi interface update (builds, not hardware-tested)
+- Branded LCD home and menu views, asynchronous local Wi-Fi scan/connect, UTF-8
+  character wheel, client/traffic/Ethernet/system views, and explicit AP-stop
+  confirmation.
+- Shared offline web theme and generated 8N1 serial waveform (`Hotspot`) for the
+  dashboard, both OTA pages, and pins diagnostics.
+- Host tests cover serial framing/waveform geometry, touch geometry, wheel and
+  credential primitives. ESP-IDF v6.1 build: OK, 0 warnings. Device validation outstanding.
+- Build fix: AP profile button label truncated to 24 chars (`-Werror=format-truncation`).
+- The private Companion logo asset was inaccessible; the exact merged μ/π mark has
+  not been added and must not be considered implemented.
 
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the

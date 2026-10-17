@@ -3,151 +3,94 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "diag.h"
 #include "display.h"
 #include "display_font.h"
-#include "header_font.h"
-#define HEADER_LOGO_LCD
-#include "header_logo.h"
-#include "char_wheel.h"
 #include "esp_log.h"
 #include "eth.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "header_font.h"
+#define HEADER_LOGO_LCD
+#include "header_logo.h"
 #include "net.h"
 #include "profiles.h"
 #include "rescue.h"
+#include "ui_input.h"
+#include "ui_layout.h"
+#include "ui_serial.h"
 #include "wifi.h"
 
 static const char *TAG = "display_ui";
 
 #define UI_PERIOD_MS    2000
-#define UI_TICK_MS      100     // Wheel interaction and OTA view refresh (10 Hz)
-#define UI_AREA_BOTTOM  LCD_V_RES
+#define UI_TICK_MS      200     // OTA view refresh (5 Hz); the status screen redraws every UI_PERIOD_MS
 #define CHAR_W          6
 #define CHAR_H          8
+#define UART_BIT_W      10
 #define HEADER_H        18
-#define DIVIDER_H       6
+#define UART_LOW_Y      11
+#define UART_X          ((LCD_H_RES - MYPI_UART_BITS_PER_BYTE * UART_BIT_W) / 2)
+#define SCAN_MAX        8
+#define CLIENT_MAX      8
+#define MENU_BUTTON_Y0  280
+#define MENU_BUTTON_Y1  315
 
-static TaskHandle_t s_task;
-static volatile bool s_stop;
-static volatile bool s_wheel_active;
-static bool s_wheel_busy;
-static bool s_password_visible;
-static bool s_input_password;
-static char_wheel_t s_wheel;
-static char_wheel_layout_t s_wheel_layout;
-static char s_input_ssid[33];
-static char s_input_pass[64];
-static char s_wheel_message[32];
-static char s_status_notice[32];
+typedef enum {
+    UI_HOME,
+    UI_MENU,
+    UI_WIFI_SCAN,
+    UI_PASSWORD,
+    UI_AP,
+    UI_AP_STOP_CONFIRM,
+    UI_CLIENTS,
+    UI_TRAFFIC,
+    UI_ETHERNET,
+    UI_SYSTEM,
+} ui_view_t;
 
-static void draw_centered(int y, const char *s, uint16_t fg, int scale);
-
-static const char *const s_wheel_ranges[] = {
-    "abcdefghijklmnopqrstuvwxyz",
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    "0123456789",
-    " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
-    "\\€£¥§±×÷°©®™",
-    "åäöæøÅÄÖÆØß",
-    "éèêëáàâãíìîïóòôõúùûüçñÉÈÊËÁÀÂÃÍÌÎÏÓÒÔÕÚÙÛÜÇÑ",
-};
-static const char *const s_wheel_tabs[] = {"a-z", "A-Z", "0-9", "Sp1", "Sp2", "Int1", "Int2"};
+typedef enum {
+    UI_JOB_NONE,
+    UI_JOB_SCAN,
+    UI_JOB_CONNECT,
+    UI_JOB_AP_START,
+    UI_JOB_AP_STOP,
+    UI_JOB_CLIENTS,
+} ui_job_type_t;
 
 typedef struct {
+    ui_view_t view;
+    bool busy;
+    char message[64];
+    wifi_scan_entry_t networks[SCAN_MAX];
+    int network_count;
+    char password_ssid[33];
+    char password[64];
+    int wheel_index;
+    int wheel_set;
+    wifi_client_t clients[CLIENT_MAX];
+    int client_count;
+} ui_state_t;
+
+typedef struct {
+    ui_job_type_t type;
     int slot;
-    sta_profile_t profile;
-} wheel_save_t;
+    char ssid[33];
+    char password[64];
+} ui_job_t;
 
-static size_t utf8_char_size(const unsigned char *p)
-{
-    if (p[0] < 0x80) return 1;
-    if ((p[0] & 0xE0) == 0xC0 && p[1] && (p[1] & 0xC0) == 0x80) return 2;
-    if ((p[0] & 0xF0) == 0xE0 && p[1] && p[2] && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) return 3;
-    if ((p[0] & 0xF8) == 0xF0 && p[1] && p[2] && p[3] &&
-        (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) return 4;
-    return 1;
-}
+static TaskHandle_t s_task;
+static TaskHandle_t s_worker_task;
+static volatile bool s_stop;
+static portMUX_TYPE s_ui_mux = portMUX_INITIALIZER_UNLOCKED;
+static ui_state_t s_ui;
+static ui_job_t s_job;
+static bool s_job_pending;
+static bool s_redraw_requested = true;
 
-static int utf8_count(const char *s)
-{
-    int count = 0;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p += utf8_char_size(p)) count++;
-    return count;
-}
-
-static int wheel_count(int range)
-{
-    if (range < 0 || range >= (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]))) return 0;
-    return utf8_count(s_wheel_ranges[range]);
-}
-
-static void wheel_counts(int counts[CHAR_WHEEL_MAX_RANGES])
-{
-    for (int i = 0; i < (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])); i++) {
-        counts[i] = wheel_count(i);
-    }
-}
-
-static size_t wheel_char(int range, int index, char out[5])
-{
-    const unsigned char *p = (const unsigned char *)s_wheel_ranges[range];
-    while (index-- > 0) p += utf8_char_size(p);
-    size_t n = utf8_char_size(p);
-    memcpy(out, p, n);
-    out[n] = 0;
-    return n;
-}
-
-static uint32_t utf8_codepoint(const unsigned char *p)
-{
-    if (p[0] < 0x80) return p[0];
-    if ((p[0] & 0xE0) == 0xC0) return ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
-    if ((p[0] & 0xF0) == 0xE0) return ((uint32_t)(p[0] & 0x0F) << 12) |
-                                       ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
-    return ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
-           ((uint32_t)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
-}
-
-static void make_preview(const char *src, char *dst, size_t size, bool mask)
-{
-    size_t used = 0;
-    for (const unsigned char *p = (const unsigned char *)src; *p && used + 1 < size;) {
-        size_t n = utf8_char_size(p);
-        if (mask) {
-            dst[used++] = '*';
-        } else {
-            if (used + n >= size) break;
-            memcpy(dst + used, p, n);
-            used += n;
-        }
-        p += n;
-    }
-    dst[used] = 0;
-}
-
-static void draw_serial_divider(void)
-{
-    static const char text[] = "Hotspot";
-    const int cells = (sizeof(text) - 1) * 10;
-    int previous_y = HEADER_H;  // Serial idle is high.
-    for (int cell = 0; cell < cells; cell++) {
-        int bit = cell % 10;
-        bool high = bit == 9 || (bit > 0 && ((text[cell / 10] >> (bit - 1)) & 1));
-        int x0 = cell * LCD_H_RES / cells;
-        int x1 = (cell + 1) * LCD_H_RES / cells;
-        int y = HEADER_H + (high ? 0 : DIVIDER_H - 1);
-        display_fill_rect(x0, y, x1, y + 1, COL_ORANGE);
-        if (y != previous_y) {
-            display_fill_rect(x0, HEADER_H, x0 + 1, HEADER_H + DIVIDER_H, COL_ORANGE);
-        }
-        previous_y = y;
-    }
-}
+static void draw_centered(int y, const char *s, uint16_t fg, int scale);
 
 // ---------------------------------------------------------------------------
 // Drawing primitives
@@ -179,131 +122,13 @@ void display_draw_char(int x, int y, char ch, uint16_t fg, uint16_t bg, int scal
     }
 }
 
-static void display_draw_utf8_char(int x, int y, const unsigned char *s,
-                                   uint16_t fg, uint16_t bg, int scale)
-{
-    size_t n = utf8_char_size(s);
-    uint32_t cp = n == 1 ? s[0] : utf8_codepoint(s);
-    char base = '?';
-    enum {
-        MARK_NONE, MARK_DIAERESIS, MARK_RING, MARK_ACUTE, MARK_GRAVE,
-        MARK_CIRCUMFLEX, MARK_TILDE, MARK_CEDILLA
-    } mark = MARK_NONE;
-    switch (cp) {
-    case 0x00E6: base = 'a'; break;
-    case 0x00C6: base = 'A'; break;
-    case 0x00F8: base = 'o'; break;
-    case 0x00D8: base = 'O'; break;
-    case 0x20AC: base = 'E'; break;
-    case 0x00A3: base = 'L'; break;
-    case 0x00A5: base = 'Y'; break;
-    case 0x00A7: base = 'S'; break;
-    case 0x00B1: base = '+'; break;
-    case 0x00D7: base = 'x'; break;
-    case 0x00F7: base = '/'; break;
-    case 0x00B0: base = 'o'; break;
-    case 0x00A9: base = 'C'; break;
-    case 0x00AE: base = 'R'; break;
-    case 0x2122: base = 'T'; break;
-    case 0x00E5: base = 'a'; mark = MARK_RING; break;
-    case 0x00C5: base = 'A'; mark = MARK_RING; break;
-    case 0x00E4: base = 'a'; mark = MARK_DIAERESIS; break;
-    case 0x00C4: base = 'A'; mark = MARK_DIAERESIS; break;
-    case 0x00F6: base = 'o'; mark = MARK_DIAERESIS; break;
-    case 0x00D6: base = 'O'; mark = MARK_DIAERESIS; break;
-    case 0x00E9: base = 'e'; mark = MARK_ACUTE; break;
-    case 0x00C9: base = 'E'; mark = MARK_ACUTE; break;
-    case 0x00E8: base = 'e'; mark = MARK_GRAVE; break;
-    case 0x00C8: base = 'E'; mark = MARK_GRAVE; break;
-    case 0x00EA: base = 'e'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00CA: base = 'E'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00EB: base = 'e'; mark = MARK_DIAERESIS; break;
-    case 0x00CB: base = 'E'; mark = MARK_DIAERESIS; break;
-    case 0x00E1: base = 'a'; mark = MARK_ACUTE; break;
-    case 0x00C1: base = 'A'; mark = MARK_ACUTE; break;
-    case 0x00E0: base = 'a'; mark = MARK_GRAVE; break;
-    case 0x00C0: base = 'A'; mark = MARK_GRAVE; break;
-    case 0x00E2: base = 'a'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00C2: base = 'A'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00E3: base = 'a'; mark = MARK_TILDE; break;
-    case 0x00C3: base = 'A'; mark = MARK_TILDE; break;
-    case 0x00ED: base = 'i'; mark = MARK_ACUTE; break;
-    case 0x00CD: base = 'I'; mark = MARK_ACUTE; break;
-    case 0x00EC: base = 'i'; mark = MARK_GRAVE; break;
-    case 0x00CC: base = 'I'; mark = MARK_GRAVE; break;
-    case 0x00EE: base = 'i'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00CE: base = 'I'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00EF: base = 'i'; mark = MARK_DIAERESIS; break;
-    case 0x00CF: base = 'I'; mark = MARK_DIAERESIS; break;
-    case 0x00F3: base = 'o'; mark = MARK_ACUTE; break;
-    case 0x00D3: base = 'O'; mark = MARK_ACUTE; break;
-    case 0x00F2: base = 'o'; mark = MARK_GRAVE; break;
-    case 0x00D2: base = 'O'; mark = MARK_GRAVE; break;
-    case 0x00F4: base = 'o'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00D4: base = 'O'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00F5: base = 'o'; mark = MARK_TILDE; break;
-    case 0x00D5: base = 'O'; mark = MARK_TILDE; break;
-    case 0x00FA: base = 'u'; mark = MARK_ACUTE; break;
-    case 0x00DA: base = 'U'; mark = MARK_ACUTE; break;
-    case 0x00F9: base = 'u'; mark = MARK_GRAVE; break;
-    case 0x00D9: base = 'U'; mark = MARK_GRAVE; break;
-    case 0x00FB: base = 'u'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00DB: base = 'U'; mark = MARK_CIRCUMFLEX; break;
-    case 0x00E7: base = 'c'; mark = MARK_CEDILLA; break;
-    case 0x00C7: base = 'C'; mark = MARK_CEDILLA; break;
-    case 0x00FC: base = 'u'; mark = MARK_DIAERESIS; break;
-    case 0x00DC: base = 'U'; mark = MARK_DIAERESIS; break;
-    case 0x00F1: base = 'n'; mark = MARK_TILDE; break;
-    case 0x00D1: base = 'N'; mark = MARK_TILDE; break;
-    case 0x00DF: base = 's'; break;
-    default:
-        if (n == 1) base = (char)cp;
-        break;
-    }
-    if (scale < 1) scale = 1;
-    if (n == 1 || cp == 0x00DF) {
-        display_draw_char(x, y, base, fg, bg, scale);
-        return;
-    }
-
-    display_fill_rect(x, y, x + CHAR_W * scale, y + CHAR_H * scale, bg);
-    display_draw_char(x, y + scale, base, fg, bg, scale);
-    if (mark == MARK_DIAERESIS) {
-        display_fill_rect(x + scale, y, x + 2 * scale, y + scale, fg);
-        display_fill_rect(x + 3 * scale, y, x + 4 * scale, y + scale, fg);
-    } else if (mark == MARK_RING) {
-        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
-        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
-        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
-    } else if (mark == MARK_ACUTE) {
-        display_fill_rect(x + 3 * scale, y, x + 4 * scale, y + scale, fg);
-        display_fill_rect(x + 2 * scale, y + scale, x + 3 * scale, y + 2 * scale, fg);
-    } else if (mark == MARK_GRAVE) {
-        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
-        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
-    } else if (mark == MARK_CIRCUMFLEX) {
-        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
-        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
-        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
-    } else if (mark == MARK_TILDE) {
-        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
-        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
-        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
-    } else if (mark == MARK_CEDILLA) {
-        display_fill_rect(x + 2 * scale, y + 6 * scale, x + 3 * scale, y + 7 * scale, fg);
-        display_fill_rect(x + 3 * scale, y + 7 * scale, x + 4 * scale, y + 8 * scale, fg);
-    }
-}
-
 int display_draw_str(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale)
 {
     if (scale < 1) scale = 1;
-    for (const unsigned char *p = (const unsigned char *)s; p && *p;) {
+    for (; s && *s; s++) {
         if (x >= LCD_H_RES) break;
-        size_t n = utf8_char_size(p);
-        display_draw_utf8_char(x, y, p, fg, bg, scale);
+        display_draw_char(x, y, *s, fg, bg, scale);
         x += CHAR_W * scale;
-        p += n;
     }
     return x;
 }
@@ -332,451 +157,608 @@ void display_draw_wifi_icon(int cx, int cy, uint16_t color)
     display_draw_circle(cx, cy, 1, color);
 }
 
-// ---------------------------------------------------------------------------
-// Status screen
-// ---------------------------------------------------------------------------
-
-/** "<label> v XXX.XX ^ XXX.XX Mbit/s" with the label white and values in val_color. */
-static void draw_rate_row(int y, const char *label, float rx_mbps, float tx_mbps, uint16_t val_color)
+static void ui_set_message(const char *message, bool busy)
 {
-    char v[16];
-    char arrow[2] = {0, 0};
-    int x = display_draw_str(0, y, label, COL_WHITE, COL_BLACK, 1);
-    arrow[0] = DISPLAY_CH_DOWN;
-    x = display_draw_str(x + CHAR_W, y, arrow, COL_WHITE, COL_BLACK, 1);
-    snprintf(v, sizeof(v), "%6.2f", (double)rx_mbps);
-    x = display_draw_str(x, y, v, val_color, COL_BLACK, 1);
-    arrow[0] = DISPLAY_CH_UP;
-    x = display_draw_str(x + CHAR_W, y, arrow, COL_WHITE, COL_BLACK, 1);
-    snprintf(v, sizeof(v), "%6.2f", (double)tx_mbps);
-    x = display_draw_str(x, y, v, val_color, COL_BLACK, 1);
-    display_draw_str(x + CHAR_W, y, "Mbit/s", COL_WHITE, COL_BLACK, 1);
+    portENTER_CRITICAL(&s_ui_mux);
+    s_ui.busy = busy;
+    snprintf(s_ui.message, sizeof(s_ui.message), "%s", message ? message : "");
+    s_redraw_requested = true;
+    portEXIT_CRITICAL(&s_ui_mux);
 }
 
-static uint16_t wifi_signal_color(const diag_status_t *status)
+static bool ui_queue_job(ui_job_type_t type, int slot, const char *ssid, const char *password)
 {
-    if ((status->wifi_state != WIFI_STATE_CONNECTED && status->wifi_state != WIFI_STATE_GOT_IP) ||
-        status->rssi >= 0) return COL_GRAY;
-    if (status->rssi < -80) return RGB565(128, 0, 0);
-    if (status->rssi < -70) return COL_RED;
-    if (status->rssi < -60) return COL_ORANGE;
-    if (status->rssi < -40) return COL_YELLOW;
-    return COL_GREEN;
+    bool queued = false;
+    portENTER_CRITICAL(&s_ui_mux);
+    if (!s_job_pending && !s_ui.busy) {
+        memset(&s_job, 0, sizeof(s_job));
+        s_job.type = type;
+        s_job.slot = slot;
+        if (ssid) strlcpy(s_job.ssid, ssid, sizeof(s_job.ssid));
+        if (password) strlcpy(s_job.password, password, sizeof(s_job.password));
+        s_job_pending = true;
+        s_ui.busy = true;
+        s_ui.message[0] = '\0';
+        s_redraw_requested = true;
+        queued = true;
+    } else {
+        snprintf(s_ui.message, sizeof(s_ui.message), "Another action is still running");
+        s_redraw_requested = true;
+    }
+    portEXIT_CRITICAL(&s_ui_mux);
+    return queued;
 }
 
-static void draw_brand(const diag_status_t *status)
+static void ui_worker(void *arg)
 {
-    display_fill_rect(0, 0, LCD_H_RES, HEADER_H, COL_BLACK);
-    for (int y = 0; y < HEADER_LOGO_H; y++) {
-        for (int x = 0; x < HEADER_LOGO_W; x++) {
-            uint8_t value = s_header_logo[y * HEADER_LOGO_W + x];
-            display_draw_pixel(4 + x, (HEADER_H - HEADER_LOGO_H) / 2 + y,
-                               RGB565(value, value, value));
+    (void)arg;
+    while (!s_stop) {
+        ui_job_t job = {0};
+        portENTER_CRITICAL(&s_ui_mux);
+        if (s_job_pending) {
+            job = s_job;
+            memset(&s_job, 0, sizeof(s_job));
+            s_job_pending = false;
+        }
+        portEXIT_CRITICAL(&s_ui_mux);
+        if (job.type == UI_JOB_NONE) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        char message[64] = "Done";
+        esp_err_t err = ESP_OK;
+        switch (job.type) {
+        case UI_JOB_SCAN: {
+            wifi_scan_entry_t entries[SCAN_MAX] = {0};
+            int count = wifi_scan(entries, SCAN_MAX);
+            portENTER_CRITICAL(&s_ui_mux);
+            s_ui.network_count = count < 0 ? 0 : count;
+            if (s_ui.network_count > SCAN_MAX) s_ui.network_count = SCAN_MAX;
+            if (s_ui.network_count) {
+                memcpy(s_ui.networks, entries, s_ui.network_count * sizeof(entries[0]));
+            }
+            portEXIT_CRITICAL(&s_ui_mux);
+            if (count < 0) strlcpy(message, "Scan failed", sizeof(message));
+            else if (count == 0) strlcpy(message, "No networks found", sizeof(message));
+            else snprintf(message, sizeof(message), "%d networks found", count);
+            break;
+        }
+        case UI_JOB_CONNECT:
+            if (job.slot < 0) {
+                sta_profile_t profile = {0};
+                int slot;
+                for (slot = 0; slot < STA_PROFILE_MAX; slot++) {
+                    if (!sta_profile_get(slot, &profile) || !profile.valid) break;
+                }
+                if (slot == STA_PROFILE_MAX) {
+                    err = ESP_ERR_NO_MEM;
+                } else {
+                    memset(&profile, 0, sizeof(profile));
+                    profile.valid = true;
+                    profile.dhcp = true;
+                    strlcpy(profile.ssid, job.ssid, sizeof(profile.ssid));
+                    strlcpy(profile.pass, job.password, sizeof(profile.pass));
+                    err = sta_profile_save(slot, &profile);
+                    if (err == ESP_OK) err = wifi_connect_profile(slot);
+                }
+            } else {
+                err = wifi_connect_profile(job.slot);
+            }
+            snprintf(message, sizeof(message), err == ESP_OK ? "Saved; connection requested" : "Save/connect failed");
+            memset(job.password, 0, sizeof(job.password));
+            portENTER_CRITICAL(&s_ui_mux);
+            memset(s_ui.password, 0, sizeof(s_ui.password));
+            portEXIT_CRITICAL(&s_ui_mux);
+            break;
+        case UI_JOB_AP_START:
+            err = wifi_ap_start(job.slot);
+            snprintf(message, sizeof(message), err == ESP_OK ? "AP start requested" : "AP start failed");
+            break;
+        case UI_JOB_AP_STOP:
+            err = wifi_ap_stop();
+            snprintf(message, sizeof(message), err == ESP_OK ? "AP stop requested" : "AP stop failed");
+            break;
+        case UI_JOB_CLIENTS: {
+            wifi_client_t clients[CLIENT_MAX] = {0};
+            int count = wifi_ap_clients(clients, CLIENT_MAX);
+            portENTER_CRITICAL(&s_ui_mux);
+            s_ui.client_count = count < 0 ? 0 : count;
+            if (s_ui.client_count > CLIENT_MAX) s_ui.client_count = CLIENT_MAX;
+            if (s_ui.client_count) memcpy(s_ui.clients, clients, s_ui.client_count * sizeof(clients[0]));
+            portEXIT_CRITICAL(&s_ui_mux);
+            if (count < 0) strlcpy(message, "Client list unavailable", sizeof(message));
+            else snprintf(message, sizeof(message), "%d connected clients", count);
+            break;
+        }
+        default:
+            break;
+        }
+        if (err != ESP_OK && job.type != UI_JOB_SCAN && job.type != UI_JOB_CLIENTS) {
+            strlcpy(message, esp_err_to_name(err), sizeof(message));
+        }
+        ui_set_message(message, false);
+        memset(&job, 0, sizeof(job));
+    }
+    s_worker_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void ui_snapshot(ui_state_t *out)
+{
+    portENTER_CRITICAL(&s_ui_mux);
+    *out = s_ui;
+    portEXIT_CRITICAL(&s_ui_mux);
+}
+
+static void draw_uart_divider(int x, int y, int bit_width, uint16_t color)
+{
+    uint8_t bits[MYPI_UART_BITS_PER_BYTE];
+    mypi_uart_frame('H', bits);
+    for (size_t i = 0; i < MYPI_UART_BITS_PER_BYTE; i++) {
+        int x0 = mypi_uart_x(x, i, bit_width);
+        int x1 = mypi_uart_x(x, i + 1, bit_width);
+        int level_y = y + (bits[i] ? 0 : 8);
+        display_draw_line(x0, level_y, x1, level_y, 1, color);
+        if (i && bits[i] != bits[i - 1]) {
+            int previous_y = y + (bits[i - 1] ? 0 : 8);
+            display_draw_line(x0, previous_y, x0, level_y, 1, color);
         }
     }
-    for (int y = 0; y < HEADER_TITLE_H; y++) {
-        for (int x = 0; x < HEADER_TITLE_W; x++) {
-            uint8_t value = s_header_title[y * HEADER_TITLE_W + x];
-            display_draw_pixel(4 + HEADER_LOGO_W + 6 + x, (HEADER_H - HEADER_TITLE_H) / 2 + y,
-                               RGB565(value, value, value));
-        }
-    }
-    display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4,
-                           wifi_signal_color(status));
-    draw_serial_divider();
 }
 
-static void draw_status(void)
+static void draw_button(int x0, int y0, int x1, int y1, const char *label, uint16_t color)
 {
-    static diag_status_t d;     // Large (touch history); keep it off the task stack
+    display_fill_rect(x0, y0, x1 + 1, y1 + 1, MYPI_UI_BG);
+    display_draw_rect_outline(x0, y0, x1, y1, color);
+    int width = (int)strlen(label) * CHAR_W;
+    display_draw_str(x0 + (x1 - x0 + 1 - width) / 2,
+                     y0 + (y1 - y0 + 1 - CHAR_H) / 2, label, color, MYPI_UI_BG, 1);
+}
+
+static void draw_page_title(const char *title)
+{
+    display_draw_str(8, 8, title, MYPI_UI_TEXT, MYPI_UI_BG, 2);
+    display_draw_rect_outline(8, 28, LCD_H_RES - 9, 28, MYPI_UI_ORANGE);
+}
+
+static uint32_t wheel_codepoint(int range, int index)
+{
+    return mypi_wheel_range_codepoint(range, index);
+}
+
+// Approved MyPi logo and anti-aliased "Hotspot" title (generated by tools/render_header_*.py),
+// a Wi-Fi icon colored by uplink RSSI, and the LCD 8N1 divider for 'H' below.
+static uint16_t wifi_signal_color(const diag_status_t *d, bool ap_running)
+{
+    bool sta_up = d->wifi_state == WIFI_STATE_CONNECTED || d->wifi_state == WIFI_STATE_GOT_IP;
+    if (!sta_up || d->rssi >= 0) return ap_running ? MYPI_UI_GREEN : MYPI_UI_MUTED;
+    if (d->rssi < -80) return RGB565(128, 0, 0);
+    if (d->rssi < -70) return MYPI_UI_RED;
+    if (d->rssi < -60) return MYPI_UI_ORANGE;
+    if (d->rssi < -40) return MYPI_UI_YELLOW;
+    return MYPI_UI_GREEN;
+}
+
+static void draw_alpha_bitmap(int x0, int y0, const uint8_t *alpha, int w, int h)
+{
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint8_t v = alpha[y * w + x];
+            if (v) display_draw_pixel(x0 + x, y0 + y, RGB565(v, v, v));
+        }
+    }
+}
+
+static void draw_brand_header(const diag_status_t *d, bool ap_running)
+{
+    draw_alpha_bitmap(4, (HEADER_H - HEADER_LOGO_H) / 2, s_header_logo, HEADER_LOGO_W, HEADER_LOGO_H);
+    draw_alpha_bitmap(4 + HEADER_LOGO_W + 6, (HEADER_H - HEADER_TITLE_H) / 2,
+                      s_header_title, HEADER_TITLE_W, HEADER_TITLE_H);
+    display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4, wifi_signal_color(d, ap_running));
+    draw_uart_divider(UART_X, HEADER_H + 2, UART_BIT_W, MYPI_UI_ORANGE);
+}
+
+static void draw_home(const ui_state_t *ui)
+{
+    diag_status_t d;
     wifi_ap_info_t ap;
     wifi_sta_extra_t ex;
     eth_info_t eth;
+    net_if_stats_t stats;
     diag_get(&d);
     wifi_get_ap_info(&ap);
     wifi_get_sta_extra(&ex);
     eth_get_info(&eth);
-    char buf[48];
 
     display_lock();
-    display_fill_rect(0, 0, LCD_H_RES, UI_AREA_BOTTOM, COL_BLACK);
+    display_fill_screen(MYPI_UI_BG);
+    draw_brand_header(&d, ap.running);
 
-    draw_brand(&d);
-
-    // Row 1: uplink IP (large).
     bool sta_ip = d.wifi_state == WIFI_STATE_GOT_IP && d.ip[0] && strcmp(d.ip, "0.0.0.0") != 0;
-    if (sta_ip) {
-        display_draw_str(0, 24, d.ip, COL_GREEN, COL_BLACK, 2);
-    } else if (eth.mode == ETH_MODE_WAN && eth.has_ip) {
-        display_draw_str(0, 24, eth.ip, COL_CYAN, COL_BLACK, 2);
-    } else {
-        display_draw_str(0, 24, "No uplink", COL_RED, COL_BLACK, 2);
-    }
-
-    // Row 2: uplink SSID + channel.
+    const char *uplink_ip = sta_ip ? d.ip :
+                            (eth.mode == ETH_MODE_WAN && eth.has_ip ? eth.ip : "No uplink");
+    display_draw_str(0, 34, uplink_ip, sta_ip ? MYPI_UI_GREEN :
+                     (eth.mode == ETH_MODE_WAN && eth.has_ip ? MYPI_UI_CYAN : MYPI_UI_RED), MYPI_UI_BG, 2);
     if (d.ssid[0] && d.wifi_state >= WIFI_STATE_CONNECTING) {
-        if (ap.sta_channel) {
-            snprintf(buf, sizeof(buf), "%.28s ch%d", d.ssid, ap.sta_channel);
-        } else {
-            snprintf(buf, sizeof(buf), "%.32s", d.ssid);
-        }
-        display_draw_str(0, 44, buf, sta_ip ? COL_WHITE : COL_GRAY, COL_BLACK, 1);
+        char line[40];
+        snprintf(line, sizeof(line), "%.28s ch%d", d.ssid, ap.sta_channel);
+        display_draw_str(0, 53, line, MYPI_UI_TEXT, MYPI_UI_BG, 1);
     } else {
-        display_draw_str(0, 44, ex.sta_manual_off ? "STA: disconnected" : "STA: not connected", COL_GRAY,
-                         COL_BLACK, 1);
+        display_draw_str(0, 53, ex.sta_manual_off ? "STA: disconnected" : "STA: not connected",
+                         MYPI_UI_MUTED, MYPI_UI_BG, 1);
     }
 
-    // Rows 3-4: access point.
+    char line[48];
     if (ap.running) {
-        snprintf(buf, sizeof(buf), "AP: %d client%s  ch%d", ap.clients, ap.clients == 1 ? "" : "s", ap.channel);
-        display_draw_str(0, 60, buf, COL_GREEN, COL_BLACK, 1);
-        snprintf(buf, sizeof(buf), "%.32s", ap.ssid);
-        display_draw_str(0, 76, buf, COL_WHITE, COL_BLACK, 1);
+        snprintf(line, sizeof(line), "AP: %d clients ch%d", ap.clients, ap.channel);
+        display_draw_str(0, 69, line, MYPI_UI_GREEN, MYPI_UI_BG, 1);
+        snprintf(line, sizeof(line), "%.34s", ap.ssid);
+        display_draw_str(0, 85, line, MYPI_UI_TEXT, MYPI_UI_BG, 1);
     } else {
-        display_draw_str(0, 60, "AP: 0 clients", COL_GRAY, COL_BLACK, 1);
-        display_draw_str(0, 76, "AP off", COL_GRAY, COL_BLACK, 1);
+        display_draw_str(0, 69, "AP: stopped", MYPI_UI_MUTED, MYPI_UI_BG, 1);
     }
 
-    // Row 5: Ethernet.
-    if (!eth.initialized) {
-        display_draw_str(0, 92, "ETH: --", COL_GRAY, COL_BLACK, 1);
-    } else if (!eth.link_up) {
-        display_draw_str(0, 92, "ETH: down", COL_RED, COL_BLACK, 1);
-    } else if (eth.mode == ETH_MODE_LAN) {
-        display_draw_str(0, 92, "ETH: LAN UP", COL_GREEN, COL_BLACK, 1);
-    } else {
-        display_draw_str(0, 92, eth.has_ip ? "ETH: WAN UP" : "ETH: WAN (no IP)", COL_CYAN, COL_BLACK, 1);
-    }
+    if (!eth.initialized) display_draw_str(0, 101, "ETH: --", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    else if (!eth.link_up) display_draw_str(0, 101, "ETH: down", MYPI_UI_RED, MYPI_UI_BG, 1);
+    else display_draw_str(0, 101, eth.mode == ETH_MODE_LAN ? "ETH: LAN link up" :
+                          (eth.has_ip ? "ETH: WAN uplink" : "ETH: WAN no IP"),
+                          eth.mode == ETH_MODE_LAN ? MYPI_UI_GREEN : MYPI_UI_CYAN, MYPI_UI_BG, 1);
 
-    // Rows 6-7: uplink throughput (STA, or Ethernet when it is the WAN uplink).
-    bool eth_up = strcmp(ex.uplink, "eth") == 0;
-    net_if_stats_t ns;
-    net_stats_get(eth_up ? NET_IF_ETH : NET_IF_STA, &ns);
-    draw_rate_row(108, eth_up ? "ETH " : "STA ", ns.rx_mbps, ns.tx_mbps, COL_CYAN);
-    draw_rate_row(124, "peak", ns.rx_mbps_peak, ns.tx_mbps_peak, COL_YELLOW);
-
-    // Row 8: traffic log (only once it has been used).
+    net_stats_get(strcmp(ex.uplink, "eth") == 0 ? NET_IF_ETH : NET_IF_STA, &stats);
+    char rate[32];
+    snprintf(rate, sizeof(rate), "RX %5.2f TX %5.2f Mb/s", (double)stats.rx_mbps, (double)stats.tx_mbps);
+    display_draw_str(0, 117, rate, MYPI_UI_CYAN, MYPI_UI_BG, 1);
     if (net_log_ever_started()) {
-        if (net_log_is_running()) {
-            snprintf(buf, sizeof(buf), "[LOG] %lu samples", (unsigned long)net_log_sample_count());
-            display_draw_str(0, 140, buf, COL_ORANGE, COL_BLACK, 1);
-        } else {
-            snprintf(buf, sizeof(buf), "[LOG] stopped (%lu)", (unsigned long)net_log_sample_count());
-            display_draw_str(0, 140, buf, COL_GRAY, COL_BLACK, 1);
-        }
+        snprintf(line, sizeof(line), "Traffic log: %lu samples", (unsigned long)net_log_sample_count());
+        display_draw_str(0, 133, line, net_log_is_running() ? MYPI_UI_ORANGE : MYPI_UI_MUTED, MYPI_UI_BG, 1);
     }
-
-    // Row 9: boot-time hint for emergency mode.
     int left = rescue_swipe_seconds_left();
     if (left > 0) {
-        snprintf(buf, sizeof(buf), "Swipe down: emergency mode (%ds)", left);
-        display_draw_str(0, 150, buf, COL_ORANGE, COL_BLACK, 1);
+        snprintf(line, sizeof(line), "Swipe down for rescue (%ds)", left);
+        display_draw_str(0, 149, line, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
     }
 
-    display_draw_rect_outline(8, 208, LCD_H_RES - 9, 260, COL_ORANGE);
-    display_draw_str(54, 226, "Wi-Fi setup", COL_WHITE, COL_BLACK, 2);
-    display_draw_str(20, 272, "Tap here to enter credentials", COL_GRAY, COL_BLACK, 1);
-    if (s_status_notice[0]) display_draw_str(8, 296, s_status_notice, COL_CYAN, COL_BLACK, 1);
+    const char *management_ip = ap.running ? ap.ip :
+                                (eth.mode == ETH_MODE_WAN && eth.has_ip ? eth.ip : "");
+    display_draw_str(0, 177, "WEB MANAGEMENT ADDRESS", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    display_draw_str(0, 190, management_ip[0] ? management_ip : "Use active network address",
+                     MYPI_UI_ORANGE, MYPI_UI_BG, management_ip[0] ? 2 : 1);
 
+    draw_uart_divider(UART_X, 236, UART_BIT_W, MYPI_UI_ORANGE);
+    display_draw_str((LCD_H_RES - 7 * CHAR_W) / 2, 249, "Hotspot", MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "OPEN MENU", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+    (void)ui;
+}
+
+static void draw_menu(void)
+{
+    static const char *items[] = {"Wi-Fi uplink", "Access point", "Connected clients",
+                                  "Traffic", "Ethernet", "System / display"};
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("MyPi menu");
+    for (int i = 0; i < (int)(sizeof(items) / sizeof(items[0])); i++) {
+        int y = MYPI_UI_MENU_Y0 + i * (MYPI_UI_MENU_ROW_H + MYPI_UI_MENU_GAP);
+        display_fill_rect(MYPI_UI_MENU_X0, y, MYPI_UI_MENU_X1 + 1, y + MYPI_UI_MENU_ROW_H, MYPI_UI_BG);
+        display_draw_rect_outline(MYPI_UI_MENU_X0, y, MYPI_UI_MENU_X1, y + MYPI_UI_MENU_ROW_H - 1, MYPI_UI_MUTED);
+        display_draw_str(MYPI_UI_MENU_X0 + 10, y + 13, items[i], MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    }
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "HOME", MYPI_UI_ORANGE);
     display_flush();
     display_unlock();
 }
 
-static void draw_wheel(void)
+static void draw_wifi_scan(const ui_state_t *ui)
 {
-    char preview[64], ch[5];
-    static diag_status_t status;
-    diag_get(&status);
-    const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
-    const char *value = s_input_password ? s_input_pass : s_input_ssid;
-    int visible_chars = (s_wheel_layout.preview.w - 6) / CHAR_W;
-    int skip = utf8_count(value) - visible_chars;
-    while (skip-- > 0) value += utf8_char_size((const unsigned char *)value);
-    make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
-    int count = wheel_count(s_wheel.range);
-    display_fill_screen(COL_BLACK);
-    draw_brand(&status);
-    display_draw_str(0, HEADER_H + DIVIDER_H, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
-
-    for (int i = 0; i < 2; i++) {
-        char_wheel_rect_t r = s_wheel_layout.fields[i];
-        uint16_t fill = (i == (s_input_password ? 1 : 0)) ? COL_ORANGE : COL_BLACK;
-        display_fill_rect(r.x, r.y, r.x + r.w, r.y + r.h, fill);
-        display_draw_rect_outline(r.x, r.y, r.x + r.w - 1, r.y + r.h - 1, COL_WHITE);
-        const char *title = i == 0 ? "SSID" : "Password";
-        display_draw_str(r.x + r.w / 2 - (int)strlen(title) * CHAR_W / 2,
-                         r.y + (r.h - CHAR_H) / 2, title,
-                         fill == COL_ORANGE ? COL_BLACK : COL_WHITE, fill, 1);
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Choose Wi-Fi");
+    if (ui->busy) display_draw_str(8, 38, "Scanning nearby networks...", MYPI_UI_YELLOW, MYPI_UI_BG, 1);
+    for (int i = 0; i < ui->network_count; i++) {
+        int y = 52 + i * 27;
+        char line[38];
+        snprintf(line, sizeof(line), "%d %-.25s %ddBm%s", i + 1, ui->networks[i].ssid,
+                 ui->networks[i].rssi, ui->networks[i].profile >= 0 ? " *" : "");
+        display_draw_rect_outline(8, y, 231, y + 24, MYPI_UI_MUTED);
+        display_draw_str(13, y + 8, line, MYPI_UI_TEXT, MYPI_UI_BG, 1);
     }
-
-    char_wheel_rect_t preview_box = s_wheel_layout.preview;
-    display_fill_rect(preview_box.x, preview_box.y, preview_box.x + preview_box.w,
-                      preview_box.y + preview_box.h, COL_BLACK);
-    display_draw_str(preview_box.x + 3, preview_box.y + (preview_box.h - CHAR_H) / 2,
-                     preview[0] ? preview : "(empty)", COL_WHITE, COL_BLACK, 1);
-    for (int i = 0; i < range_count; i++) {
-        char_wheel_rect_t tab = s_wheel_layout.tabs[i];
-        uint16_t fill = i == s_wheel.range ? COL_ORANGE : COL_GRAY;
-        display_fill_rect(tab.x + 1, tab.y, tab.x + tab.w - 1, tab.y + tab.h, fill);
-        display_draw_rect_outline(tab.x + 1, tab.y, tab.x + tab.w - 2, tab.y + tab.h - 1, fill);
-        int text_x = tab.x + (tab.w - (int)strlen(s_wheel_tabs[i]) * CHAR_W) / 2;
-        display_draw_str(text_x, tab.y + (tab.h - CHAR_H) / 2, s_wheel_tabs[i],
-                         i == s_wheel.range ? COL_BLACK : COL_WHITE, fill, 1);
+    if (ui->network_count == 0 && !ui->busy && ui->message[0]) {
+        display_draw_str(8, 64, ui->message, MYPI_UI_MUTED, MYPI_UI_BG, 1);
     }
-
-    int center_y = s_wheel_layout.wheel_y + s_wheel_layout.wheel_h / 2;
-    int center_x = s_wheel_layout.wheel_x + s_wheel_layout.wheel_w / 2;
-    display_draw_rect_outline(s_wheel_layout.wheel_x, s_wheel_layout.wheel_y,
-                              s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 1,
-                              s_wheel_layout.wheel_y + s_wheel_layout.wheel_h - 1, COL_GRAY);
-    for (int slot = 0; slot < CHAR_WHEEL_VISIBLE_ITEMS; slot++) {
-        int y = center_y + (slot - CHAR_WHEEL_VISIBLE_ITEMS / 2) * s_wheel_layout.item_h
-                - s_wheel_layout.item_h / 2 - (int)s_wheel.visual_shift_px;
-        if (y + s_wheel_layout.item_h <= s_wheel_layout.wheel_y ||
-            y >= s_wheel_layout.wheel_y + s_wheel_layout.wheel_h) continue;
-        int index = (s_wheel.selected + slot - CHAR_WHEEL_VISIBLE_ITEMS / 2 + count) % count;
-        wheel_char(s_wheel.range, index, ch);
-        bool selected = slot == CHAR_WHEEL_VISIBLE_ITEMS / 2;
-        uint16_t fill = selected ? COL_CYAN : COL_BLACK;
-        display_fill_rect(s_wheel_layout.wheel_x + 1, y,
-                          s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 1,
-                          y + s_wheel_layout.item_h, fill);
-        if (selected) {
-            display_draw_rect_outline(s_wheel_layout.wheel_x + 1, y,
-                                      s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 2,
-                                      y + s_wheel_layout.item_h - 1, COL_CYAN);
-        }
-        int scale = selected ? s_wheel_layout.item_h / CHAR_H : 1;
-        if (scale < 1) scale = 1;
-        if (scale > 3) scale = 3;
-        if (ch[0] == ' ') {
-            display_draw_str(center_x - 5 * CHAR_W * scale / 2,
-                             y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
-                             "SPACE", selected ? COL_BLACK : COL_WHITE, fill, scale);
-        } else {
-            display_draw_utf8_char(center_x - CHAR_W * scale / 2,
-                                   y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
-                                   (const unsigned char *)ch, selected ? COL_BLACK : COL_WHITE, fill, scale);
-        }
-    }
-    display_draw_str(8, LCD_V_RES * 60 / 100, "Swipe up/down: scroll", COL_GRAY, COL_BLACK, 1);
-    display_draw_str(8, LCD_V_RES * 63 / 100, "Swipe left/right: range", COL_GRAY, COL_BLACK, 1);
-    if (s_input_password) {
-        char_wheel_rect_t r = s_wheel_layout.visibility;
-        display_draw_rect_outline(r.x, r.y, r.x + r.w - 1, r.y + r.h - 1, COL_GRAY);
-        const char *visibility = s_password_visible ? "Hide password" : "Show password";
-        display_draw_str(r.x + (r.w - (int)strlen(visibility) * CHAR_W) / 2,
-                         r.y + (r.h - CHAR_H) / 2, visibility,
-                         s_password_visible ? COL_YELLOW : COL_WHITE, COL_BLACK, 1);
-    } else {
-        display_draw_str(8, s_wheel_layout.visibility.y + 4, "UTF-8 input", COL_GRAY, COL_BLACK, 1);
-    }
-    const char *buttons[] = {"BACK", "DEL", "NEXT", "OK"};
-    for (int i = 0; i < 4; i++) {
-        char_wheel_rect_t r = s_wheel_layout.actions[i];
-        uint16_t fill = i == 3 ? COL_GREEN : COL_GRAY;
-        display_fill_rect(r.x + 2, r.y, r.x + r.w - 2, r.y + r.h, fill);
-        display_draw_rect_outline(r.x + 2, r.y, r.x + r.w - 3, r.y + r.h - 1, fill);
-        display_draw_str(r.x + (r.w - (int)strlen(buttons[i]) * CHAR_W) / 2,
-                         r.y + (r.h - CHAR_H) / 2, buttons[i], COL_BLACK, fill, 1);
-    }
-    char_wheel_rect_t message = s_wheel_layout.message;
-    if (s_wheel_busy) display_draw_str(message.x, message.y, "Saving profile and connecting...", COL_CYAN, COL_BLACK, 1);
-    else if (s_wheel_message[0]) display_draw_str(message.x, message.y, s_wheel_message, COL_YELLOW, COL_BLACK, 1);
+    if (ui->message[0] && !ui->busy) display_draw_str(8, 272, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
     display_flush();
     display_unlock();
 }
 
-static void wheel_save_task(void *arg)
+static void draw_password(const ui_state_t *ui)
 {
-    wheel_save_t *save = arg;
-    esp_err_t save_err = sta_profile_save(save->slot, &save->profile);
-    esp_err_t connect_err = save_err == ESP_OK ? wifi_connect_profile(save->slot) : save_err;
-
+    uint32_t cp = wheel_codepoint(ui->wheel_set, ui->wheel_index);
+    char label[24];
+    if (cp == 0x20) strlcpy(label, "Character U+0020 (space)", sizeof(label));
+    else if (cp < 0x7F) snprintf(label, sizeof(label), "Character: %c", (char)cp);
+    else snprintf(label, sizeof(label), "Character U+%04lX", (unsigned long)cp);
     display_lock();
-    s_wheel_busy = false;
-    if (save_err == ESP_OK) {
-        memset(s_input_ssid, 0, sizeof(s_input_ssid));
-        memset(s_input_pass, 0, sizeof(s_input_pass));
-        s_wheel_active = false;
-        strlcpy(s_status_notice, connect_err == ESP_OK ? "Profile saved; connecting" :
-                "Profile saved; connection failed", sizeof(s_status_notice));
-    } else {
-        strlcpy(s_wheel_message, "Could not save profile", sizeof(s_wheel_message));
-    }
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Wi-Fi password");
+    display_draw_str(8, 42, ui->password_ssid, MYPI_UI_CYAN, MYPI_UI_BG, 1);
+    display_draw_str(8, 62, "Password (hidden):", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    int stars = (int)strlen(ui->password);
+    char mask[32];
+    int count = stars > 24 ? 24 : stars;
+    memset(mask, '*', count);
+    mask[count] = '\0';
+    display_draw_str(8, 76, mask, MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    display_draw_str(8, 104, label, MYPI_UI_TEXT, MYPI_UI_BG, 2);
+    if (ui->message[0]) display_draw_str(8, 133, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, 150, 47, 184, "PREV", MYPI_UI_MUTED);
+    draw_button(51, 150, 90, 184, "NEXT", MYPI_UI_MUTED);
+    draw_button(94, 150, 143, 184, ui->wheel_set ? "LATIN" : "ASCII", MYPI_UI_CYAN);
+    draw_button(147, 150, 190, 184, "ADD", MYPI_UI_GREEN);
+    draw_button(194, 150, 231, 184, "DEL", MYPI_UI_RED);
+    draw_button(8, 207, 231, 238, "SAVE + CONNECT", MYPI_UI_ORANGE);
+    draw_button(8, 245, 231, 276, "OPEN NETWORK", MYPI_UI_CYAN);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "CANCEL", MYPI_UI_MUTED);
+    display_flush();
     display_unlock();
-    memset(save, 0, sizeof(*save));
-    free(save);
-    vTaskDelete(NULL);
 }
 
-static void wheel_submit(void)
+static void draw_ap(const ui_state_t *ui)
 {
-    size_t ssid_len = strlen(s_input_ssid);
-    size_t pass_len = strlen(s_input_pass);
-    if (!ssid_len) {
-        strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
-        return;
+    wifi_ap_info_t ap;
+    ap_profile_t profiles[AP_PROFILE_MAX] = {0};
+    wifi_get_ap_info(&ap);
+    for (int i = 0; i < AP_PROFILE_MAX; i++) ap_profile_get(i, &profiles[i]);
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Access point");
+    if (ap.running) {
+        display_draw_str(8, 42, ap.ssid, MYPI_UI_GREEN, MYPI_UI_BG, 1);
+        char line[40];
+        snprintf(line, sizeof(line), "%s  %d clients  ch%d", ap.ip, ap.clients, ap.channel);
+        display_draw_str(8, 58, line, MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    } else {
+        display_draw_str(8, 42, "AP is stopped", MYPI_UI_MUTED, MYPI_UI_BG, 1);
     }
-    if (pass_len && (pass_len < 8 || pass_len > 63)) {
-        strlcpy(s_wheel_message, "Password: 8-63 bytes or empty", sizeof(s_wheel_message));
-        return;
+    draw_button(8, 78, 231, 112, "START DEFAULT AP", MYPI_UI_GREEN);
+    for (int i = 0; i < AP_PROFILE_MAX; i++) {
+        char label[32];
+        if (profiles[i].valid) snprintf(label, sizeof(label), "Start: %.24s", profiles[i].ssid);
+        else snprintf(label, sizeof(label), "AP profile %d (empty)", i);
+        draw_button(8, 116 + i * 28, 231, 139 + i * 28, label,
+                    profiles[i].valid ? MYPI_UI_TEXT : MYPI_UI_MUTED);
     }
-    if (sta_profile_find(s_input_ssid) >= 0) {
-        strlcpy(s_wheel_message, "SSID exists; edit via web", sizeof(s_wheel_message));
-        return;
+    draw_button(8, 230, 231, 258, "STOP AP...", MYPI_UI_RED);
+    if (ui->message[0]) display_draw_str(8, 264, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+}
+
+static void draw_ap_stop_confirm(const ui_state_t *ui)
+{
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Stop access point?");
+    display_draw_str(8, 62, "This disconnects AP clients.", MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    display_draw_str(8, 80, "Navigating away does not stop it.", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    if (ui->message[0]) display_draw_str(8, 122, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, 170, 231, 220, "STOP AP", MYPI_UI_RED);
+    draw_button(8, 232, 231, 273, "KEEP RUNNING", MYPI_UI_GREEN);
+    display_flush();
+    display_unlock();
+}
+
+static void draw_clients(const ui_state_t *ui)
+{
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Connected clients");
+    if (ui->busy) display_draw_str(8, 40, "Reading AP client list...", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    if (ui->client_count == 0 && !ui->busy) display_draw_str(8, 52, "No clients (or AP is off)", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    for (int i = 0; i < ui->client_count; i++) {
+        char mac[18], line[40];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ui->clients[i].mac[0], ui->clients[i].mac[1], ui->clients[i].mac[2],
+                 ui->clients[i].mac[3], ui->clients[i].mac[4], ui->clients[i].mac[5]);
+        snprintf(line, sizeof(line), "%.17s %.15s", mac, ui->clients[i].ip);
+        display_draw_str(8, 48 + i * 24, line, MYPI_UI_TEXT, MYPI_UI_BG, 1);
     }
-    int slot = -1;
-    for (int i = 0; i < STA_PROFILE_MAX; i++) {
-        sta_profile_t existing;
-        if (sta_profile_get(i, &existing) && !existing.valid) {
-            slot = i;
+    if (ui->message[0] && !ui->busy) display_draw_str(8, 260, ui->message, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+}
+
+static void draw_traffic(void)
+{
+    net_if_stats_t stats[NET_IF_COUNT];
+    char names[NET_IF_COUNT][8];
+    for (int i = 0; i < NET_IF_COUNT; i++) {
+        net_stats_get((net_if_id_t)i, &stats[i]);
+        strlcpy(names[i], net_if_name((net_if_id_t)i), sizeof(names[i]));
+    }
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Traffic");
+    for (int i = 0; i < NET_IF_COUNT; i++) {
+        char line[40];
+        snprintf(line, sizeof(line), "%.3s RX %.2f TX %.2f", names[i],
+                 (double)stats[i].rx_mbps, (double)stats[i].tx_mbps);
+        display_draw_str(8, 58 + i * 28, line, MYPI_UI_CYAN, MYPI_UI_BG, 1);
+    }
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+}
+
+static void draw_ethernet(void)
+{
+    eth_info_t eth;
+    eth_get_info(&eth);
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("Ethernet");
+    display_draw_str(8, 52, eth.initialized ? (eth.link_up ? "Link up" : "Link down") : "Not initialized",
+                     eth.link_up ? MYPI_UI_GREEN : MYPI_UI_RED, MYPI_UI_BG, 1);
+    display_draw_str(8, 72, eth.mode == ETH_MODE_LAN ? "Mode: LAN bridge" : "Mode: WAN uplink",
+                     MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    display_draw_str(8, 92, eth.has_ip ? eth.ip : "No Ethernet IP", MYPI_UI_CYAN, MYPI_UI_BG, 1);
+    display_draw_str(8, 116, "Change mode on the web UI.", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+}
+
+static void draw_system(void)
+{
+    display_lock();
+    display_fill_screen(MYPI_UI_BG);
+    draw_page_title("System / display");
+    display_draw_str(8, 52, display_get_rotated() ? "Display: 180 degrees" : "Display: normal",
+                     MYPI_UI_CYAN, MYPI_UI_BG, 1);
+    display_draw_str(8, 78, "Rotation and advanced settings", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    display_draw_str(8, 94, "are managed from the web UI.", MYPI_UI_MUTED, MYPI_UI_BG, 1);
+    display_draw_str(8, 130, "Emergency Ethernet rescue:", MYPI_UI_TEXT, MYPI_UI_BG, 1);
+    display_draw_str(8, 146, "swipe down during the first 10s.", MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    display_flush();
+    display_unlock();
+}
+
+void display_ui_handle_tap(int x, int y)
+{
+    ui_state_t ui;
+    ui_snapshot(&ui);
+    switch (ui.view) {
+    case UI_HOME:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
+        break;
+    case UI_MENU: {
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) {
+            ui.view = UI_HOME;
             break;
         }
+        int row = mypi_ui_row_hit(y, MYPI_UI_MENU_Y0, MYPI_UI_MENU_ROW_H, MYPI_UI_MENU_GAP, 6);
+        if (row < 0 || x < MYPI_UI_MENU_X0 || x > MYPI_UI_MENU_X1) break;
+        if (row == 0) {
+            ui.view = UI_WIFI_SCAN;
+            ui.network_count = 0;
+            ui_queue_job(UI_JOB_SCAN, -1, NULL, NULL);
+        } else if (row == 1) {
+            ui.view = UI_AP;
+        } else if (row == 2) {
+            ui.view = UI_CLIENTS;
+            ui.client_count = 0;
+            ui_queue_job(UI_JOB_CLIENTS, -1, NULL, NULL);
+        } else if (row == 3) ui.view = UI_TRAFFIC;
+        else if (row == 4) ui.view = UI_ETHERNET;
+        else ui.view = UI_SYSTEM;
+        break;
     }
-    if (slot < 0) {
-        strlcpy(s_wheel_message, "No free Wi-Fi profile slot", sizeof(s_wheel_message));
-        return;
-    }
-
-    wheel_save_t *save = calloc(1, sizeof(*save));
-    if (!save) {
-        strlcpy(s_wheel_message, "Not enough memory", sizeof(s_wheel_message));
-        return;
-    }
-    save->slot = slot;
-    save->profile.valid = true;
-    save->profile.dhcp = true;
-    strlcpy(save->profile.ssid, s_input_ssid, sizeof(save->profile.ssid));
-    strlcpy(save->profile.pass, s_input_pass, sizeof(save->profile.pass));
-    s_wheel_busy = true;
-    s_wheel_message[0] = 0;
-    if (xTaskCreate(wheel_save_task, "wifi_profile_save", 3072, save, 4, NULL) != pdPASS) {
-        s_wheel_busy = false;
-        memset(save, 0, sizeof(*save));
-        free(save);
-        strlcpy(s_wheel_message, "Could not start Wi-Fi task", sizeof(s_wheel_message));
-    }
-}
-
-static void wheel_append(void)
-{
-    char ch[5];
-    size_t n = wheel_char(s_wheel.range, s_wheel.selected, ch);
-    char *value = s_input_password ? s_input_pass : s_input_ssid;
-    size_t cap = s_input_password ? sizeof(s_input_pass) : sizeof(s_input_ssid);
-    size_t used = strlen(value);
-    if (used + n >= cap) {
-        strlcpy(s_wheel_message, s_input_password ? "Password is full" : "SSID is full", sizeof(s_wheel_message));
-        return;
-    }
-    memcpy(value + used, ch, n + 1);
-    char_wheel_select_offset(&s_wheel, 1, wheel_count(s_wheel.range));
-    s_wheel_message[0] = 0;
-}
-
-static void wheel_delete(void)
-{
-    char *value = s_input_password ? s_input_pass : s_input_ssid;
-    size_t n = strlen(value);
-    if (!n) return;
-    n--;
-    while (n && (((unsigned char)value[n] & 0xC0) == 0x80)) n--;
-    value[n] = 0;
-    s_wheel_message[0] = 0;
-}
-
-bool display_ui_touch(int x0, int y0, int x1, int y1, bool dragged)
-{
-    if (!s_task) return false;
-    bool handled = false;
-    display_lock();
-    if (s_wheel_active) {
-        bool swiped = char_wheel_gesture_end(&s_wheel);
-        handled = true;
-        if (!s_wheel_busy && !swiped && !dragged) {
-            char_wheel_zone_t zone = char_wheel_hit_test(&s_wheel_layout, x1, y1);
-            switch (zone.type) {
-            case CHAR_WHEEL_ZONE_FIELD:
-                s_input_password = zone.index == 1;
-                s_wheel_message[0] = 0;
-                break;
-            case CHAR_WHEEL_ZONE_TAB:
-                char_wheel_set_range(&s_wheel, zone.index, wheel_count(zone.index));
-                s_wheel_message[0] = 0;
-                break;
-            case CHAR_WHEEL_ZONE_ITEMS:
-                char_wheel_select_offset(&s_wheel, zone.index - CHAR_WHEEL_VISIBLE_ITEMS / 2,
-                                         wheel_count(s_wheel.range));
-                break;
-            case CHAR_WHEEL_ZONE_VISIBILITY:
-                if (s_input_password) s_password_visible = !s_password_visible;
-                break;
-            case CHAR_WHEEL_ZONE_ACTION:
-                if (zone.index == 0) {
-                    memset(s_input_ssid, 0, sizeof(s_input_ssid));
-                    memset(s_input_pass, 0, sizeof(s_input_pass));
-                    s_wheel_active = false;
-                    strlcpy(s_status_notice, "Wi-Fi setup cancelled", sizeof(s_status_notice));
-                } else if (zone.index == 1) {
-                    wheel_delete();
-                } else if (zone.index == 2) {
-                    wheel_append();
-                } else if (!s_input_password) {
-                    if (s_input_ssid[0]) {
-                        s_input_password = true;
-                        s_password_visible = false;
-                        s_wheel_message[0] = 0;
-                    } else {
-                        strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
-                    }
+    case UI_WIFI_SCAN:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) {
+            ui.view = UI_MENU;
+        } else if (!ui.busy && x >= 8 && x <= 231) {
+            int row = mypi_ui_row_hit(y, 52, 25, 2, ui.network_count);
+            if (row >= 0) {
+                wifi_scan_entry_t selected = ui.networks[row];
+                if (selected.profile >= 0) {
+                    ui_queue_job(UI_JOB_CONNECT, selected.profile, NULL, NULL);
                 } else {
-                    wheel_submit();
+                    portENTER_CRITICAL(&s_ui_mux);
+                    memset(s_ui.password, 0, sizeof(s_ui.password));
+                    strlcpy(s_ui.password_ssid, selected.ssid, sizeof(s_ui.password_ssid));
+                    s_ui.wheel_index = 1;
+                    s_ui.wheel_set = 0;
+                    s_ui.message[0] = '\0';
+                    portEXIT_CRITICAL(&s_ui_mux);
+                    ui.view = UI_PASSWORD;
                 }
-                break;
-            default:
-                break;
             }
         }
-    } else {
-        if (!dragged && y0 >= LCD_V_RES / 2) {
-            memset(s_input_ssid, 0, sizeof(s_input_ssid));
-            memset(s_input_pass, 0, sizeof(s_input_pass));
-            s_input_password = false;
-            s_password_visible = false;
-            char_wheel_init(&s_wheel, (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])));
-            char_wheel_layout_init(&s_wheel_layout, LCD_H_RES, LCD_V_RES, s_wheel.range_count);
-            s_wheel_message[0] = 0;
-            s_status_notice[0] = 0;
-            s_wheel_active = true;
-            handled = true;
+        break;
+    case UI_PASSWORD:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) {
+            memset(ui.password, 0, sizeof(ui.password));
+            ui.view = UI_WIFI_SCAN;
+        } else if (mypi_ui_button_hit(x, y, 8, 150, 47, 184)) {
+            ui.wheel_index = mypi_wheel_step_range(ui.wheel_set, ui.wheel_index, -1);
+        } else if (mypi_ui_button_hit(x, y, 51, 150, 90, 184)) {
+            ui.wheel_index = mypi_wheel_step_range(ui.wheel_set, ui.wheel_index, 1);
+        } else if (mypi_ui_button_hit(x, y, 94, 150, 143, 184)) {
+            ui.wheel_set = 1 - ui.wheel_set;
+            ui.wheel_index = 0;
+        } else if (mypi_ui_button_hit(x, y, 147, 150, 190, 184)) {
+            if (!mypi_utf8_append(ui.password, sizeof(ui.password), wheel_codepoint(ui.wheel_set, ui.wheel_index))) {
+                strlcpy(ui.message, "Password is at the 63-byte limit", sizeof(ui.message));
+            } else {
+                ui.message[0] = '\0';
+            }
+        } else if (mypi_ui_button_hit(x, y, 194, 150, 231, 184)) {
+            mypi_utf8_backspace(ui.password);
+            ui.message[0] = '\0';
+        } else if (mypi_ui_button_hit(x, y, 8, 207, 231, 238) ||
+                   mypi_ui_button_hit(x, y, 8, 245, 231, 276)) {
+            bool open = y >= 245;
+            if (open) ui.password[0] = '\0';
+            if (!open && (!ui.password[0] || !mypi_wifi_pass_length_valid(ui.password))) {
+                strlcpy(ui.message, "Use 8-63 UTF-8 bytes, or Open network", sizeof(ui.message));
+            } else {
+                ui_queue_job(UI_JOB_CONNECT, -1, ui.password_ssid, ui.password);
+                memset(ui.password, 0, sizeof(ui.password));
+                ui.view = UI_WIFI_SCAN;
+            }
         }
+        portENTER_CRITICAL(&s_ui_mux);
+        strlcpy(s_ui.password, ui.password, sizeof(s_ui.password));
+        s_ui.wheel_index = ui.wheel_index;
+        s_ui.wheel_set = ui.wheel_set;
+        strlcpy(s_ui.message, ui.message, sizeof(s_ui.message));
+        portEXIT_CRITICAL(&s_ui_mux);
+        break;
+    case UI_AP:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
+        else if (mypi_ui_button_hit(x, y, 8, 78, 231, 112)) ui_queue_job(UI_JOB_AP_START, -1, NULL, NULL);
+        else if (mypi_ui_row_hit(y, 116, 24, 4, AP_PROFILE_MAX) >= 0 && x >= 8 && x <= 231) {
+            int slot = mypi_ui_row_hit(y, 116, 24, 4, AP_PROFILE_MAX);
+            ap_profile_t profile;
+            if (slot >= 0 && slot < AP_PROFILE_MAX && ap_profile_get(slot, &profile) && profile.valid) {
+                ui_queue_job(UI_JOB_AP_START, slot, NULL, NULL);
+            }
+        } else if (mypi_ui_button_hit(x, y, 8, 230, 231, 258)) ui.view = UI_AP_STOP_CONFIRM;
+        break;
+    case UI_AP_STOP_CONFIRM:
+        if (mypi_ui_button_hit(x, y, 8, 170, 231, 220)) {
+            ui_queue_job(UI_JOB_AP_STOP, -1, NULL, NULL);
+            ui.view = UI_AP;
+        } else if (mypi_ui_button_hit(x, y, 8, 232, 231, 273)) ui.view = UI_AP;
+        break;
+    case UI_CLIENTS:
+    case UI_TRAFFIC:
+    case UI_ETHERNET:
+    case UI_SYSTEM:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
+        break;
     }
-    display_unlock();
-    return handled;
+    portENTER_CRITICAL(&s_ui_mux);
+    s_ui.view = ui.view;
+    s_redraw_requested = true;
+    portEXIT_CRITICAL(&s_ui_mux);
 }
 
-bool display_ui_touch_begin(int x, int y)
-{
-    if (!s_task || !s_wheel_active) return false;
-    display_lock();
-    char_wheel_gesture_begin(&s_wheel, x, y);
-    display_unlock();
-    return true;
-}
+// ---------------------------------------------------------------------------
+// Status screen
+// ---------------------------------------------------------------------------
 
-void display_ui_touch_move(int x, int y)
+static void draw_status(void)
 {
-    if (!s_task) return;
-    int counts[CHAR_WHEEL_MAX_RANGES] = {0};
-    wheel_counts(counts);
-    display_lock();
-    if (s_wheel_active && !s_wheel_busy &&
-        char_wheel_gesture_move(&s_wheel, x, y, &s_wheel_layout, counts)) {
-        s_wheel_message[0] = 0;
-    }
-    display_unlock();
+    ui_state_t ui;
+    ui_snapshot(&ui);
+    draw_home(&ui);
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,13 +995,28 @@ static void ui_task(void *arg)
                 ota_shown = false;
                 ticks = 0;
             }
-            if (s_wheel_active) {
-                draw_wheel();
-                ticks = 0;
-            } else {
-                if (ticks == 0) draw_status();
-                if (++ticks >= UI_PERIOD_MS / UI_TICK_MS) ticks = 0;
+            bool redraw;
+            portENTER_CRITICAL(&s_ui_mux);
+            redraw = s_redraw_requested;
+            s_redraw_requested = false;
+            portEXIT_CRITICAL(&s_ui_mux);
+            if (ticks == 0 || redraw) {
+                ui_state_t ui;
+                ui_snapshot(&ui);
+                switch (ui.view) {
+                case UI_HOME: draw_status(); break;
+                case UI_MENU: draw_menu(); break;
+                case UI_WIFI_SCAN: draw_wifi_scan(&ui); break;
+                case UI_PASSWORD: draw_password(&ui); break;
+                case UI_AP: draw_ap(&ui); break;
+                case UI_AP_STOP_CONFIRM: draw_ap_stop_confirm(&ui); break;
+                case UI_CLIENTS: draw_clients(&ui); break;
+                case UI_TRAFFIC: draw_traffic(); break;
+                case UI_ETHERNET: draw_ethernet(); break;
+                case UI_SYSTEM: draw_system(); break;
+                }
             }
+            if (++ticks >= UI_PERIOD_MS / UI_TICK_MS) ticks = 0;
         }
         vTaskDelayUntil(&last, pdMS_TO_TICKS(UI_TICK_MS));
     }
@@ -1031,11 +1028,21 @@ esp_err_t display_ui_init(void)
 {
     if (s_task) return ESP_OK;
     s_stop = false;
+    memset(&s_ui, 0, sizeof(s_ui));
+    s_ui.view = UI_HOME;
+    s_redraw_requested = true;
     display_lock();
     display_fill_screen(COL_BLACK);
     display_unlock();
+    if (xTaskCreate(ui_worker, "display_ui_worker", 4096, NULL, 2, &s_worker_task) != pdPASS) {
+        s_worker_task = NULL;
+        ESP_LOGE(TAG, "failed to create local UI worker");
+        return ESP_ERR_NO_MEM;
+    }
     if (xTaskCreate(ui_task, "display_ui", 4096, NULL, 2, &s_task) != pdPASS) {
         s_task = NULL;
+        vTaskDelete(s_worker_task);
+        s_worker_task = NULL;
         ESP_LOGE(TAG, "failed to create status screen task");
         return ESP_ERR_NO_MEM;
     }
