@@ -10,6 +10,8 @@
 #include "display.h"
 #include "display_font.h"
 #include "header_font.h"
+#define HEADER_LOGO_LCD
+#include "header_logo.h"
 #include "char_wheel.h"
 #include "esp_log.h"
 #include "eth.h"
@@ -365,10 +367,17 @@ static uint16_t wifi_signal_color(const diag_status_t *status)
 static void draw_brand(const diag_status_t *status)
 {
     display_fill_rect(0, 0, LCD_H_RES, HEADER_H, COL_BLACK);
+    for (int y = 0; y < HEADER_LOGO_H; y++) {
+        for (int x = 0; x < HEADER_LOGO_W; x++) {
+            uint8_t value = s_header_logo[y * HEADER_LOGO_W + x];
+            display_draw_pixel(4 + x, (HEADER_H - HEADER_LOGO_H) / 2 + y,
+                               RGB565(value, value, value));
+        }
+    }
     for (int y = 0; y < HEADER_TITLE_H; y++) {
         for (int x = 0; x < HEADER_TITLE_W; x++) {
             uint8_t value = s_header_title[y * HEADER_TITLE_W + x];
-            display_draw_pixel(4 + x, (HEADER_H - HEADER_TITLE_H) / 2 + y,
+            display_draw_pixel(4 + HEADER_LOGO_W + 6 + x, (HEADER_H - HEADER_TITLE_H) / 2 + y,
                                RGB565(value, value, value));
         }
     }

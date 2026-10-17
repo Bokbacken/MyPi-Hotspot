@@ -14,13 +14,16 @@ All versions up to and including 0.7.0 have been run on the hardware.
   build artifact containing the OTA application image.
 - Refine the shared header to a single Hotspot/status row and full `Hotspot` 8N1
   waveform: 18 + 6 pixels on LCD, 52 + 6 CSS pixels on web. Home content and routes
-  are unchanged. Approved μ/π artwork is still blocked on the original image files;
-  no substitute logo is embedded.
+  are unchanged.
 - Keep LCD/web headers dark with white lettering; use antialiased DejaVu Sans
   Bold for the LCD title only, leaving home fields and wheel lettering unchanged.
   LCD Wi-Fi color now reflects STA RSSI: dark red below -80 dBm, red to -70,
   orange to -60, yellow to -40, then green. Disconnected/unknown RSSI is gray;
   web retains its dBm status text.
+- Embed the approved root `MyPi-transparent.png` artwork as a white mark on
+  LCD/web headers. Crop only transparent margins; preserve proportions at 16px
+  LCD and 32px CSS height. Reproduce offline assets with
+  `python tools/render_header_logo.py` (Pillow 13.0.0); no runtime image hosting.
 
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the

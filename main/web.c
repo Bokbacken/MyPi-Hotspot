@@ -42,16 +42,20 @@ static char s_c5_ota_status[64] = "idle";
 // Pages
 // ---------------------------------------------------------------------------
 
+#include "header_logo.h"
+
 #define BRAND_STYLE \
 ".brand{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;height:52px;padding:0 12px;background:#111;color:#fff}" \
-".brand>strong{font-size:1.25em}.brand-status{margin-left:auto;font-size:.8em;text-align:right;min-width:0}" \
+".brand-name{display:flex;align-items:center;gap:8px;flex-shrink:0;font-size:1.25em}.brand-logo{display:block;height:32px;width:auto}" \
+".brand-status{margin-left:auto;font-size:.8em;text-align:right;min-width:0}" \
 ".serial{display:block;width:100%;height:6px;background:#111;color:#fd8b32}" \
 "nav{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 16px}nav a{display:block;padding:7px 10px;border:1px solid #444;border-radius:5px;text-decoration:none}" \
 "nav a.active{border-color:#fd8b32;color:#fff;background:#332316}" \
 "@media(max-width:520px){body{margin:.6em}.brand{gap:8px}nav{gap:4px}nav a{padding:6px;font-size:.9em}input{max-width:100%}}"
 
 #define BRAND_HEADER \
-"<header><div class='brand'><strong>Hotspot</strong><span class='brand-status' id='header-status' role='status'>Connecting...</span></div>" \
+"<header><div class='brand'><strong class='brand-name'><img class='brand-logo' src='" HEADER_LOGO_URI "' alt='MyPi' width='81' height='64'>Hotspot</strong>" \
+"<span class='brand-status' id='header-status' role='status'>Connecting...</span></div>" \
 "<svg class='serial' id='serial' viewBox='0 0 700 6' preserveAspectRatio='none' role='img' aria-label='Hotspot 8N1 serial divider'></svg></header>" \
 "<nav aria-label='Primary navigation'><a href='/'>Overview</a><a href='/wifi'>Wi-Fi</a>" \
 "<a href='/access-point'>Access point</a><a href='/ethernet'>Ethernet</a><a href='/traffic'>Traffic</a>" \
