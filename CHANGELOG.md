@@ -5,6 +5,14 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; "untested" means it builds cleanly but has not been verified on hardware.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## Unreleased — LCD and web UI refinement (not hardware-tested)
+- Add an LCD Wi-Fi character wheel with range tabs, tap/drag navigation, UTF-8-safe
+  input, masked-by-default password display, and saving through the STA profile store.
+- Split the embedded dashboard into routed Overview, Wi-Fi, Access point, Ethernet,
+  Traffic, System / display, and Diagnostics views; preserve the existing API and OTA routes.
+- Add a responsive shared navigation/branding header and a GitHub Actions ESP-IDF
+  build artifact containing the OTA application image.
+
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the
   ESP32-C5 / ESP-Hosted link is dead.

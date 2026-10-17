@@ -42,40 +42,65 @@ static char s_c5_ota_status[64] = "idle";
 // Pages
 // ---------------------------------------------------------------------------
 
+#define BRAND_STYLE \
+".brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}.brand>strong{font-size:1.25em;color:#fff}" \
+".brand-project{text-align:center;font-size:.9em;color:#ddd}.serial{display:flex;width:min(350px,100%);height:14px;align-items:flex-end;justify-content:center;margin:0 auto}" \
+".serial i{display:block;flex:1 1 0;min-width:1px;height:4px;margin:0 .5px;background:#fd8b32}.serial i.bit-1{height:13px}" \
+"nav{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 16px}nav a{display:block;padding:7px 10px;border:1px solid #444;border-radius:5px;text-decoration:none}" \
+"nav a.active{border-color:#fd8b32;color:#fff;background:#332316}header{border-bottom:1px solid #333;padding-bottom:8px}" \
+"@media(max-width:520px){body{margin:.6em}.brand{gap:8px}nav{gap:4px}nav a{padding:6px;font-size:.9em}input{max-width:100%}}"
+
+#define BRAND_HEADER \
+"<header><div class='brand'><strong>MyPi</strong><div class='brand-project'><div class='serial' id='serial' aria-label='Hotspot 8N1 serial divider'></div><b>Hotspot</b></div></div></header>" \
+"<nav aria-label='Primary navigation'><a href='/'>Overview</a><a href='/wifi'>Wi-Fi</a>" \
+"<a href='/access-point'>Access point</a><a href='/ethernet'>Ethernet</a><a href='/traffic'>Traffic</a>" \
+"<a href='/system'>System / display</a><a href='/diagnostics'>Diagnostics</a><a href='/update'>Update</a>" \
+"<a href='/c5update'>C5 update</a><a href='/pins'>Pins</a></nav>"
+
+#define BRAND_SCRIPT \
+"function drawSerial(){let e=document.getElementById('serial');if(!e)return;let b=[];" \
+"for(let c of 'Hotspot'){b.push(0);for(let i=0;i<8;i++)b.push((c.charCodeAt(0)>>i)&1);b.push(1)}" \
+"e.innerHTML=b.map(v=>'<i class=bit-'+v+'></i>').join('')}" \
+"drawSerial();document.querySelectorAll('nav a').forEach(a=>{if(a.pathname===location.pathname)a.classList.add('active')});"
+
 static const char INDEX_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot</title><style>"
-"body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
-"h1{font-size:1.3em}h2{font-size:1.1em;margin-top:1.4em;border-top:1px solid #333;padding-top:.6em}"
-"a{color:#6cf}table{border-collapse:collapse}"
+"body{font-family:system-ui,sans-serif;margin:1em auto;padding:0 1em;max-width:1150px;background:#111;color:#ddd}"
+"h1{font-size:1.3em}h2{font-size:1.1em;margin-top:1.1em;border-top:1px solid #333;padding-top:.6em}"
+"a{color:#6cf}table{border-collapse:collapse;display:block;max-width:100%;overflow-x:auto}"
 "td,th{padding:2px 10px 2px 0;vertical-align:top;text-align:left}td:first-child{color:#999}th{color:#999;font-weight:normal}"
 "pre{background:#000;color:#9f9;padding:8px;height:45vh;overflow:auto;font-size:12px;white-space:pre-wrap}"
 "input,select,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}input{width:9em}"
-"fieldset{border:1px solid #444;margin:.5em 0}#msg{color:#fc6}"
-".bad{color:#f66}.ok{color:#6f6}</style></head><body>"
-"<h1>MyPi-Hotspot status</h1><p><a href='/update'>Firmware update (OTA)</a> | <a href='/c5update'>C5 co-processor update</a> | "
-"<a href='/pins'>Wiring diagnostics</a> | "
-"<a href='/api/status'>/api/status</a> | <a href='/api/log'>/api/log</a></p>"
-"<p id='msg'></p>"
-"<table id='t'></table>"
-"<h2>Network traffic</h2><table id='ns'></table>"
+"fieldset{border:1px solid #444;margin:.5em 0;padding:.8em}#msg{color:#fc6}.message{min-height:1.2em}"
+".bad{color:#f66}.ok{color:#6f6}[hidden]{display:none!important}"
+BRAND_STYLE
+"</style></head><body>"
+BRAND_HEADER
+"<main><h1 id='page-title'>Overview</h1><p id='msg' class='message'></p>"
+"<section data-page='overview'><h2>System overview</h2><table id='t'></table></section>"
+"<section data-page='traffic'><h2>Network traffic</h2><table id='ns'></table>"
 "<p><button onclick='resetPeaks()'>Reset peaks</button> <button id='lb' onclick='logToggle()'>Start log</button> "
 "<button onclick='dlLog()'>Download CSV</button> <span id='lst'></span></p>"
-"<h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
+"<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
+"<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
+"<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
+"NAT path: put a phone/PC on the AP and run an internet speed test.</small></p></section>"
+"<section data-page='wifi'><h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
 "<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
 "<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
 "<fieldset><legend>Edit STA profile</legend>Slot <select id='ss'></select> SSID <input id='sn'> "
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
-"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
-"<h2>Access point (AP profiles)</h2><p id='aps'></p>"
+"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset></section>"
+"<section data-page='access-point'><h2>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
 "<fieldset><legend>Edit AP profile</legend>Slot <select id='as'></select> SSID <input id='an'> "
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
-"<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
-"<h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
+"<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset></section>"
+"<section data-page='system'><h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
 "<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
 "STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
 "AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
@@ -86,17 +111,15 @@ static const char INDEX_HTML[] =
 "<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
 "<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
-"<small>(applied immediately, saved across reboots)</small></p>"
-"<h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
+"<small>(applied immediately, saved across reboots)</small></p></section>"
+"<section data-page='ethernet'><h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
-"<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
-"<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
-"<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
-"<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
-"NAT path: put a phone/PC on the AP and run an internet speed test.</small></p>"
-"<h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
+"<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p></section>"
+"<section data-page='diagnostics'><h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
 "<h2>Log <label style='font-size:.8em'><input type='checkbox' id='follow' style='width:auto' checked> follow</label></h2>"
-"<pre id='log'></pre><script>"
+"<pre id='log'></pre><p>Raw endpoints: <a href='/api/status'>status JSON</a> · <a href='/api/log'>device log</a> · "
+"<a href='/pins'>wiring and pin diagnostics</a></p></section></main><script>"
+BRAND_SCRIPT
 "function $(i){return document.getElementById(i)}"
 "function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
 "function band(c){return c>14?'5 GHz':'2.4 GHz'}"
@@ -213,18 +236,25 @@ static const char INDEX_HTML[] =
 "function logToggle(){fetch('/api/netstats/log/'+(logRun?'stop':'start'),{method:'POST'}).then(tick)}"
 "function dlLog(){location='/api/netstats/log'}"
 "for(let i=0;i<10;i++)$('ss').innerHTML+='<option>'+i+'</option>';for(let i=0;i<4;i++)$('as').innerHTML+='<option>'+i+'</option>';"
-"ld();tick();setInterval(tick,2000);</script></body></html>";
+"const pages={'/':'overview','/wifi':'wifi','/access-point':'access-point','/ethernet':'ethernet','/traffic':'traffic','/system':'system','/diagnostics':'diagnostics'};"
+"const titles={overview:'Overview',wifi:'Wi-Fi', 'access-point':'Access point',ethernet:'Ethernet',traffic:'Traffic','system':'System / display',diagnostics:'Diagnostics'};"
+"const page=pages[location.pathname]||'overview';document.querySelectorAll('[data-page]').forEach(e=>e.hidden=e.dataset.page!==page);"
+"$('page-title').textContent=titles[page];ld();tick();setInterval(tick,2000);</script></body></html>";
 
 static const char UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot OTA</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
-"a{color:#6cf}progress{width:100%;height:1.5em}</style></head><body>"
-"<h1 style='font-size:1.3em'>Firmware update (OTA)</h1>"
+"a{color:#6cf}progress{width:100%;height:1.5em}input,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}"
+BRAND_STYLE
+"</style></head><body>"
+BRAND_HEADER
+"<main><h1>Firmware update (OTA)</h1>"
 "<p>Upload the <b>app image</b> <code>mypi_hotspot.bin</code> (a.k.a. <code>mypi-hotspot-*-ota.bin</code>), "
 "<b>not</b> the merged full-flash image.</p>"
 "<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash</button>"
-"<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p><p><a href='/'>&larr; Status</a></p>"
+"<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p></main>"
 "<script>"
+BRAND_SCRIPT
 "let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
 "let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
 "done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
@@ -244,8 +274,11 @@ static const char C5UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot C5 update</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
 "a{color:#6cf}progress{width:100%;height:1.5em}td{padding:2px 10px 2px 0}td:first-child{color:#999}"
-".bad{color:#f66}.ok{color:#6f6}.warn{color:#fc6}</style></head><body>"
-"<h1 style='font-size:1.3em'>Co-processor (ESP32-C5) firmware update</h1><p><a href='/'>&larr; Status</a></p>"
+"input,button{background:#222;color:#ddd;border:1px solid #555;margin:2px}.bad{color:#f66}.ok{color:#6f6}.warn{color:#fc6}"
+BRAND_STYLE
+"</style></head><body>"
+BRAND_HEADER
+"<main><h1>Co-processor (ESP32-C5) firmware update</h1>"
 "<table id='t'></table>"
 "<p>Upload the ESP-Hosted <b>slave</b> app image for the C5: <code>network_adapter.bin</code> "
 "(a.k.a. <code>c5-slave-esp-hosted-*.bin</code>). Not the P4 firmware, not a merged image.</p>"
@@ -254,8 +287,10 @@ static const char C5UPDATE_HTML[] =
 "(v0.6.0+). Make sure you can reach this board over <b>Ethernet</b> (or USB) to do the P4 OTA afterwards. "
 "A 3.x host (v0.6.0+) cannot reach a 2.x slave, so the upload then fails cleanly: flash the C5 over USB instead.</p>"
 "<input type='file' id='f' accept='.bin'> <button onclick='up()'>Upload &amp; flash C5</button>"
-"<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p>"
-"<script>const $=i=>document.getElementById(i);"
+"<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p></main>"
+"<script>"
+BRAND_SCRIPT
+"const $=i=>document.getElementById(i);"
 "let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
 "let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
 "done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
@@ -281,8 +316,11 @@ static const char PINS_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>MyPi-Hotspot pins</title><style>body{font-family:system-ui,sans-serif;margin:1em;background:#111;color:#ddd}"
 "a{color:#6cf}pre{background:#000;color:#9f9;padding:8px;font-size:12px;white-space:pre-wrap}"
-"td{padding:3px 8px}button{margin:0 2px}</style></head><body>"
-"<h1 style='font-size:1.3em'>Wiring diagnostics</h1><p><a href='/'>&larr; Status</a></p>"
+"td{padding:3px 8px}button{margin:0 2px;background:#222;color:#ddd;border:1px solid #555}"
+BRAND_STYLE
+"</style></head><body>"
+BRAND_HEADER
+"<main><h1>Pin diagnostics</h1>"
 "<h2 style='font-size:1.1em'>Boot-time wiring check</h2><pre id='r'></pre>"
 "<h2 style='font-size:1.1em'>Manual pin control</h2>"
 "<p>Set a pin HIGH/LOW and measure it with a multimeter at the LCD module (against GND): HIGH should be ~3.3 V, LOW ~0 V. "
@@ -292,7 +330,8 @@ static const char PINS_HTML[] =
 "and broke touch I2C.</p>"
 "<table id='t'></table>"
 "<p><button onclick=\"fetch('/api/reboot',{method:'POST'}).then(()=>document.getElementById('o').textContent='Rebooting...')\">Reboot</button></p>"
-"<p id='o'></p><script>"
+"<p id='o'></p></main><script>"
+BRAND_SCRIPT
 "fetch('/api/pins').then(r=>r.json()).then(j=>{document.getElementById('r').textContent=j.report;"
 "document.getElementById('t').innerHTML=j.names.split(',').map(n=>'<tr><td>'+n+'</td><td>'+"
 "['high','low','in','inpd'].map(m=>\"<button onclick=\\\"setp('\"+n+\"','\"+m+\"')\\\">\"+m+'</button>').join('')+"
@@ -1373,6 +1412,12 @@ esp_err_t web_start(void)
     }
     const httpd_uri_t uris[] = {
         { .uri = "/",           .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/wifi",       .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/access-point", .method = HTTP_GET, .handler = index_get },
+        { .uri = "/ethernet",   .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/traffic",    .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/system",     .method = HTTP_GET,  .handler = index_get },
+        { .uri = "/diagnostics", .method = HTTP_GET, .handler = index_get },
         { .uri = "/api/status", .method = HTTP_GET,  .handler = status_get },
         { .uri = "/api/log",    .method = HTTP_GET,  .handler = log_get },
         { .uri = "/update",     .method = HTTP_GET,  .handler = update_get },
