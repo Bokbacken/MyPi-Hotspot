@@ -167,11 +167,15 @@ void app_main(void)
                 if (!rescue_active() && dy >= SWIPE_MIN_PX && dx < dy && rescue_swipe_seconds_left() > 0) {
                     ESP_LOGW(TAG, "Swipe down within %d s of boot - entering emergency mode", RESCUE_SWIPE_WINDOW_S);
                     rescue_request(RESCUE_REASON_SWIPE);
+                } else if (!rescue_active()) {
+                    display_ui_touch(start_x, start_y, last_x, last_y, true);
                 }
             } else if (rescue_active()) {
                 int opt = display_ui_rescue_hit(start_x, start_y);
                 diag_touch_event("rescue tap %d,%d -> option %d", start_x, start_y, opt);
                 if (opt >= 0) rescue_select(opt);
+            } else if (display_ui_touch(start_x, start_y, last_x, last_y, false)) {
+                // The status screen or character wheel consumed the tap.
             } else {
                 uint16_t color = random_color();
                 if (!status_ui) display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);

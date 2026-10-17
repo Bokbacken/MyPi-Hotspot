@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "diag.h"
@@ -13,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "net.h"
+#include "profiles.h"
 #include "rescue.h"
 #include "wifi.h"
 
@@ -20,14 +22,106 @@ static const char *TAG = "display_ui";
 
 #define UI_PERIOD_MS    2000
 #define UI_TICK_MS      200     // OTA view refresh (5 Hz); the status screen redraws every UI_PERIOD_MS
-#define UI_AREA_BOTTOM  160     // Rows 0..159 are owned (and cleared) by the status screen
+#define UI_AREA_BOTTOM  LCD_V_RES
 #define CHAR_W          6
 #define CHAR_H          8
 
 static TaskHandle_t s_task;
 static volatile bool s_stop;
+static volatile bool s_wheel_active;
+static bool s_wheel_busy;
+static bool s_password_visible;
+static bool s_input_password;
+static int s_wheel_range;
+static int s_wheel_pos;
+static char s_input_ssid[33];
+static char s_input_pass[64];
+static char s_wheel_message[32];
+static char s_status_notice[32];
 
 static void draw_centered(int y, const char *s, uint16_t fg, int scale);
+
+static const char *const s_wheel_ranges[] = {
+    "abcdefghijklmnopqrstuvwxyz",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "0123456789",
+    " .,!?@#$%^&*()-_=+[]{}:;/'\"\\|<>`~",
+    "åäöÅÄÖéÉüÜñÑß",
+};
+static const char *const s_wheel_tabs[] = {"abc", "ABC", "123", "sym", "UTF8"};
+
+typedef struct {
+    int slot;
+    sta_profile_t profile;
+} wheel_save_t;
+
+static size_t utf8_char_size(const unsigned char *p)
+{
+    if (p[0] < 0x80) return 1;
+    if ((p[0] & 0xE0) == 0xC0 && p[1] && (p[1] & 0xC0) == 0x80) return 2;
+    if ((p[0] & 0xF0) == 0xE0 && p[1] && p[2] && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) return 3;
+    if ((p[0] & 0xF8) == 0xF0 && p[1] && p[2] && p[3] &&
+        (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) return 4;
+    return 1;
+}
+
+static int utf8_count(const char *s)
+{
+    int count = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p += utf8_char_size(p)) count++;
+    return count;
+}
+
+static int wheel_count(int range)
+{
+    return utf8_count(s_wheel_ranges[range]);
+}
+
+static size_t wheel_char(int range, int index, char out[5])
+{
+    const unsigned char *p = (const unsigned char *)s_wheel_ranges[range];
+    while (index-- > 0) p += utf8_char_size(p);
+    size_t n = utf8_char_size(p);
+    memcpy(out, p, n);
+    out[n] = 0;
+    return n;
+}
+
+static uint32_t utf8_codepoint(const unsigned char *p)
+{
+    if (p[0] < 0x80) return p[0];
+    if ((p[0] & 0xE0) == 0xC0) return ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    if ((p[0] & 0xF0) == 0xE0) return ((uint32_t)(p[0] & 0x0F) << 12) |
+                                       ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    return ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
+           ((uint32_t)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+}
+
+static void make_preview(const char *src, char *dst, size_t size, bool mask)
+{
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)src; *p && used + 1 < size;) {
+        size_t n = utf8_char_size(p);
+        if (mask) {
+            dst[used++] = '*';
+        } else {
+            if (used + n >= size) break;
+            memcpy(dst + used, p, n);
+            used += n;
+        }
+        p += n;
+    }
+    dst[used] = 0;
+}
+
+static void draw_serial_divider(int x, int y, char value)
+{
+    for (int bit = -1; bit <= 8; bit++) {
+        bool high = bit == -1 || bit == 8 || ((value >> bit) & 1);
+        display_fill_rect(x, y + (high ? 0 : 3), x + 3, y + (high ? 3 : 6), COL_ORANGE);
+        x += 4;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Drawing primitives
@@ -59,13 +153,65 @@ void display_draw_char(int x, int y, char ch, uint16_t fg, uint16_t bg, int scal
     }
 }
 
+static void display_draw_utf8_char(int x, int y, const unsigned char *s,
+                                   uint16_t fg, uint16_t bg, int scale)
+{
+    size_t n = utf8_char_size(s);
+    uint32_t cp = n == 1 ? s[0] : utf8_codepoint(s);
+    char base = '?';
+    enum { MARK_NONE, MARK_DIAERESIS, MARK_RING, MARK_ACUTE, MARK_TILDE } mark = MARK_NONE;
+    switch (cp) {
+    case 0x00E5: base = 'a'; mark = MARK_RING; break;
+    case 0x00C5: base = 'A'; mark = MARK_RING; break;
+    case 0x00E4: base = 'a'; mark = MARK_DIAERESIS; break;
+    case 0x00C4: base = 'A'; mark = MARK_DIAERESIS; break;
+    case 0x00F6: base = 'o'; mark = MARK_DIAERESIS; break;
+    case 0x00D6: base = 'O'; mark = MARK_DIAERESIS; break;
+    case 0x00E9: base = 'e'; mark = MARK_ACUTE; break;
+    case 0x00C9: base = 'E'; mark = MARK_ACUTE; break;
+    case 0x00FC: base = 'u'; mark = MARK_DIAERESIS; break;
+    case 0x00DC: base = 'U'; mark = MARK_DIAERESIS; break;
+    case 0x00F1: base = 'n'; mark = MARK_TILDE; break;
+    case 0x00D1: base = 'N'; mark = MARK_TILDE; break;
+    case 0x00DF: base = 's'; break;
+    default:
+        if (n == 1) base = (char)cp;
+        break;
+    }
+    if (scale < 1) scale = 1;
+    if (n == 1 || cp == 0x00DF) {
+        display_draw_char(x, y, base, fg, bg, scale);
+        return;
+    }
+
+    display_fill_rect(x, y, x + CHAR_W * scale, y + CHAR_H * scale, bg);
+    display_draw_char(x, y + scale, base, fg, bg, scale);
+    if (mark == MARK_DIAERESIS) {
+        display_fill_rect(x + scale, y, x + 2 * scale, y + scale, fg);
+        display_fill_rect(x + 3 * scale, y, x + 4 * scale, y + scale, fg);
+    } else if (mark == MARK_RING) {
+        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
+        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
+        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
+    } else if (mark == MARK_ACUTE) {
+        display_fill_rect(x + 3 * scale, y, x + 4 * scale, y + scale, fg);
+        display_fill_rect(x + 2 * scale, y + scale, x + 3 * scale, y + 2 * scale, fg);
+    } else if (mark == MARK_TILDE) {
+        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
+        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
+        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
+    }
+}
+
 int display_draw_str(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale)
 {
     if (scale < 1) scale = 1;
-    for (; s && *s; s++) {
+    for (const unsigned char *p = (const unsigned char *)s; p && *p;) {
         if (x >= LCD_H_RES) break;
-        display_draw_char(x, y, *s, fg, bg, scale);
+        size_t n = utf8_char_size(p);
+        display_draw_utf8_char(x, y, p, fg, bg, scale);
         x += CHAR_W * scale;
+        p += n;
     }
     return x;
 }
@@ -115,6 +261,13 @@ static void draw_rate_row(int y, const char *label, float rx_mbps, float tx_mbps
     display_draw_str(x + CHAR_W, y, "Mbit/s", COL_WHITE, COL_BLACK, 1);
 }
 
+static void draw_brand(void)
+{
+    display_draw_str(0, 0, "MyPi", COL_WHITE, COL_BLACK, 1);
+    draw_serial_divider(30, 1, 'H');
+    display_draw_str(30, 9, "Hotspot", COL_WHITE, COL_BLACK, 1);
+}
+
 static void draw_status(void)
 {
     static diag_status_t d;     // Large (touch history); keep it off the task stack
@@ -130,8 +283,7 @@ static void draw_status(void)
     display_lock();
     display_fill_rect(0, 0, LCD_H_RES, UI_AREA_BOTTOM, COL_BLACK);
 
-    // Row 0: title + Wi-Fi icon when the AP is running.
-    display_draw_str(0, 0, "MyPi-Hotspot", COL_WHITE, COL_BLACK, 1);
+    draw_brand();
     if (ap.running) display_draw_wifi_icon(LCD_H_RES - 14, 14, COL_GREEN);
 
     // Row 1: uplink IP (large).
@@ -204,8 +356,240 @@ static void draw_status(void)
         display_draw_str(0, 150, buf, COL_ORANGE, COL_BLACK, 1);
     }
 
+    display_draw_rect_outline(8, 208, LCD_H_RES - 9, 260, COL_ORANGE);
+    display_draw_str(54, 226, "Wi-Fi setup", COL_WHITE, COL_BLACK, 2);
+    display_draw_str(20, 272, "Tap here to enter credentials", COL_GRAY, COL_BLACK, 1);
+    if (s_status_notice[0]) display_draw_str(8, 296, s_status_notice, COL_CYAN, COL_BLACK, 1);
+
     display_flush();
     display_unlock();
+}
+
+static void draw_wheel(void)
+{
+    char preview[64], ch[5], label[16];
+    display_lock();
+    const char *value = s_input_password ? s_input_pass : s_input_ssid;
+    make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
+    int count = wheel_count(s_wheel_range);
+    display_fill_screen(COL_BLACK);
+    draw_brand();
+    display_draw_str(0, 22, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
+
+    display_fill_rect(4, 34, 116, 54, s_input_password ? COL_BLACK : COL_ORANGE);
+    display_draw_rect_outline(4, 34, 115, 53, COL_WHITE);
+    display_draw_str(15, 40, "SSID", s_input_password ? COL_WHITE : COL_BLACK, s_input_password ? COL_BLACK : COL_ORANGE, 1);
+    display_fill_rect(124, 34, 236, 54, s_input_password ? COL_ORANGE : COL_BLACK);
+    display_draw_rect_outline(124, 34, 235, 53, COL_WHITE);
+    display_draw_str(135, 40, "Password", s_input_password ? COL_BLACK : COL_WHITE, s_input_password ? COL_ORANGE : COL_BLACK, 1);
+
+    display_fill_rect(4, 57, LCD_H_RES - 4, 71, COL_BLACK);
+    display_draw_str(8, 59, preview[0] ? preview : "(empty)", COL_WHITE, COL_BLACK, 1);
+    for (int i = 0; i < (int)(sizeof(s_wheel_tabs) / sizeof(s_wheel_tabs[0])); i++) {
+        int x0 = i * 48;
+        uint16_t fill = i == s_wheel_range ? COL_ORANGE : COL_GRAY;
+        display_fill_rect(x0 + 1, 76, x0 + 47, 98, fill);
+        display_draw_str(x0 + 4, 83, s_wheel_tabs[i], i == s_wheel_range ? COL_BLACK : COL_WHITE, fill, 1);
+    }
+
+    for (int slot = 0; slot < 5; slot++) {
+        int x0 = slot * 48 + 1;
+        int index = (s_wheel_pos + slot - 2 + count) % count;
+        wheel_char(s_wheel_range, index, ch);
+        uint16_t fill = slot == 2 ? COL_CYAN : COL_BLACK;
+        display_fill_rect(x0, 108, x0 + 46, 183, fill);
+        display_draw_rect_outline(x0, 108, x0 + 45, 182, slot == 2 ? COL_CYAN : COL_GRAY);
+        display_draw_utf8_char(x0 + (slot == 2 ? 17 : 20), 124, (const unsigned char *)ch,
+                               slot == 2 ? COL_BLACK : COL_WHITE, fill, slot == 2 ? 2 : 1);
+        if (slot == 2) {
+            uint32_t cp = utf8_codepoint((const unsigned char *)ch);
+            snprintf(label, sizeof(label), "U+%04lX", (unsigned long)cp);
+            display_draw_str(x0 + 4, 164, label, COL_BLACK, fill, 1);
+        }
+    }
+    display_draw_str(12, 188, "Drag or tap a character, then NEXT", COL_GRAY, COL_BLACK, 1);
+    if (s_input_password) {
+        display_draw_rect_outline(35, 204, 204, 226, COL_GRAY);
+        display_draw_str(68, 211, s_password_visible ? "Hide password" : "Show password",
+                         s_password_visible ? COL_YELLOW : COL_WHITE, COL_BLACK, 1);
+    } else {
+        display_draw_str(12, 210, "UTF-8 characters are supported", COL_GRAY, COL_BLACK, 1);
+    }
+    const char *buttons[] = {"BACK", "DEL", "NEXT", "OK"};
+    for (int i = 0; i < 4; i++) {
+        int x0 = i * 60;
+        uint16_t fill = i == 3 ? COL_GREEN : COL_GRAY;
+        display_fill_rect(x0 + 2, 242, x0 + 58, 284, fill);
+        display_draw_rect_outline(x0 + 2, 242, x0 + 57, 283, fill);
+        display_draw_str(x0 + 8, 259, buttons[i], COL_BLACK, fill, 1);
+    }
+    if (s_wheel_busy) display_draw_str(8, 298, "Saving profile and connecting...", COL_CYAN, COL_BLACK, 1);
+    else if (s_wheel_message[0]) display_draw_str(8, 298, s_wheel_message, COL_YELLOW, COL_BLACK, 1);
+    display_flush();
+    display_unlock();
+}
+
+static void wheel_save_task(void *arg)
+{
+    wheel_save_t *save = arg;
+    esp_err_t save_err = sta_profile_save(save->slot, &save->profile);
+    esp_err_t connect_err = save_err == ESP_OK ? wifi_connect_profile(save->slot) : save_err;
+
+    display_lock();
+    s_wheel_busy = false;
+    if (save_err == ESP_OK) {
+        memset(s_input_ssid, 0, sizeof(s_input_ssid));
+        memset(s_input_pass, 0, sizeof(s_input_pass));
+        s_wheel_active = false;
+        strlcpy(s_status_notice, connect_err == ESP_OK ? "Profile saved; connecting" :
+                "Profile saved; connection failed", sizeof(s_status_notice));
+    } else {
+        strlcpy(s_wheel_message, "Could not save profile", sizeof(s_wheel_message));
+    }
+    display_unlock();
+    memset(save, 0, sizeof(*save));
+    free(save);
+    vTaskDelete(NULL);
+}
+
+static void wheel_submit(void)
+{
+    size_t ssid_len = strlen(s_input_ssid);
+    size_t pass_len = strlen(s_input_pass);
+    if (!ssid_len) {
+        strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
+        return;
+    }
+    if (pass_len && (pass_len < 8 || pass_len > 63)) {
+        strlcpy(s_wheel_message, "Password: 8-63 bytes or empty", sizeof(s_wheel_message));
+        return;
+    }
+    int slot = -1;
+    for (int i = 0; i < STA_PROFILE_MAX; i++) {
+        sta_profile_t existing;
+        if (sta_profile_get(i, &existing) && !existing.valid) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        strlcpy(s_wheel_message, "No free Wi-Fi profile slot", sizeof(s_wheel_message));
+        return;
+    }
+
+    wheel_save_t *save = calloc(1, sizeof(*save));
+    if (!save) {
+        strlcpy(s_wheel_message, "Not enough memory", sizeof(s_wheel_message));
+        return;
+    }
+    save->slot = slot;
+    save->profile.valid = true;
+    save->profile.dhcp = true;
+    strlcpy(save->profile.ssid, s_input_ssid, sizeof(save->profile.ssid));
+    strlcpy(save->profile.pass, s_input_pass, sizeof(save->profile.pass));
+    s_wheel_busy = true;
+    s_wheel_message[0] = 0;
+    if (xTaskCreate(wheel_save_task, "wifi_profile_save", 3072, save, 4, NULL) != pdPASS) {
+        s_wheel_busy = false;
+        memset(save, 0, sizeof(*save));
+        free(save);
+        strlcpy(s_wheel_message, "Could not start Wi-Fi task", sizeof(s_wheel_message));
+    }
+}
+
+static void wheel_append(void)
+{
+    char ch[5];
+    size_t n = wheel_char(s_wheel_range, s_wheel_pos, ch);
+    char *value = s_input_password ? s_input_pass : s_input_ssid;
+    size_t cap = s_input_password ? sizeof(s_input_pass) : sizeof(s_input_ssid);
+    size_t used = strlen(value);
+    if (used + n >= cap) {
+        strlcpy(s_wheel_message, s_input_password ? "Password is full" : "SSID is full", sizeof(s_wheel_message));
+        return;
+    }
+    memcpy(value + used, ch, n + 1);
+    s_wheel_pos = (s_wheel_pos + 1) % wheel_count(s_wheel_range);
+    s_wheel_message[0] = 0;
+}
+
+static void wheel_delete(void)
+{
+    char *value = s_input_password ? s_input_pass : s_input_ssid;
+    size_t n = strlen(value);
+    if (!n) return;
+    n--;
+    while (n && (((unsigned char)value[n] & 0xC0) == 0x80)) n--;
+    value[n] = 0;
+    s_wheel_message[0] = 0;
+}
+
+bool display_ui_touch(int x0, int y0, int x1, int y1, bool dragged)
+{
+    if (!s_task) return false;
+    bool handled = false;
+    display_lock();
+    if (!s_wheel_active) {
+        if (!dragged && y0 >= LCD_V_RES / 2) {
+            memset(s_input_ssid, 0, sizeof(s_input_ssid));
+            memset(s_input_pass, 0, sizeof(s_input_pass));
+            s_input_password = false;
+            s_password_visible = false;
+            s_wheel_range = 0;
+            s_wheel_pos = 0;
+            s_wheel_message[0] = 0;
+            s_status_notice[0] = 0;
+            s_wheel_active = true;
+            handled = true;
+        }
+    } else if (!s_wheel_busy) {
+        handled = true;
+        if (dragged && y0 >= 108 && y0 <= 183) {
+            int steps = (x1 - x0) / 18;
+            int count = wheel_count(s_wheel_range);
+            s_wheel_pos = (s_wheel_pos - steps % count + count) % count;
+        } else if (!dragged && y0 >= 34 && y0 <= 54) {
+            s_input_password = x0 >= LCD_H_RES / 2;
+            s_wheel_message[0] = 0;
+        } else if (!dragged && y0 >= 76 && y0 <= 98) {
+            s_wheel_range = x0 / 48;
+            if (s_wheel_range >= (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]))) {
+                s_wheel_range = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])) - 1;
+            }
+            s_wheel_pos = 0;
+        } else if (!dragged && y0 >= 108 && y0 <= 183) {
+            int slot = x0 / 48;
+            s_wheel_pos = (s_wheel_pos + slot - 2 + wheel_count(s_wheel_range)) %
+                          wheel_count(s_wheel_range);
+        } else if (!dragged && y0 >= 204 && y0 <= 228 && s_input_password) {
+            s_password_visible = !s_password_visible;
+        } else if (!dragged && y0 >= 242 && y0 <= 284) {
+            if (x0 < 60) {
+                memset(s_input_ssid, 0, sizeof(s_input_ssid));
+                memset(s_input_pass, 0, sizeof(s_input_pass));
+                s_wheel_active = false;
+                strlcpy(s_status_notice, "Wi-Fi setup cancelled", sizeof(s_status_notice));
+            } else if (x0 < 120) {
+                wheel_delete();
+            } else if (x0 < 180) {
+                wheel_append();
+            } else if (!s_input_password) {
+                if (s_input_ssid[0]) {
+                    s_input_password = true;
+                    s_password_visible = false;
+                    s_wheel_message[0] = 0;
+                } else {
+                    strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
+                }
+            } else {
+                wheel_submit();
+            }
+        }
+    } else {
+        handled = true;
+    }
+    display_unlock();
+    return handled;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,8 +826,13 @@ static void ui_task(void *arg)
                 ota_shown = false;
                 ticks = 0;
             }
-            if (ticks == 0) draw_status();
-            if (++ticks >= UI_PERIOD_MS / UI_TICK_MS) ticks = 0;
+            if (s_wheel_active) {
+                draw_wheel();
+                ticks = 0;
+            } else {
+                if (ticks == 0) draw_status();
+                if (++ticks >= UI_PERIOD_MS / UI_TICK_MS) ticks = 0;
+            }
         }
         vTaskDelayUntil(&last, pdMS_TO_TICKS(UI_TICK_MS));
     }
