@@ -172,7 +172,8 @@ void app_main(void)
                 // Swipe down within the boot window -> emergency mode. Uses the (rotation
                 // corrected) coordinates, not the controller gesture, which ignores rotation.
                 int dy = last_y - start_y, dx = abs(last_x - start_x);
-                if (!rescue_active() && dy >= SWIPE_MIN_PX && dx < dy && rescue_swipe_seconds_left() > 0) {
+                if (!captured_by_wheel && !rescue_active() && dy >= SWIPE_MIN_PX &&
+                    dx < dy && rescue_swipe_seconds_left() > 0) {
                     ESP_LOGW(TAG, "Swipe down within %d s of boot - entering emergency mode", RESCUE_SWIPE_WINDOW_S);
                     rescue_request(RESCUE_REASON_SWIPE);
                 } else if (!rescue_active() && !captured_by_wheel) {
