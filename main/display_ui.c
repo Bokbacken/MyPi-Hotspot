@@ -46,7 +46,7 @@ static const char *const s_wheel_ranges[] = {
     "abcdefghijklmnopqrstuvwxyz",
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     "0123456789",
-    "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+    " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
     "\\€£¥§±×÷°©®™",
     "åäöæøÅÄÖÆØß",
     "éèêëáàâãíìîïóòôõúùûüçñÉÈÊËÁÀÂÃÍÌÎÏÓÒÔÕÚÙÛÜÇÑ",
@@ -505,9 +505,15 @@ static void draw_wheel(void)
         int scale = selected ? s_wheel_layout.item_h / CHAR_H : 1;
         if (scale < 1) scale = 1;
         if (scale > 3) scale = 3;
-        display_draw_utf8_char(center_x - CHAR_W * scale / 2,
-                               y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
-                               (const unsigned char *)ch, selected ? COL_BLACK : COL_WHITE, fill, scale);
+        if (ch[0] == ' ') {
+            display_draw_str(center_x - 5 * CHAR_W * scale / 2,
+                             y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
+                             "SPACE", selected ? COL_BLACK : COL_WHITE, fill, scale);
+        } else {
+            display_draw_utf8_char(center_x - CHAR_W * scale / 2,
+                                   y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
+                                   (const unsigned char *)ch, selected ? COL_BLACK : COL_WHITE, fill, scale);
+        }
     }
     display_draw_str(8, LCD_V_RES * 60 / 100, "Swipe up/down: scroll", COL_GRAY, COL_BLACK, 1);
     display_draw_str(8, LCD_V_RES * 63 / 100, "Swipe left/right: range", COL_GRAY, COL_BLACK, 1);
