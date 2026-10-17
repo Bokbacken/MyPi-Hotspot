@@ -9,6 +9,7 @@
 #include "diag.h"
 #include "display.h"
 #include "display_font.h"
+#include "header_font.h"
 #include "char_wheel.h"
 #include "esp_log.h"
 #include "eth.h"
@@ -350,12 +351,29 @@ static void draw_rate_row(int y, const char *label, float rx_mbps, float tx_mbps
     display_draw_str(x + CHAR_W, y, "Mbit/s", COL_WHITE, COL_BLACK, 1);
 }
 
-static void draw_brand(bool ap_running)
+static uint16_t wifi_signal_color(const diag_status_t *status)
 {
-    display_fill_rect(0, 0, LCD_H_RES, HEADER_H, COL_WHITE);
-    display_draw_str(4, (HEADER_H - CHAR_H * 2) / 2, "Hotspot", COL_BLACK, COL_WHITE, 2);
+    if ((status->wifi_state != WIFI_STATE_CONNECTED && status->wifi_state != WIFI_STATE_GOT_IP) ||
+        status->rssi >= 0) return COL_GRAY;
+    if (status->rssi < -80) return RGB565(128, 0, 0);
+    if (status->rssi < -70) return COL_RED;
+    if (status->rssi < -60) return COL_ORANGE;
+    if (status->rssi < -40) return COL_YELLOW;
+    return COL_GREEN;
+}
+
+static void draw_brand(const diag_status_t *status)
+{
+    display_fill_rect(0, 0, LCD_H_RES, HEADER_H, COL_BLACK);
+    for (int y = 0; y < HEADER_TITLE_H; y++) {
+        for (int x = 0; x < HEADER_TITLE_W; x++) {
+            uint8_t value = s_header_title[y * HEADER_TITLE_W + x];
+            display_draw_pixel(4 + x, (HEADER_H - HEADER_TITLE_H) / 2 + y,
+                               RGB565(value, value, value));
+        }
+    }
     display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4,
-                           ap_running ? RGB565(0, 112, 64) : COL_GRAY);
+                           wifi_signal_color(status));
     draw_serial_divider();
 }
 
@@ -374,7 +392,7 @@ static void draw_status(void)
     display_lock();
     display_fill_rect(0, 0, LCD_H_RES, UI_AREA_BOTTOM, COL_BLACK);
 
-    draw_brand(ap.running);
+    draw_brand(&d);
 
     // Row 1: uplink IP (large).
     bool sta_ip = d.wifi_state == WIFI_STATE_GOT_IP && d.ip[0] && strcmp(d.ip, "0.0.0.0") != 0;
@@ -458,15 +476,15 @@ static void draw_status(void)
 static void draw_wheel(void)
 {
     char preview[64], ch[5];
-    wifi_ap_info_t ap;
-    wifi_get_ap_info(&ap);
+    static diag_status_t status;
+    diag_get(&status);
     const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
     const char *value = s_input_password ? s_input_pass : s_input_ssid;
     make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
     int count = wheel_count(s_wheel.range);
     display_fill_screen(COL_BLACK);
-    draw_brand(ap.running);
+    draw_brand(&status);
     display_draw_str(0, HEADER_H + DIVIDER_H, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
 
     for (int i = 0; i < 2; i++) {

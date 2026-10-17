@@ -43,7 +43,7 @@ static char s_c5_ota_status[64] = "idle";
 // ---------------------------------------------------------------------------
 
 #define BRAND_STYLE \
-".brand{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;height:52px;padding:0 12px;background:#fff;color:#111}" \
+".brand{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;height:52px;padding:0 12px;background:#111;color:#fff}" \
 ".brand>strong{font-size:1.25em}.brand-status{margin-left:auto;font-size:.8em;text-align:right;min-width:0}" \
 ".serial{display:block;width:100%;height:6px;background:#111;color:#fd8b32}" \
 "nav{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 16px}nav a{display:block;padding:7px 10px;border:1px solid #444;border-radius:5px;text-decoration:none}" \

@@ -16,6 +16,11 @@ All versions up to and including 0.7.0 have been run on the hardware.
   waveform: 18 + 6 pixels on LCD, 52 + 6 CSS pixels on web. Home content and routes
   are unchanged. Approved μ/π artwork is still blocked on the original image files;
   no substitute logo is embedded.
+- Keep LCD/web headers dark with white lettering; use antialiased DejaVu Sans
+  Bold for the LCD title only, leaving home fields and wheel lettering unchanged.
+  LCD Wi-Fi color now reflects STA RSSI: dark red below -80 dBm, red to -70,
+  orange to -60, yellow to -40, then green. Disconnected/unknown RSSI is gray;
+  web retains its dBm status text.
 
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the
