@@ -3,21 +3,18 @@
 Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO** with a
 **Waveshare 2" capacitive touch LCD**.
 
-Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+Version history: [CHANGELOG.md](CHANGELOG.md) · Project status and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) · [Next steps](docs/NEXT_STEPS.md)
 
-Current version: **0.7.0** — an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an **LCD status screen** with an OTA progress view, Wi-Fi uplink + own access point
-(APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
-a web status page and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Display and touch are confirmed working on hardware (v0.3.x). Diagnostics
-are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
+Current firmware version: **0.7.0** — Ethernet emergency mode (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an LCD status screen with OTA progress, Wi-Fi uplink + access point (APSTA with NAT), Ethernet as WAN or LAN, traffic statistics and over-the-air updates. This follow-up adds a small-screen Wi-Fi credential wheel and separate web views; these UI changes are not yet hardware-tested.
 
 | Action | Result |
 |---|---|
-| Boot | Boot banner on serial, then navy blue screen (debug mode: wiring check + color test pattern first) |
-| Tap (finger down + up, < 10 px movement) | Filled circle (radius 8 px) in a **random color** at the touch point |
-| Drag / swipe | **Black** line follows the finger |
-| Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
+| Boot | LCD status view; tap the lower Wi-Fi setup panel to enter credentials |
+| Wi-Fi setup | Choose a character range, tap or drag the wheel, then use **NEXT**, **DEL**, and **OK**; supported Nordic UTF-8 characters are stored as UTF-8 |
+| Password entry | Masked by default; use **Show password** to reveal it deliberately. Passwords are not written to logs or status APIs |
+| Emergency / OTA | Emergency mode and firmware-update screens take priority over normal UI input |
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
-| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the IP from the log): status, log, OTA upload |
+| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the IP from the log): **Overview**, **Wi-Fi**, **Access point**, **Ethernet**, **Traffic**, **System / display**, **Diagnostics**, **Update**, and **Pins** pages |
 
 No LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C, and ESP-Hosted for Wi-Fi.
 A failing display or touch controller is logged but does **not** stop Wi-Fi/web, so you can always
@@ -140,8 +137,8 @@ copied through a small internal DMA buffer in 40-row bands.
 
 ## Flash a prebuilt binary (no ESP-IDF needed)
 
-Every push is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)),
-once that workflow file is present in the repo.
+Every push and pull request is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)).
+The build artifact contains the OTA application image `mypi_hotspot.bin` and the merged full-flash image.
 
 > **Upgrading from the old hello world?** v0.2 moved the partition table from `0x8000` to `0xA000`
 > and added two OTA slots, so the **first** flash must be the full `mypi-hotspot-merged.bin` at
@@ -154,6 +151,9 @@ once that workflow file is present in the repo.
 3. In **Chrome or Edge** open <https://espressif.github.io/esptool-js/>, click **Connect**, pick the
    serial port, add `mypi-hotspot-merged.bin` at address **`0x0`**, and click **Program**.
 4. Press **RESET** on the board. Use the page's **Console** tab (115200 baud) to see the log.
+
+For an existing installation, upload the artifact's **`mypi_hotspot.bin`** through the device's
+**Update** page. Do not upload the merged full-flash image through OTA.
 
 Alternative with Python only: `pip install esptool` then
 `esptool.py --chip esp32p4 -p <PORT> write_flash 0x0 mypi-hotspot-merged.bin`.

@@ -117,7 +117,7 @@ static void make_preview(const char *src, char *dst, size_t size, bool mask)
 static void draw_serial_divider(int x, int y, char value)
 {
     for (int bit = -1; bit <= 8; bit++) {
-        bool high = bit == -1 || bit == 8 || ((value >> bit) & 1);
+        bool high = bit == 8 || (bit >= 0 && ((value >> bit) & 1));
         display_fill_rect(x, y + (high ? 0 : 3), x + 3, y + (high ? 3 : 6), COL_ORANGE);
         x += 4;
     }
