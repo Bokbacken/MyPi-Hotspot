@@ -173,10 +173,14 @@ void app_main(void)
                 diag_touch_event("rescue tap %d,%d -> option %d", start_x, start_y, opt);
                 if (opt >= 0) rescue_select(opt);
             } else {
-                uint16_t color = random_color();
-                if (!status_ui) display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
-                ESP_LOGD(TAG, "TAP   x=%3d y=%3d color=0x%04X", start_x, start_y, color);
-                diag_touch_event("tap %d,%d color 0x%04X", start_x, start_y, color);
+                if (status_ui) {
+                    display_ui_handle_tap(start_x, start_y);
+                } else {
+                    uint16_t color = random_color();
+                    display_draw_circle(start_x, start_y, DOT_RADIUS_PX, color);
+                    ESP_LOGD(TAG, "TAP   x=%3d y=%3d color=0x%04X", start_x, start_y, color);
+                    diag_touch_event("tap %d,%d color 0x%04X", start_x, start_y, color);
+                }
             }
             if (pt.gesture != TOUCH_GESTURE_NONE) {
                 ESP_LOGD(TAG, "      controller gesture: %s (0x%02X)", touch_gesture_name(pt.gesture), pt.gesture);

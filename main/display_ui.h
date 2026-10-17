@@ -35,3 +35,5 @@ esp_err_t display_ui_init(void);
 void display_ui_stop(void);
 /** Emergency mode screen: option index (RESCUE_OPT_*) at touch point (x, y), or -1. */
 int display_ui_rescue_hit(int x, int y);
+/** Route a completed, rotation-corrected tap to the normal LCD interface. */
+void display_ui_handle_tap(int x, int y);
