@@ -143,7 +143,7 @@ void app_main(void)
             start_x = last_x = pt.x;
             start_y = last_y = pt.y;
             dragging = false;
-            wheel_touch = display_ui_touch_begin(pt.x, pt.y);
+            wheel_touch = !rescue_active() && display_ui_touch_begin(pt.x, pt.y);
             ESP_LOGD(TAG, "DOWN  x=%3d y=%3d", pt.x, pt.y);
             diag_touch_event("down %d,%d", pt.x, pt.y);
         } else if (pt.pressed && was_pressed) {
@@ -165,7 +165,9 @@ void app_main(void)
             // Finger up
             bool captured_by_wheel = wheel_touch;
             wheel_touch = false;
-            if (captured_by_wheel) display_ui_touch(start_x, start_y, last_x, last_y, dragging);
+            if (captured_by_wheel && !rescue_active()) {
+                display_ui_touch(start_x, start_y, last_x, last_y, dragging);
+            }
             if (dragging) {
                 ESP_LOGD(TAG, "UP    drag end x=%3d y=%3d", last_x, last_y);
                 diag_touch_event("drag %d,%d -> %d,%d", start_x, start_y, last_x, last_y);
