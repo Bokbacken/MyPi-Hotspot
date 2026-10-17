@@ -75,6 +75,16 @@ menu "MyPi-Hotspot"
     endmenu
 
     menu "Display"
+        config MYPI_UI_LVGL
+            bool "Experimental MyPi LVGL home status viewport"
+            depends on LV_TXT_ENC_UTF8 && LV_USE_LABEL
+            default n
+            help
+                Begin the shared MyPi platform UI migration with a read-only
+                LVGL status viewport. Branding, menus, touch, OTA and rescue
+                remain on the existing rendering and input paths.
+                Leave disabled for the hardware-validated baseline.
+
         config MYPI_LCD_SPI_CLOCK_MHZ
             int "LCD SPI clock (MHz)"
             range 1 80

@@ -2,6 +2,8 @@
 dependencies:
   idf:
     version: ">=6.1"
+  lvgl/lvgl:
+    version: "9.4.0"
   espressif/esp_wifi_remote:
     version: ">=0.10,<2.0"
     rules:

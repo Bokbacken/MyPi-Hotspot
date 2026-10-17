@@ -22,6 +22,9 @@
 #include "ui_layout.h"
 #include "ui_serial.h"
 #include "wifi.h"
+#ifdef CONFIG_MYPI_UI_LVGL
+#include "ui_lvgl_port.h"
+#endif
 
 static const char *TAG = "display_ui";
 
@@ -359,6 +362,47 @@ static void draw_brand_header(const diag_status_t *d, bool ap_running)
     draw_uart_divider(UART_X, HEADER_H + 2, UART_BIT_W, MYPI_UI_ORANGE);
 }
 
+#ifdef CONFIG_MYPI_UI_LVGL
+static bool draw_lvgl_home_status(const diag_status_t *d, const wifi_ap_info_t *ap,
+                                 const wifi_sta_extra_t *ex, const eth_info_t *eth)
+{
+    bool sta_ip = d->wifi_state == WIFI_STATE_GOT_IP && d->ip[0] && strcmp(d->ip, "0.0.0.0") != 0;
+    bool eth_ip = eth->mode == ETH_MODE_WAN && eth->has_ip;
+    const char *ip = sta_ip ? d->ip : (eth_ip ? eth->ip : "No uplink");
+    const char *management_ip = ap->running ? ap->ip : (eth_ip ? eth->ip : "");
+    net_if_stats_t stats;
+    net_stats_get(strcmp(ex->uplink, "eth") == 0 ? NET_IF_ETH : NET_IF_STA, &stats);
+    char station[64], ap_status[48], rate[48], log[48] = "", swipe[48] = "";
+    snprintf(station, sizeof(station), "%s ch%d", d->ssid, ap->sta_channel);
+    snprintf(ap_status, sizeof(ap_status), "AP: %d clients ch%d", ap->clients, ap->channel);
+    snprintf(rate, sizeof(rate), "RX %.2f TX %.2f Mb/s", (double)stats.rx_mbps, (double)stats.tx_mbps);
+    if (net_log_ever_started()) {
+        snprintf(log, sizeof(log), "Traffic log: %lu samples", (unsigned long)net_log_sample_count());
+    }
+    int left = rescue_swipe_seconds_left();
+    if (left > 0) snprintf(swipe, sizeof(swipe), "Swipe down for rescue (%ds)", left);
+    const mypi_ui_status_line_t lines[] = {
+        {ip, sta_ip ? 0x00ff00 : (eth_ip ? 0x00ffff : 0xff0000)},
+        {d->ssid[0] && d->wifi_state >= WIFI_STATE_CONNECTING ? station :
+         (ex->sta_manual_off ? "STA: disconnected" : "STA: not connected"), 0xffffff},
+        {ap->running ? ap_status : "AP: stopped", ap->running ? 0x00ff00 : 0x848484},
+        {ap->running ? ap->ssid : "", 0xffffff},
+        {!eth->initialized ? "ETH: --" : (!eth->link_up ? "ETH: down" :
+         (eth->mode == ETH_MODE_LAN ? "ETH: LAN link up" :
+          (eth->has_ip ? "ETH: WAN uplink" : "ETH: WAN no IP"))),
+         !eth->initialized ? 0x848484 : (!eth->link_up ? 0xff0000 :
+         (eth->mode == ETH_MODE_LAN ? 0x00ff00 : 0x00ffff))},
+        {rate, 0x00ffff},
+        {log, net_log_is_running() ? 0xffa500 : 0x848484},
+        {swipe, 0xffa500},
+        {"WEB MANAGEMENT ADDRESS", 0x848484},
+        {management_ip[0] ? management_ip : "Use active network address", 0xffa500},
+    };
+    const mypi_ui_status_t state = {.lines = lines, .count = sizeof(lines) / sizeof(lines[0])};
+    return ui_lvgl_port_render(&state);
+}
+#endif
+
 static void draw_home(const ui_state_t *ui)
 {
     diag_status_t d;
@@ -375,6 +419,9 @@ static void draw_home(const ui_state_t *ui)
     display_fill_screen(MYPI_UI_BG);
     draw_brand_header(&d, ap.running);
 
+#ifdef CONFIG_MYPI_UI_LVGL
+    if (!draw_lvgl_home_status(&d, &ap, &ex, &eth)) {
+#endif
     bool sta_ip = d.wifi_state == WIFI_STATE_GOT_IP && d.ip[0] && strcmp(d.ip, "0.0.0.0") != 0;
     const char *uplink_ip = sta_ip ? d.ip :
                             (eth.mode == ETH_MODE_WAN && eth.has_ip ? eth.ip : "No uplink");
@@ -424,6 +471,9 @@ static void draw_home(const ui_state_t *ui)
     display_draw_str(0, 177, "WEB MANAGEMENT ADDRESS", MYPI_UI_MUTED, MYPI_UI_BG, 1);
     display_draw_str(0, 190, management_ip[0] ? management_ip : "Use active network address",
                      MYPI_UI_ORANGE, MYPI_UI_BG, management_ip[0] ? 2 : 1);
+#ifdef CONFIG_MYPI_UI_LVGL
+    }
+#endif
 
     draw_uart_divider(UART_X, 236, UART_BIT_W, MYPI_UI_ORANGE);
     display_draw_str((LCD_H_RES - 7 * CHAR_W) / 2, 249, "Hotspot", MYPI_UI_TEXT, MYPI_UI_BG, 1);
@@ -972,6 +1022,9 @@ static void draw_ota(bool full)
 
 static void ui_task(void *arg)
 {
+#ifdef CONFIG_MYPI_UI_LVGL
+    if (!ui_lvgl_port_init()) ESP_LOGW(TAG, "LVGL unavailable; using legacy status view");
+#endif
     TickType_t last = xTaskGetTickCount();
     bool ota_shown = false;
     bool rescue_shown = false;
@@ -1020,6 +1073,9 @@ static void ui_task(void *arg)
         }
         vTaskDelayUntil(&last, pdMS_TO_TICKS(UI_TICK_MS));
     }
+#ifdef CONFIG_MYPI_UI_LVGL
+    ui_lvgl_port_deinit();
+#endif
     s_task = NULL;
     vTaskDelete(NULL);
 }
@@ -1039,7 +1095,11 @@ esp_err_t display_ui_init(void)
         ESP_LOGE(TAG, "failed to create local UI worker");
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(ui_task, "display_ui", 4096, NULL, 2, &s_task) != pdPASS) {
+    unsigned stack_size = 4096;
+#ifdef CONFIG_MYPI_UI_LVGL
+    stack_size = 8192;
+#endif
+    if (xTaskCreate(ui_task, "display_ui", stack_size, NULL, 2, &s_task) != pdPASS) {
         s_task = NULL;
         vTaskDelete(s_worker_task);
         s_worker_task = NULL;

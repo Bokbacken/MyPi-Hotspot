@@ -1,0 +1,85 @@
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "mypi_ui/lvgl_view.h"
+
+static unsigned flushes;
+
+static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
+{
+    assert(area->x1 >= 0 && area->y1 >= 0);
+    assert(pixels != NULL);
+    flushes++;
+    lv_display_flush_ready(display);
+}
+
+static void test_view(int width, int height)
+{
+    static uint16_t pixels[480 * 20];
+    lv_display_t *display = lv_display_create(width, height);
+    assert(display);
+    lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_buffers(display, pixels, NULL, sizeof(pixels), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(display, flush);
+    mypi_ui_lvgl_view_t view = {0};
+    mypi_ui_lvgl_view_init(&view, lv_display_get_screen_active(display));
+
+    // Preserve UTF-8 bytes, including combining characters and glyphs absent from the font.
+    const char text[] = "MyPi Åäö μ/π é 漢字 🙂 100%";
+    const mypi_ui_status_line_t lines[] = {{text, 0xffffff}, {"Connected", 0x00ff00}};
+    mypi_ui_status_t state = {.lines = lines, .count = 2};
+    assert(mypi_ui_lvgl_view_update(&view, &state));
+    assert(strcmp(lv_label_get_text(view.labels[0]), text) == 0);
+    assert(strcmp(lv_label_get_text(view.labels[1]), "Connected") == 0);
+    lv_obj_update_layout(view.root);
+    assert(lv_obj_get_width(view.labels[0]) == width);
+    assert(lv_obj_get_y(view.labels[1]) == height / 2);
+
+    unsigned previous_flushes = flushes;
+    lv_refr_now(display);
+    assert(flushes > previous_flushes);
+
+    // LVGL must own a copy, not retain a pointer into a backend stack snapshot.
+    char temporary[] = "Nätverk";
+    const mypi_ui_status_line_t borrowed = {temporary, 0xffffff};
+    state = (mypi_ui_status_t){.lines = &borrowed, .count = 1};
+    assert(mypi_ui_lvgl_view_update(&view, &state));
+    temporary[0] = 'X';
+    assert(strcmp(lv_label_get_text(view.labels[0]), "Nätverk") == 0);
+    assert(lv_obj_has_flag(view.labels[1], LV_OBJ_FLAG_HIDDEN));
+
+    assert(!mypi_ui_lvgl_view_update(NULL, &state));
+    assert(!mypi_ui_lvgl_view_update(&view, NULL));
+    state.count = MYPI_UI_STATUS_LINES + 1;
+    assert(!mypi_ui_lvgl_view_update(&view, &state));
+    state = (mypi_ui_status_t){.lines = NULL, .count = 1};
+    assert(!mypi_ui_lvgl_view_update(&view, &state));
+    const mypi_ui_status_line_t invalid[] = {{"Changed", 0xffffff}, {NULL, 0}};
+    state = (mypi_ui_status_t){.lines = invalid, .count = 2};
+    assert(!mypi_ui_lvgl_view_update(&view, &state));
+    assert(strcmp(lv_label_get_text(view.labels[0]), "Nätverk") == 0);
+
+    mypi_ui_status_line_t full[MYPI_UI_STATUS_LINES];
+    for (size_t i = 0; i < MYPI_UI_STATUS_LINES; i++) full[i] = lines[0];
+    state = (mypi_ui_status_t){.lines = full, .count = MYPI_UI_STATUS_LINES};
+    assert(mypi_ui_lvgl_view_update(&view, &state));
+    assert(!lv_obj_has_flag(view.labels[MYPI_UI_STATUS_LINES - 1], LV_OBJ_FLAG_HIDDEN));
+
+    state = (mypi_ui_status_t){0};
+    assert(mypi_ui_lvgl_view_update(&view, &state));
+    for (size_t i = 0; i < MYPI_UI_STATUS_LINES; i++) {
+        assert(lv_obj_has_flag(view.labels[i], LV_OBJ_FLAG_HIDDEN));
+    }
+    lv_display_delete(display);
+}
+
+int main(void)
+{
+    lv_init();
+    test_view(240, 200);
+    test_view(480, 320);
+    lv_deinit();
+    puts("MyPi LVGL view tests passed");
+    return 0;
+}
