@@ -11,6 +11,8 @@ features or performance guarantees.
   bit); web pages encode `Hotspot` the same way. No Companion artwork is copied here.
 - Use a character wheel on small touch displays. Prefer a full keyboard only when the
   available display area makes it practical.
+- The Wi-Fi credential wheel has seven UTF-8 character ranges. Horizontal swipes change
+  ranges; vertical swipes move the selection live, with password text masked by default.
 - Keep the normal display, OTA progress, and emergency/rescue screens distinct. OTA
   and rescue continue to take priority over ordinary navigation and input.
 

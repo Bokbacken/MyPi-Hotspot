@@ -34,6 +34,9 @@ void display_draw_wifi_icon(int cx, int cy, uint16_t color);
 esp_err_t display_ui_init(void);
 /** Stop the status screen task (the last frame stays on the panel). */
 void display_ui_stop(void);
+/** Begin/move a touch gesture captured by the active character wheel. */
+bool display_ui_touch_begin(int x, int y);
+void display_ui_touch_move(int x, int y);
 /** Route a completed touch/drag to the Wi-Fi setup wheel, if it owns the screen. */
 bool display_ui_touch(int x0, int y0, int x1, int y1, bool dragged);
 /** Emergency mode screen: option index (RESCUE_OPT_*) at touch point (x, y), or -1. */

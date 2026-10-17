@@ -44,8 +44,8 @@ static char s_c5_ota_status[64] = "idle";
 
 #define BRAND_STYLE \
 ".brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}.brand>strong{font-size:1.25em;color:#fff}" \
-".brand-project{text-align:center;font-size:.9em;color:#ddd}.serial{display:flex;height:12px;align-items:flex-end;justify-content:center}" \
-".serial i{display:inline-block;width:2px;height:3px;background:#fd8b32}.serial i.bit-1{height:11px}" \
+".brand-project{text-align:center;font-size:.9em;color:#ddd}.serial{display:flex;width:min(350px,100%);height:14px;align-items:flex-end;justify-content:center;margin:0 auto}" \
+".serial i{display:block;flex:1 1 0;min-width:1px;height:4px;margin:0 .5px;background:#fd8b32}.serial i.bit-1{height:13px}" \
 "nav{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 16px}nav a{display:block;padding:7px 10px;border:1px solid #444;border-radius:5px;text-decoration:none}" \
 "nav a.active{border-color:#fd8b32;color:#fff;background:#332316}header{border-bottom:1px solid #333;padding-bottom:8px}" \
 "@media(max-width:520px){body{margin:.6em}.brand{gap:8px}nav{gap:4px}nav a{padding:6px;font-size:.9em}input{max-width:100%}}"

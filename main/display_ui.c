@@ -9,6 +9,7 @@
 #include "diag.h"
 #include "display.h"
 #include "display_font.h"
+#include "char_wheel.h"
 #include "esp_log.h"
 #include "eth.h"
 #include "freertos/FreeRTOS.h"
@@ -21,7 +22,7 @@
 static const char *TAG = "display_ui";
 
 #define UI_PERIOD_MS    2000
-#define UI_TICK_MS      200     // OTA view refresh (5 Hz); the status screen redraws every UI_PERIOD_MS
+#define UI_TICK_MS      100     // Wheel interaction and OTA view refresh (10 Hz)
 #define UI_AREA_BOTTOM  LCD_V_RES
 #define CHAR_W          6
 #define CHAR_H          8
@@ -32,8 +33,8 @@ static volatile bool s_wheel_active;
 static bool s_wheel_busy;
 static bool s_password_visible;
 static bool s_input_password;
-static int s_wheel_range;
-static int s_wheel_pos;
+static char_wheel_t s_wheel;
+static char_wheel_layout_t s_wheel_layout;
 static char s_input_ssid[33];
 static char s_input_pass[64];
 static char s_wheel_message[32];
@@ -45,10 +46,12 @@ static const char *const s_wheel_ranges[] = {
     "abcdefghijklmnopqrstuvwxyz",
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     "0123456789",
-    " .,!?@#$%^&*()-_=+[]{}:;/'\"\\|<>`~",
-    "åäöÅÄÖéÉüÜñÑß",
+    "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+    "\\€£¥§±×÷°©®™",
+    "åäöæøÅÄÖÆØß",
+    "éèêëáàâãíìîïóòôõúùûüçñÉÈÊËÁÀÂÃÍÌÎÏÓÒÔÕÚÙÛÜÇÑ",
 };
-static const char *const s_wheel_tabs[] = {"abc", "ABC", "123", "sym", "UTF8"};
+static const char *const s_wheel_tabs[] = {"a-z", "A-Z", "0-9", "Sp1", "Sp2", "Int1", "Int2"};
 
 typedef struct {
     int slot;
@@ -74,7 +77,15 @@ static int utf8_count(const char *s)
 
 static int wheel_count(int range)
 {
+    if (range < 0 || range >= (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]))) return 0;
     return utf8_count(s_wheel_ranges[range]);
+}
+
+static void wheel_counts(int counts[CHAR_WHEEL_MAX_RANGES])
+{
+    for (int i = 0; i < (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])); i++) {
+        counts[i] = wheel_count(i);
+    }
 }
 
 static size_t wheel_char(int range, int index, char out[5])
@@ -159,8 +170,26 @@ static void display_draw_utf8_char(int x, int y, const unsigned char *s,
     size_t n = utf8_char_size(s);
     uint32_t cp = n == 1 ? s[0] : utf8_codepoint(s);
     char base = '?';
-    enum { MARK_NONE, MARK_DIAERESIS, MARK_RING, MARK_ACUTE, MARK_TILDE } mark = MARK_NONE;
+    enum {
+        MARK_NONE, MARK_DIAERESIS, MARK_RING, MARK_ACUTE, MARK_GRAVE,
+        MARK_CIRCUMFLEX, MARK_TILDE, MARK_CEDILLA
+    } mark = MARK_NONE;
     switch (cp) {
+    case 0x00E6: base = 'a'; break;
+    case 0x00C6: base = 'A'; break;
+    case 0x00F8: base = 'o'; break;
+    case 0x00D8: base = 'O'; break;
+    case 0x20AC: base = 'E'; break;
+    case 0x00A3: base = 'L'; break;
+    case 0x00A5: base = 'Y'; break;
+    case 0x00A7: base = 'S'; break;
+    case 0x00B1: base = '+'; break;
+    case 0x00D7: base = 'x'; break;
+    case 0x00F7: base = '/'; break;
+    case 0x00B0: base = 'o'; break;
+    case 0x00A9: base = 'C'; break;
+    case 0x00AE: base = 'R'; break;
+    case 0x2122: base = 'T'; break;
     case 0x00E5: base = 'a'; mark = MARK_RING; break;
     case 0x00C5: base = 'A'; mark = MARK_RING; break;
     case 0x00E4: base = 'a'; mark = MARK_DIAERESIS; break;
@@ -169,6 +198,44 @@ static void display_draw_utf8_char(int x, int y, const unsigned char *s,
     case 0x00D6: base = 'O'; mark = MARK_DIAERESIS; break;
     case 0x00E9: base = 'e'; mark = MARK_ACUTE; break;
     case 0x00C9: base = 'E'; mark = MARK_ACUTE; break;
+    case 0x00E8: base = 'e'; mark = MARK_GRAVE; break;
+    case 0x00C8: base = 'E'; mark = MARK_GRAVE; break;
+    case 0x00EA: base = 'e'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00CA: base = 'E'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00EB: base = 'e'; mark = MARK_DIAERESIS; break;
+    case 0x00CB: base = 'E'; mark = MARK_DIAERESIS; break;
+    case 0x00E1: base = 'a'; mark = MARK_ACUTE; break;
+    case 0x00C1: base = 'A'; mark = MARK_ACUTE; break;
+    case 0x00E0: base = 'a'; mark = MARK_GRAVE; break;
+    case 0x00C0: base = 'A'; mark = MARK_GRAVE; break;
+    case 0x00E2: base = 'a'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00C2: base = 'A'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00E3: base = 'a'; mark = MARK_TILDE; break;
+    case 0x00C3: base = 'A'; mark = MARK_TILDE; break;
+    case 0x00ED: base = 'i'; mark = MARK_ACUTE; break;
+    case 0x00CD: base = 'I'; mark = MARK_ACUTE; break;
+    case 0x00EC: base = 'i'; mark = MARK_GRAVE; break;
+    case 0x00CC: base = 'I'; mark = MARK_GRAVE; break;
+    case 0x00EE: base = 'i'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00CE: base = 'I'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00EF: base = 'i'; mark = MARK_DIAERESIS; break;
+    case 0x00CF: base = 'I'; mark = MARK_DIAERESIS; break;
+    case 0x00F3: base = 'o'; mark = MARK_ACUTE; break;
+    case 0x00D3: base = 'O'; mark = MARK_ACUTE; break;
+    case 0x00F2: base = 'o'; mark = MARK_GRAVE; break;
+    case 0x00D2: base = 'O'; mark = MARK_GRAVE; break;
+    case 0x00F4: base = 'o'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00D4: base = 'O'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00F5: base = 'o'; mark = MARK_TILDE; break;
+    case 0x00D5: base = 'O'; mark = MARK_TILDE; break;
+    case 0x00FA: base = 'u'; mark = MARK_ACUTE; break;
+    case 0x00DA: base = 'U'; mark = MARK_ACUTE; break;
+    case 0x00F9: base = 'u'; mark = MARK_GRAVE; break;
+    case 0x00D9: base = 'U'; mark = MARK_GRAVE; break;
+    case 0x00FB: base = 'u'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00DB: base = 'U'; mark = MARK_CIRCUMFLEX; break;
+    case 0x00E7: base = 'c'; mark = MARK_CEDILLA; break;
+    case 0x00C7: base = 'C'; mark = MARK_CEDILLA; break;
     case 0x00FC: base = 'u'; mark = MARK_DIAERESIS; break;
     case 0x00DC: base = 'U'; mark = MARK_DIAERESIS; break;
     case 0x00F1: base = 'n'; mark = MARK_TILDE; break;
@@ -196,10 +263,20 @@ static void display_draw_utf8_char(int x, int y, const unsigned char *s,
     } else if (mark == MARK_ACUTE) {
         display_fill_rect(x + 3 * scale, y, x + 4 * scale, y + scale, fg);
         display_fill_rect(x + 2 * scale, y + scale, x + 3 * scale, y + 2 * scale, fg);
+    } else if (mark == MARK_GRAVE) {
+        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
+        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
+    } else if (mark == MARK_CIRCUMFLEX) {
+        display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
+        display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
+        display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
     } else if (mark == MARK_TILDE) {
         display_fill_rect(x + scale, y + scale, x + 2 * scale, y + 2 * scale, fg);
         display_fill_rect(x + 2 * scale, y, x + 3 * scale, y + scale, fg);
         display_fill_rect(x + 3 * scale, y + scale, x + 4 * scale, y + 2 * scale, fg);
+    } else if (mark == MARK_CEDILLA) {
+        display_fill_rect(x + 2 * scale, y + 6 * scale, x + 3 * scale, y + 7 * scale, fg);
+        display_fill_rect(x + 3 * scale, y + 7 * scale, x + 4 * scale, y + 8 * scale, fg);
     }
 }
 
@@ -367,64 +444,95 @@ static void draw_status(void)
 
 static void draw_wheel(void)
 {
-    char preview[64], ch[5], label[16];
+    char preview[64], ch[5];
+    const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
     const char *value = s_input_password ? s_input_pass : s_input_ssid;
     make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
-    int count = wheel_count(s_wheel_range);
+    int count = wheel_count(s_wheel.range);
     display_fill_screen(COL_BLACK);
     draw_brand();
-    display_draw_str(0, 22, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
+    display_draw_str(0, LCD_V_RES * 7 / 100, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
 
-    display_fill_rect(4, 34, 116, 54, s_input_password ? COL_BLACK : COL_ORANGE);
-    display_draw_rect_outline(4, 34, 115, 53, COL_WHITE);
-    display_draw_str(15, 40, "SSID", s_input_password ? COL_WHITE : COL_BLACK, s_input_password ? COL_BLACK : COL_ORANGE, 1);
-    display_fill_rect(124, 34, 236, 54, s_input_password ? COL_ORANGE : COL_BLACK);
-    display_draw_rect_outline(124, 34, 235, 53, COL_WHITE);
-    display_draw_str(135, 40, "Password", s_input_password ? COL_BLACK : COL_WHITE, s_input_password ? COL_ORANGE : COL_BLACK, 1);
-
-    display_fill_rect(4, 57, LCD_H_RES - 4, 71, COL_BLACK);
-    display_draw_str(8, 59, preview[0] ? preview : "(empty)", COL_WHITE, COL_BLACK, 1);
-    for (int i = 0; i < (int)(sizeof(s_wheel_tabs) / sizeof(s_wheel_tabs[0])); i++) {
-        int x0 = i * 48;
-        uint16_t fill = i == s_wheel_range ? COL_ORANGE : COL_GRAY;
-        display_fill_rect(x0 + 1, 76, x0 + 47, 98, fill);
-        display_draw_str(x0 + 4, 83, s_wheel_tabs[i], i == s_wheel_range ? COL_BLACK : COL_WHITE, fill, 1);
+    for (int i = 0; i < 2; i++) {
+        char_wheel_rect_t r = s_wheel_layout.fields[i];
+        uint16_t fill = (i == (s_input_password ? 1 : 0)) ? COL_ORANGE : COL_BLACK;
+        display_fill_rect(r.x, r.y, r.x + r.w, r.y + r.h, fill);
+        display_draw_rect_outline(r.x, r.y, r.x + r.w - 1, r.y + r.h - 1, COL_WHITE);
+        const char *title = i == 0 ? "SSID" : "Password";
+        display_draw_str(r.x + r.w / 2 - (int)strlen(title) * CHAR_W / 2,
+                         r.y + (r.h - CHAR_H) / 2, title,
+                         fill == COL_ORANGE ? COL_BLACK : COL_WHITE, fill, 1);
     }
 
-    for (int slot = 0; slot < 5; slot++) {
-        int x0 = slot * 48 + 1;
-        int index = (s_wheel_pos + slot - 2 + count) % count;
-        wheel_char(s_wheel_range, index, ch);
-        uint16_t fill = slot == 2 ? COL_CYAN : COL_BLACK;
-        display_fill_rect(x0, 108, x0 + 46, 183, fill);
-        display_draw_rect_outline(x0, 108, x0 + 45, 182, slot == 2 ? COL_CYAN : COL_GRAY);
-        display_draw_utf8_char(x0 + (slot == 2 ? 17 : 20), 124, (const unsigned char *)ch,
-                               slot == 2 ? COL_BLACK : COL_WHITE, fill, slot == 2 ? 2 : 1);
-        if (slot == 2) {
-            uint32_t cp = utf8_codepoint((const unsigned char *)ch);
-            snprintf(label, sizeof(label), "U+%04lX", (unsigned long)cp);
-            display_draw_str(x0 + 4, 164, label, COL_BLACK, fill, 1);
+    char_wheel_rect_t preview_box = s_wheel_layout.preview;
+    display_fill_rect(preview_box.x, preview_box.y, preview_box.x + preview_box.w,
+                      preview_box.y + preview_box.h, COL_BLACK);
+    display_draw_str(preview_box.x + 3, preview_box.y + (preview_box.h - CHAR_H) / 2,
+                     preview[0] ? preview : "(empty)", COL_WHITE, COL_BLACK, 1);
+    for (int i = 0; i < range_count; i++) {
+        char_wheel_rect_t tab = s_wheel_layout.tabs[i];
+        uint16_t fill = i == s_wheel.range ? COL_ORANGE : COL_GRAY;
+        display_fill_rect(tab.x + 1, tab.y, tab.x + tab.w - 1, tab.y + tab.h, fill);
+        display_draw_rect_outline(tab.x + 1, tab.y, tab.x + tab.w - 2, tab.y + tab.h - 1, fill);
+        int text_x = tab.x + (tab.w - (int)strlen(s_wheel_tabs[i]) * CHAR_W) / 2;
+        display_draw_str(text_x, tab.y + (tab.h - CHAR_H) / 2, s_wheel_tabs[i],
+                         i == s_wheel.range ? COL_BLACK : COL_WHITE, fill, 1);
+    }
+
+    int center_y = s_wheel_layout.wheel_y + s_wheel_layout.wheel_h / 2;
+    int center_x = s_wheel_layout.wheel_x + s_wheel_layout.wheel_w / 2;
+    display_draw_rect_outline(s_wheel_layout.wheel_x, s_wheel_layout.wheel_y,
+                              s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 1,
+                              s_wheel_layout.wheel_y + s_wheel_layout.wheel_h - 1, COL_GRAY);
+    for (int slot = 0; slot < CHAR_WHEEL_VISIBLE_ITEMS; slot++) {
+        int y = center_y + (slot - CHAR_WHEEL_VISIBLE_ITEMS / 2) * s_wheel_layout.item_h
+                - s_wheel_layout.item_h / 2 - (int)s_wheel.visual_shift_px;
+        if (y + s_wheel_layout.item_h <= s_wheel_layout.wheel_y ||
+            y >= s_wheel_layout.wheel_y + s_wheel_layout.wheel_h) continue;
+        int index = (s_wheel.selected + slot - CHAR_WHEEL_VISIBLE_ITEMS / 2 + count) % count;
+        wheel_char(s_wheel.range, index, ch);
+        bool selected = slot == CHAR_WHEEL_VISIBLE_ITEMS / 2;
+        uint16_t fill = selected ? COL_CYAN : COL_BLACK;
+        display_fill_rect(s_wheel_layout.wheel_x + 1, y,
+                          s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 1,
+                          y + s_wheel_layout.item_h, fill);
+        if (selected) {
+            display_draw_rect_outline(s_wheel_layout.wheel_x + 1, y,
+                                      s_wheel_layout.wheel_x + s_wheel_layout.wheel_w - 2,
+                                      y + s_wheel_layout.item_h - 1, COL_CYAN);
         }
+        int scale = selected ? s_wheel_layout.item_h / CHAR_H : 1;
+        if (scale < 1) scale = 1;
+        if (scale > 3) scale = 3;
+        display_draw_utf8_char(center_x - CHAR_W * scale / 2,
+                               y + (s_wheel_layout.item_h - CHAR_H * scale) / 2,
+                               (const unsigned char *)ch, selected ? COL_BLACK : COL_WHITE, fill, scale);
     }
-    display_draw_str(12, 188, "Drag or tap a character, then NEXT", COL_GRAY, COL_BLACK, 1);
+    display_draw_str(8, LCD_V_RES * 60 / 100, "Swipe up/down: scroll", COL_GRAY, COL_BLACK, 1);
+    display_draw_str(8, LCD_V_RES * 63 / 100, "Swipe left/right: range", COL_GRAY, COL_BLACK, 1);
     if (s_input_password) {
-        display_draw_rect_outline(35, 204, 204, 226, COL_GRAY);
-        display_draw_str(68, 211, s_password_visible ? "Hide password" : "Show password",
+        char_wheel_rect_t r = s_wheel_layout.visibility;
+        display_draw_rect_outline(r.x, r.y, r.x + r.w - 1, r.y + r.h - 1, COL_GRAY);
+        const char *visibility = s_password_visible ? "Hide password" : "Show password";
+        display_draw_str(r.x + (r.w - (int)strlen(visibility) * CHAR_W) / 2,
+                         r.y + (r.h - CHAR_H) / 2, visibility,
                          s_password_visible ? COL_YELLOW : COL_WHITE, COL_BLACK, 1);
     } else {
-        display_draw_str(12, 210, "UTF-8 characters are supported", COL_GRAY, COL_BLACK, 1);
+        display_draw_str(8, s_wheel_layout.visibility.y + 4, "UTF-8 input", COL_GRAY, COL_BLACK, 1);
     }
     const char *buttons[] = {"BACK", "DEL", "NEXT", "OK"};
     for (int i = 0; i < 4; i++) {
-        int x0 = i * 60;
+        char_wheel_rect_t r = s_wheel_layout.actions[i];
         uint16_t fill = i == 3 ? COL_GREEN : COL_GRAY;
-        display_fill_rect(x0 + 2, 242, x0 + 58, 284, fill);
-        display_draw_rect_outline(x0 + 2, 242, x0 + 57, 283, fill);
-        display_draw_str(x0 + 8, 259, buttons[i], COL_BLACK, fill, 1);
+        display_fill_rect(r.x + 2, r.y, r.x + r.w - 2, r.y + r.h, fill);
+        display_draw_rect_outline(r.x + 2, r.y, r.x + r.w - 3, r.y + r.h - 1, fill);
+        display_draw_str(r.x + (r.w - (int)strlen(buttons[i]) * CHAR_W) / 2,
+                         r.y + (r.h - CHAR_H) / 2, buttons[i], COL_BLACK, fill, 1);
     }
-    if (s_wheel_busy) display_draw_str(8, 298, "Saving profile and connecting...", COL_CYAN, COL_BLACK, 1);
-    else if (s_wheel_message[0]) display_draw_str(8, 298, s_wheel_message, COL_YELLOW, COL_BLACK, 1);
+    char_wheel_rect_t message = s_wheel_layout.message;
+    if (s_wheel_busy) display_draw_str(message.x, message.y, "Saving profile and connecting...", COL_CYAN, COL_BLACK, 1);
+    else if (s_wheel_message[0]) display_draw_str(message.x, message.y, s_wheel_message, COL_YELLOW, COL_BLACK, 1);
     display_flush();
     display_unlock();
 }
@@ -500,7 +608,7 @@ static void wheel_submit(void)
 static void wheel_append(void)
 {
     char ch[5];
-    size_t n = wheel_char(s_wheel_range, s_wheel_pos, ch);
+    size_t n = wheel_char(s_wheel.range, s_wheel.selected, ch);
     char *value = s_input_password ? s_input_pass : s_input_ssid;
     size_t cap = s_input_password ? sizeof(s_input_pass) : sizeof(s_input_ssid);
     size_t used = strlen(value);
@@ -509,7 +617,7 @@ static void wheel_append(void)
         return;
     }
     memcpy(value + used, ch, n + 1);
-    s_wheel_pos = (s_wheel_pos + 1) % wheel_count(s_wheel_range);
+    char_wheel_select_offset(&s_wheel, 1, wheel_count(s_wheel.range));
     s_wheel_message[0] = 0;
 }
 
@@ -529,67 +637,91 @@ bool display_ui_touch(int x0, int y0, int x1, int y1, bool dragged)
     if (!s_task) return false;
     bool handled = false;
     display_lock();
-    if (!s_wheel_active) {
+    if (s_wheel_active) {
+        bool swiped = char_wheel_gesture_end(&s_wheel);
+        handled = true;
+        if (!s_wheel_busy && !swiped && !dragged) {
+            char_wheel_zone_t zone = char_wheel_hit_test(&s_wheel_layout, x1, y1);
+            switch (zone.type) {
+            case CHAR_WHEEL_ZONE_FIELD:
+                s_input_password = zone.index == 1;
+                s_wheel_message[0] = 0;
+                break;
+            case CHAR_WHEEL_ZONE_TAB:
+                char_wheel_set_range(&s_wheel, zone.index, wheel_count(zone.index));
+                s_wheel_message[0] = 0;
+                break;
+            case CHAR_WHEEL_ZONE_ITEMS:
+                char_wheel_select_offset(&s_wheel, zone.index - CHAR_WHEEL_VISIBLE_ITEMS / 2,
+                                         wheel_count(s_wheel.range));
+                break;
+            case CHAR_WHEEL_ZONE_VISIBILITY:
+                if (s_input_password) s_password_visible = !s_password_visible;
+                break;
+            case CHAR_WHEEL_ZONE_ACTION:
+                if (zone.index == 0) {
+                    memset(s_input_ssid, 0, sizeof(s_input_ssid));
+                    memset(s_input_pass, 0, sizeof(s_input_pass));
+                    s_wheel_active = false;
+                    strlcpy(s_status_notice, "Wi-Fi setup cancelled", sizeof(s_status_notice));
+                } else if (zone.index == 1) {
+                    wheel_delete();
+                } else if (zone.index == 2) {
+                    wheel_append();
+                } else if (!s_input_password) {
+                    if (s_input_ssid[0]) {
+                        s_input_password = true;
+                        s_password_visible = false;
+                        s_wheel_message[0] = 0;
+                    } else {
+                        strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
+                    }
+                } else {
+                    wheel_submit();
+                }
+                break;
+            default:
+                break;
+            }
+        }
+    } else {
         if (!dragged && y0 >= LCD_V_RES / 2) {
             memset(s_input_ssid, 0, sizeof(s_input_ssid));
             memset(s_input_pass, 0, sizeof(s_input_pass));
             s_input_password = false;
             s_password_visible = false;
-            s_wheel_range = 0;
-            s_wheel_pos = 0;
+            char_wheel_init(&s_wheel, (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])));
+            char_wheel_layout_init(&s_wheel_layout, LCD_H_RES, LCD_V_RES, s_wheel.range_count);
             s_wheel_message[0] = 0;
             s_status_notice[0] = 0;
             s_wheel_active = true;
             handled = true;
         }
-    } else if (!s_wheel_busy) {
-        handled = true;
-        if (dragged && y0 >= 108 && y0 <= 183) {
-            int steps = (x1 - x0) / 18;
-            int count = wheel_count(s_wheel_range);
-            s_wheel_pos = (s_wheel_pos - steps % count + count) % count;
-        } else if (!dragged && y0 >= 34 && y0 <= 54) {
-            s_input_password = x0 >= LCD_H_RES / 2;
-            s_wheel_message[0] = 0;
-        } else if (!dragged && y0 >= 76 && y0 <= 98) {
-            s_wheel_range = x0 / 48;
-            if (s_wheel_range >= (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]))) {
-                s_wheel_range = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0])) - 1;
-            }
-            s_wheel_pos = 0;
-        } else if (!dragged && y0 >= 108 && y0 <= 183) {
-            int slot = x0 / 48;
-            s_wheel_pos = (s_wheel_pos + slot - 2 + wheel_count(s_wheel_range)) %
-                          wheel_count(s_wheel_range);
-        } else if (!dragged && y0 >= 204 && y0 <= 228 && s_input_password) {
-            s_password_visible = !s_password_visible;
-        } else if (!dragged && y0 >= 242 && y0 <= 284) {
-            if (x0 < 60) {
-                memset(s_input_ssid, 0, sizeof(s_input_ssid));
-                memset(s_input_pass, 0, sizeof(s_input_pass));
-                s_wheel_active = false;
-                strlcpy(s_status_notice, "Wi-Fi setup cancelled", sizeof(s_status_notice));
-            } else if (x0 < 120) {
-                wheel_delete();
-            } else if (x0 < 180) {
-                wheel_append();
-            } else if (!s_input_password) {
-                if (s_input_ssid[0]) {
-                    s_input_password = true;
-                    s_password_visible = false;
-                    s_wheel_message[0] = 0;
-                } else {
-                    strlcpy(s_wheel_message, "SSID cannot be empty", sizeof(s_wheel_message));
-                }
-            } else {
-                wheel_submit();
-            }
-        }
-    } else {
-        handled = true;
     }
     display_unlock();
     return handled;
+}
+
+bool display_ui_touch_begin(int x, int y)
+{
+    if (!s_task || !s_wheel_active) return false;
+    display_lock();
+    char_wheel_gesture_begin(&s_wheel, x, y);
+    display_unlock();
+    return true;
+}
+
+void display_ui_touch_move(int x, int y)
+{
+    if (!s_task) return;
+    int counts[CHAR_WHEEL_MAX_RANGES] = {0};
+    wheel_counts(counts);
+    display_lock();
+    if (s_wheel_active && !s_wheel_busy &&
+        char_wheel_gesture_move(&s_wheel, x, y, &s_wheel_layout, counts)) {
+        s_wheel_message[0] = 0;
+    }
+    display_unlock();
 }
 
 // ---------------------------------------------------------------------------
