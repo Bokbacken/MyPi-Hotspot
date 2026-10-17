@@ -43,15 +43,16 @@ static char s_c5_ota_status[64] = "idle";
 // ---------------------------------------------------------------------------
 
 #define BRAND_STYLE \
-".brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}.brand>strong{font-size:1.25em;color:#fff}" \
-".brand-project{text-align:center;font-size:.9em;color:#ddd}.serial{display:flex;width:min(350px,100%);height:14px;align-items:flex-end;justify-content:center;margin:0 auto}" \
-".serial i{display:block;flex:1 1 0;min-width:1px;height:4px;margin:0 .5px;background:#fd8b32}.serial i.bit-1{height:13px}" \
+".brand{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;height:52px;padding:0 12px;background:#fff;color:#111}" \
+".brand>strong{font-size:1.25em}.brand-status{margin-left:auto;font-size:.8em;text-align:right;min-width:0}" \
+".serial{display:block;width:100%;height:6px;background:#111;color:#fd8b32}" \
 "nav{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 16px}nav a{display:block;padding:7px 10px;border:1px solid #444;border-radius:5px;text-decoration:none}" \
-"nav a.active{border-color:#fd8b32;color:#fff;background:#332316}header{border-bottom:1px solid #333;padding-bottom:8px}" \
+"nav a.active{border-color:#fd8b32;color:#fff;background:#332316}" \
 "@media(max-width:520px){body{margin:.6em}.brand{gap:8px}nav{gap:4px}nav a{padding:6px;font-size:.9em}input{max-width:100%}}"
 
 #define BRAND_HEADER \
-"<header><div class='brand'><strong>MyPi</strong><div class='brand-project'><div class='serial' id='serial' aria-label='Hotspot 8N1 serial divider'></div><b>Hotspot</b></div></div></header>" \
+"<header><div class='brand'><strong>Hotspot</strong><span class='brand-status' id='header-status' role='status'>Connecting...</span></div>" \
+"<svg class='serial' id='serial' viewBox='0 0 700 6' preserveAspectRatio='none' role='img' aria-label='Hotspot 8N1 serial divider'></svg></header>" \
 "<nav aria-label='Primary navigation'><a href='/'>Overview</a><a href='/wifi'>Wi-Fi</a>" \
 "<a href='/access-point'>Access point</a><a href='/ethernet'>Ethernet</a><a href='/traffic'>Traffic</a>" \
 "<a href='/system'>System / display</a><a href='/diagnostics'>Diagnostics</a><a href='/update'>Update</a>" \
@@ -60,7 +61,13 @@ static char s_c5_ota_status[64] = "idle";
 #define BRAND_SCRIPT \
 "function drawSerial(){let e=document.getElementById('serial');if(!e)return;let b=[];" \
 "for(let c of 'Hotspot'){b.push(0);for(let i=0;i<8;i++)b.push((c.charCodeAt(0)>>i)&1);b.push(1)}" \
-"e.innerHTML=b.map(v=>'<i class=bit-'+v+'></i>').join('')}" \
+"let p='M0 0',last=0;b.forEach((v,i)=>{let y=v?0:5;if(y!==last)p+='V'+y;p+='H'+((i+1)*10);last=y});" \
+"e.innerHTML='<path d=\"'+p+'\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1\"/>'}" \
+"function updateHeader(s){let e=document.getElementById('header-status');if(!e)return;" \
+"e.textContent=s.eth&&s.eth.rescue&&s.eth.rescue.active?'Emergency mode':" \
+"s.wifi_state==='connected'?'Wi-Fi '+s.rssi+' dBm':s.ap&&s.ap.running?'Wi-Fi AP on':" \
+"s.uplink==='eth'?'Ethernet uplink':'Wi-Fi offline'}" \
+"function headerUnavailable(){let e=document.getElementById('header-status');if(e)e.textContent='Device unreachable'}" \
 "drawSerial();document.querySelectorAll('nav a').forEach(a=>{if(a.pathname===location.pathname)a.classList.add('active')});"
 
 static const char INDEX_HTML[] =
@@ -178,6 +185,7 @@ BRAND_SCRIPT
 "n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',e,'bad')}}"
 "async function tick(){try{"
 "let s=await (await fetch('/api/status')).json();"
+"updateHeader(s);"
 "$('t').innerHTML="
 "row('Firmware',s.firmware)+row('ESP-IDF',s.idf)+row('Chip',s.chip)+row('Reset reason',s.reset_reason)+"
 "row('Uptime',fmtUp(s.uptime_s))+row('Partition',s.partition)+"
@@ -229,7 +237,7 @@ BRAND_SCRIPT
 "if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
 "let l=await (await fetch('/api/log')).text();let q=$('log');q.textContent=l;"
 "if($('follow').checked)q.scrollTop=q.scrollHeight;"
-"}catch(e){$('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
+"}catch(e){headerUnavailable();$('t').innerHTML=row('Error','device unreachable: '+e,'bad')}}"
 "function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
 "let logRun=false;"
 "function resetPeaks(){fetch('/api/netstats/reset',{method:'POST'}).then(tick)}"
@@ -255,7 +263,8 @@ BRAND_HEADER
 "<p><progress id='p' value='0' max='100'></progress></p><p id='s'></p></main>"
 "<script>"
 BRAND_SCRIPT
-"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
+"fetch('/api/status').then(r=>r.json()).then(updateHeader).catch(headerUnavailable);"
+"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;updateHeader(j);let o=j.ota||{};if(o.target!=t)return;"
 "let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
 "done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
 "if(o.phase=='done'||o.phase=='failed'){clearInterval(pt);pt=0}}).catch(()=>{pb=0;s.textContent='Device is rebooting...'})}"
@@ -291,12 +300,12 @@ BRAND_HEADER
 "<script>"
 BRAND_SCRIPT
 "const $=i=>document.getElementById(i);"
-"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;let o=j.ota||{};if(o.target!=t)return;"
+"let pt=0,pb=0;function poll(t,s){if(pb)return;pb=1;fetch('/api/status').then(r=>r.json()).then(j=>{pb=0;updateHeader(j);let o=j.ota||{};if(o.target!=t)return;"
 "let m={writing:'Writing flash '+o.pct+'%',verifying:'Verifying image...',verified:'Upload complete - image verified',"
 "done:'Done - rebooting into the new firmware...',failed:'FAILED: '+o.err}[o.phase];if(m)s.textContent=m;"
 "if(o.phase=='done'||o.phase=='failed'){clearInterval(pt);pt=0}}).catch(()=>{pb=0;s.textContent='Device is rebooting...'})}"
 
-"fetch('/api/status').then(r=>r.json()).then(j=>{let c=j.coproc||{};let v=c.fw_valid?c.fw:'unknown';"
+"fetch('/api/status').then(r=>r.json()).then(j=>{updateHeader(j);let c=j.coproc||{};let v=c.fw_valid?c.fw:'unknown';"
 "$('t').innerHTML='<tr><td>Chip</td><td>'+(c.target||'?')+' (id '+c.chip_id+')</td></tr>'"
 "+'<tr><td>Slave firmware</td><td>'+v+'</td></tr><tr><td>Host component</td><td>'+c.host+'</td></tr>'"
 "+'<tr><td>Match</td><td class='+(c.version_match?'ok':'bad')+'>'+(c.version_match?'yes':'NO')+'</td></tr>'"
@@ -332,6 +341,7 @@ BRAND_HEADER
 "<p><button onclick=\"fetch('/api/reboot',{method:'POST'}).then(()=>document.getElementById('o').textContent='Rebooting...')\">Reboot</button></p>"
 "<p id='o'></p></main><script>"
 BRAND_SCRIPT
+"fetch('/api/status').then(r=>r.json()).then(updateHeader).catch(headerUnavailable);"
 "fetch('/api/pins').then(r=>r.json()).then(j=>{document.getElementById('r').textContent=j.report;"
 "document.getElementById('t').innerHTML=j.names.split(',').map(n=>'<tr><td>'+n+'</td><td>'+"
 "['high','low','in','inpd'].map(m=>\"<button onclick=\\\"setp('\"+n+\"','\"+m+\"')\\\">\"+m+'</button>').join('')+"

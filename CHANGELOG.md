@@ -12,6 +12,10 @@ All versions up to and including 0.7.0 have been run on the hardware.
   Traffic, System / display, and Diagnostics views; preserve the existing API and OTA routes.
 - Add a responsive shared navigation/branding header and a GitHub Actions ESP-IDF
   build artifact containing the OTA application image.
+- Refine the shared header to a single Hotspot/status row and full `Hotspot` 8N1
+  waveform: 18 + 6 pixels on LCD, 52 + 6 CSS pixels on web. Home content and routes
+  are unchanged. Approved μ/π artwork is still blocked on the original image files;
+  no substitute logo is embedded.
 
 ## 0.7.0 — Ethernet emergency mode (HW-tested)
 - New `rescue.c/.h`: emergency mode that gives web access over Ethernet even when the

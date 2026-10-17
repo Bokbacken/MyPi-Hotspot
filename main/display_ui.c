@@ -26,6 +26,8 @@ static const char *TAG = "display_ui";
 #define UI_AREA_BOTTOM  LCD_V_RES
 #define CHAR_W          6
 #define CHAR_H          8
+#define HEADER_H        18
+#define DIVIDER_H       6
 
 static TaskHandle_t s_task;
 static volatile bool s_stop;
@@ -125,12 +127,22 @@ static void make_preview(const char *src, char *dst, size_t size, bool mask)
     dst[used] = 0;
 }
 
-static void draw_serial_divider(int x, int y, char value)
+static void draw_serial_divider(void)
 {
-    for (int bit = -1; bit <= 8; bit++) {
-        bool high = bit == 8 || (bit >= 0 && ((value >> bit) & 1));
-        display_fill_rect(x, y + (high ? 0 : 3), x + 3, y + (high ? 3 : 6), COL_ORANGE);
-        x += 4;
+    static const char text[] = "Hotspot";
+    const int cells = (sizeof(text) - 1) * 10;
+    int previous_y = HEADER_H;  // Serial idle is high.
+    for (int cell = 0; cell < cells; cell++) {
+        int bit = cell % 10;
+        bool high = bit == 9 || (bit > 0 && ((text[cell / 10] >> (bit - 1)) & 1));
+        int x0 = cell * LCD_H_RES / cells;
+        int x1 = (cell + 1) * LCD_H_RES / cells;
+        int y = HEADER_H + (high ? 0 : DIVIDER_H - 1);
+        display_fill_rect(x0, y, x1, y + 1, COL_ORANGE);
+        if (y != previous_y) {
+            display_fill_rect(x0, HEADER_H, x0 + 1, HEADER_H + DIVIDER_H, COL_ORANGE);
+        }
+        previous_y = y;
     }
 }
 
@@ -338,11 +350,13 @@ static void draw_rate_row(int y, const char *label, float rx_mbps, float tx_mbps
     display_draw_str(x + CHAR_W, y, "Mbit/s", COL_WHITE, COL_BLACK, 1);
 }
 
-static void draw_brand(void)
+static void draw_brand(bool ap_running)
 {
-    display_draw_str(0, 0, "MyPi", COL_WHITE, COL_BLACK, 1);
-    draw_serial_divider(30, 1, 'H');
-    display_draw_str(30, 9, "Hotspot", COL_WHITE, COL_BLACK, 1);
+    display_fill_rect(0, 0, LCD_H_RES, HEADER_H, COL_WHITE);
+    display_draw_str(4, (HEADER_H - CHAR_H * 2) / 2, "Hotspot", COL_BLACK, COL_WHITE, 2);
+    display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4,
+                           ap_running ? RGB565(0, 112, 64) : COL_GRAY);
+    draw_serial_divider();
 }
 
 static void draw_status(void)
@@ -360,8 +374,7 @@ static void draw_status(void)
     display_lock();
     display_fill_rect(0, 0, LCD_H_RES, UI_AREA_BOTTOM, COL_BLACK);
 
-    draw_brand();
-    if (ap.running) display_draw_wifi_icon(LCD_H_RES - 14, 14, COL_GREEN);
+    draw_brand(ap.running);
 
     // Row 1: uplink IP (large).
     bool sta_ip = d.wifi_state == WIFI_STATE_GOT_IP && d.ip[0] && strcmp(d.ip, "0.0.0.0") != 0;
@@ -445,14 +458,16 @@ static void draw_status(void)
 static void draw_wheel(void)
 {
     char preview[64], ch[5];
+    wifi_ap_info_t ap;
+    wifi_get_ap_info(&ap);
     const int range_count = (int)(sizeof(s_wheel_ranges) / sizeof(s_wheel_ranges[0]));
     display_lock();
     const char *value = s_input_password ? s_input_pass : s_input_ssid;
     make_preview(value, preview, sizeof(preview), s_input_password && !s_password_visible);
     int count = wheel_count(s_wheel.range);
     display_fill_screen(COL_BLACK);
-    draw_brand();
-    display_draw_str(0, LCD_V_RES * 7 / 100, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
+    draw_brand(ap.running);
+    display_draw_str(0, HEADER_H + DIVIDER_H, "Wi-Fi setup", COL_CYAN, COL_BLACK, 1);
 
     for (int i = 0; i < 2; i++) {
         char_wheel_rect_t r = s_wheel_layout.fields[i];
