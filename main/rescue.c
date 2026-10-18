@@ -1,10 +1,14 @@
 #include "rescue.h"
 
+#include <stdint.h>
 #include <stdio.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "eth.h"
+#include "logstore.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "profiles.h"
@@ -16,6 +20,64 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static rescue_state_t s_st = {.option = -1};
 static int s_pending = -1;          // option waiting to be applied
 static TaskHandle_t s_task;
+
+// Automatic C5 recovery (v0.8.6): the first C5 failure restarts the P4 (which also hard-resets
+// the C5 via its reset GPIO) instead of entering emergency mode. Only if the C5 fails again
+// before Wi-Fi came up properly is emergency mode entered. The counter lives in no-init RAM
+// so it survives esp_restart(); a power-on reset clears it.
+#define RETRY_MAGIC     0x52455452u     // "RETR"
+#define RETRY_MAX       1
+typedef struct {
+    uint32_t magic;
+    uint32_t count;     // automatic restarts since Wi-Fi last came up
+    uint32_t reason;    // reason of the last automatic restart
+} retry_t;
+static __NOINIT_ATTR retry_t s_retry;
+static bool s_retry_checked;
+static bool s_retry_pending;
+
+static void retry_check(void)
+{
+    if (s_retry_checked) return;
+    s_retry_checked = true;
+    esp_reset_reason_t rr = esp_reset_reason();
+    if (s_retry.magic != RETRY_MAGIC || rr == ESP_RST_POWERON || rr == ESP_RST_BROWNOUT || rr == ESP_RST_UNKNOWN ||
+        s_retry.count > RETRY_MAX) {
+        s_retry.magic = RETRY_MAGIC;
+        s_retry.count = 0;
+        s_retry.reason = RESCUE_REASON_NONE;
+    }
+}
+
+int rescue_auto_restarts(rescue_reason_t *last_reason)
+{
+    retry_check();
+    if (last_reason) *last_reason = (rescue_reason_t)s_retry.reason;
+    return (int)s_retry.count;
+}
+
+void rescue_c5_ok(void)
+{
+    retry_check();
+    if (s_retry.count) {
+        ESP_LOGI(TAG, "C5 recovered after %lu automatic restart(s) (last cause: %s)", (unsigned long)s_retry.count,
+                 rescue_reason_text((rescue_reason_t)s_retry.reason));
+    }
+    s_retry.count = 0;
+}
+
+static void retry_task(void *arg)
+{
+    rescue_reason_t reason = (rescue_reason_t)(uintptr_t)arg;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "automatic restart %lu/%d to recover the C5 (%s)", (unsigned long)s_retry.count,
+             RETRY_MAX, rescue_reason_text(reason));
+    ESP_LOGE(TAG, "=== %s ===", msg);
+    vTaskDelay(pdMS_TO_TICKS(500));     // let the log line reach the RAM ring
+    logstore_save_now(msg);             // Always keep the evidence (the RAM log is lost on restart)
+    logstore_before_restart(msg);
+    esp_restart();
+}
 
 const char *rescue_reason_text(rescue_reason_t r)
 {
@@ -76,6 +138,13 @@ static void apply(int option)
 
 static void rescue_task(void *arg)
 {
+    // Always keep a log of why emergency mode was entered (the store may still be mounting at boot).
+    char msg[96];
+    snprintf(msg, sizeof(msg), "emergency mode: %s (after %lu automatic restart(s))", rescue_reason_text(s_st.reason),
+             (unsigned long)s_retry.count);
+    for (int i = 0; i < 30 && logstore_save_now(msg) == ESP_ERR_INVALID_STATE; i++) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
     // Free the AP subnets first (the static options reuse them); radio off in the background.
     wifi_rescue_stop_ap();
     while (true) {
@@ -104,6 +173,26 @@ void rescue_select(int option)
 
 void rescue_request(rescue_reason_t reason)
 {
+    retry_check();
+    if (reason != RESCUE_REASON_SWIPE && !s_st.active) {
+        bool restart = false;
+        portENTER_CRITICAL(&s_mux);
+        if (s_retry_pending) {
+            portEXIT_CRITICAL(&s_mux);
+            return;     // restart already on its way
+        }
+        if (s_retry.count < RETRY_MAX) {
+            s_retry.count++;
+            s_retry.reason = reason;
+            s_retry_pending = restart = true;
+        }
+        portEXIT_CRITICAL(&s_mux);
+        if (restart) {
+            if (xTaskCreate(retry_task, "c5_retry", 4096, (void *)(uintptr_t)reason, 5, NULL) == pdPASS) return;
+            s_retry_pending = false;
+            ESP_LOGE(TAG, "Failed to create retry task - entering emergency mode");
+        }
+    }
     bool first = false;
     portENTER_CRITICAL(&s_mux);
     if (!s_st.active) {

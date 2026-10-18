@@ -9,7 +9,7 @@
  * Install a vprintf hook that mirrors every ESP_LOG line into an in-RAM ring
  * buffer (in PSRAM) while still printing to the UART console.
  *
- * The hook also feeds a small "crash tail" ring in no-init internal RAM that
+ * The hook also feeds a 32 KB "crash tail" ring in no-init PSRAM that
  * survives software resets, panics and watchdog resets (not power loss). The
  * previous session's tail is copied out here, before it is overwritten.
  */

@@ -21,7 +21,18 @@ No follow-up code is imported or newly marked hardware-tested by this checkpoint
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
 
-## v0.8.5 work in progress — 2026-10-18 (builds, not hardware-tested)
+## v0.8.6 work in progress — 2026-10-18 (builds, not hardware-tested)
+
+- v0.8.5 hardware result: Wi-Fi OTA OK on the first attempt (17.4 s, 0.65 Mbit/s, no SDIO DMA
+  allocation failures, min free internal heap 90 KB).
+- After a restart (before v0.8.5) the device sometimes came up in emergency mode; cause not
+  confirmed (no log). v0.8.6 restarts once automatically on a C5 failure and always saves a log.
+- LVGL heap, draw buffer and the (now 32 KB) crash tail moved to PSRAM: ~83 KB internal RAM freed.
+- Next: flash v0.8.6 via `/update`; if emergency mode or a "C5 auto restart" row appears, fetch
+  the saved log. Possible follow-ups: faster OTA (0.65 Mbit/s), display DMA bounce buffers in
+  PSRAM (~38 KB more), `esp_wifi_set_band_mode` called before Wi-Fi start.
+
+## v0.8.5 — 2026-10-18 (HW-tested: Wi-Fi OTA OK)
 
 - Wi-Fi OTA has failed on almost every attempt since v0.8.3/v0.8.4. The v0.8.4 upload log
   showed free internal heap 218K → 50K, `eh_sdio: dma_alloc(14336) failed; dropping read`,

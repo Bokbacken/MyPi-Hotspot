@@ -272,7 +272,7 @@ static void boot_recovery(void)
     const char *tail = logbuf_prev_tail(&flagged);
     if (tail && flagged) {
         char reason[96];
-        snprintf(reason, sizeof(reason), "crash tail of boot %lu (last ~8 KB before the reset)",
+        snprintf(reason, sizeof(reason), "crash tail of boot %lu (last ~32 KB before the reset)",
                  (unsigned long)(s_boot ? s_boot - 1 : 0));
         char end[96];
         snprintf(end, sizeof(end), "reset reason at boot %lu: %s", (unsigned long)s_boot, diag_reset_reason_name());

@@ -5,7 +5,25 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
-## 0.8.5 — Persistent logs in flash, OTA receive fixes (builds, not hardware-tested)
+## 0.8.6 — PSRAM for large buffers, automatic C5 restart before emergency mode (builds, not hardware-tested)
+- **Internal RAM freed (~83 KB):** the LVGL heap (`work_mem_int`, 64 KB), the LVGL draw buffer
+  (`s_pixels`, 9.6 KB) and the crash tail are now placed in PSRAM
+  (`SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY`, `SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY`,
+  `LV_ATTRIBUTE_LARGE_RAM_ARRAY` set from `main/CMakeLists.txt`). Internal DIRAM in use:
+  121 KB, 534 KB left. Internal RAM stays available for DMA, Wi-Fi/TCP and fast code.
+- **Crash tail raised 8 KB → 32 KB** (no-init PSRAM).
+- **Automatic C5 recovery:** a C5 failure (init fail/timeout, SDIO transport failure, health check)
+  now first saves the log and restarts the P4 once (the restart also resets the C5 via GPIO54).
+  Emergency mode is only entered if the C5 fails again before Wi-Fi has run for 5 minutes.
+  The counter survives the restart in no-init RAM and is cleared by power-on/brown-out.
+- **Emergency mode is always logged:** entering emergency mode saves a log
+  `emergency mode: <reason>` to flash. `/api/status` → `eth.rescue.auto_restarts` /
+  `last_auto_reason`; the Status page shows a "C5 auto restart" row only when one happened.
+- **v0.8.5 HW result:** Wi-Fi OTA succeeded on the first attempt (1 405 152 B in 17.4 s,
+  0.65 Mbit/s, longest gap 0.1 s, 0 timeouts, min free internal heap 90 KB, no
+  `eh_sdio dma_alloc` failures).
+
+## 0.8.5 — Persistent logs in flash, OTA receive fixes (HW-tested: Wi-Fi OTA OK)
 - **Persistent logs (`logstore.c`):** the unused `storage` partition (FAT, ~3.9 MB) is mounted
   at `/store`; logs go to `/store/logs`. An OTA upload (P4 or C5) is **always** captured
   (8 KB of context before the start, appended every 2 s) and committed as a saved log, so it

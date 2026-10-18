@@ -6,7 +6,8 @@
 // choices for the Ethernet port: DHCP client, or a static <AP subnet>.32/24 for
 // each of the 4 AP subnets (AP_SUBNET_BASE). The Wi-Fi AP is stopped (avoids a
 // subnet clash); the web UI stays reachable on the Ethernet IP. Runtime only:
-// a reboot returns to normal operation.
+// a reboot returns to normal operation. Since v0.8.6 a C5 failure first triggers one
+// automatic restart (see rescue_request()).
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -35,8 +36,17 @@ typedef struct {
     esp_err_t err;      // result of the last apply (ESP_OK if fine)
 } rescue_state_t;
 
-/** Enter rescue mode (idempotent, callable from any task, not from an ISR). */
+/**
+ * Enter rescue mode (idempotent, callable from any task, not from an ISR).
+ * C5 reasons (not the swipe) first trigger ONE automatic restart of the P4, which also resets
+ * the C5; emergency mode is only entered if the C5 fails again before rescue_c5_ok() is called.
+ * Both the automatic restart and emergency mode always save a log to flash.
+ */
 void rescue_request(rescue_reason_t reason);
+/** Wi-Fi came up properly: re-arm the automatic C5 restart. */
+void rescue_c5_ok(void);
+/** Automatic C5 restarts since Wi-Fi last came up, and the cause of the last one. */
+int rescue_auto_restarts(rescue_reason_t *last_reason);
 bool rescue_active(void);
 /** Select an option (applied asynchronously by the rescue task). */
 void rescue_select(int option);

@@ -1,6 +1,7 @@
 #include "ui_lvgl_port.h"
 
 #include "display.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "mypi_ui/lvgl_view.h"
@@ -15,7 +16,8 @@ static lv_display_t *s_display;
 static lv_indev_t *s_indev;
 static mypi_ui_lvgl_view_t s_view;
 static bool s_render_active;
-_Alignas(LV_DRAW_BUF_ALIGN) static uint16_t s_pixels[LCD_H_RES * 20];
+// Partial draw buffer in PSRAM (v0.8.6): LVGL renders here, flush() copies into the PSRAM framebuffer.
+_Alignas(LV_DRAW_BUF_ALIGN) EXT_RAM_BSS_ATTR static uint16_t s_pixels[LCD_H_RES * 20];
 
 // Latest touch sample, written by the touch owner task and read by the LVGL indev on the UI task.
 static portMUX_TYPE s_touch_mux = portMUX_INITIALIZER_UNLOCKED;

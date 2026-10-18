@@ -9,7 +9,14 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
-## Hotspot v0.8.5 validation (pending hardware)
+## Hotspot v0.8.6 validation (pending hardware)
+
+1. Update via `/update`; confirm normal boot, LCD/touch and web UI (LVGL heap now in PSRAM).
+2. If emergency mode or a "C5 auto restart" row appears, read the `automatic restart` /
+   `emergency mode` log under Diagnostics → *Saved logs (flash)*.
+3. Repeat Wi-Fi OTA and compare speed with v0.8.5 (0.65 Mbit/s).
+
+## Hotspot v0.8.5 validation (done: Wi-Fi OTA OK on the first attempt)
 
 1. Wi-Fi OTA via `/update` with v0.8.5; on failure read the saved log under Diagnostics →
    *Saved logs (flash)* after the reboot. Check the `OTA mem:` lines (internal heap, largest DMA block).
