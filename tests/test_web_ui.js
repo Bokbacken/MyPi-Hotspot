@@ -213,7 +213,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
     assert.ok(optHtml.includes(`<select id='${id}'`), id);
     assert.ok(optHtml.indexOf(`<select id='${id}'`) < optHtml.indexOf("<h3>TCP / LwIP / NAT</h3>"), `${id} in radio grid`);
   }
-  assert.ok(/<option value='40'>HT40 \(default\)<\/option>\s*"?\s*"?<option value='20'>HT20<\/option>/.test(optHtml));
+  assert.ok(/<option value='40'>HT40 - 11n \(default\)<\/option>\s*"?\s*"?<option value='20'>HT20 - ac\/ax allowed<\/option>/.test(optHtml));
   assert.ok(/<option value='40'>40 MHz \(default\)<\/option>\s*"?\s*"?<option value='50'>50 MHz<\/option>/.test(optHtml));
   assert.ok(/50 MHz automatically falls back to 40 MHz/.test(optHtml));
   assert.ok(!/SDIO is fixed at 40|width is automatic/i.test(optHtml), "old footer text gone");
@@ -391,7 +391,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
   await ui.optLoad(doc, fetchFn);
   assert.equal(ids["opt-bw-5g"].value, "40");
   assert.equal(ids["opt-sdio"].value, "40");
-  assert.equal(ids["opt-bw-5g-st"].textContent, "active 5 GHz HT40 (2.4 GHz always HT20); STA link now HT40");
+  assert.equal(ids["opt-bw-5g-st"].textContent, "active 5 GHz HT40 (11n, ac/ax off on 5 GHz) (2.4 GHz always HT20); STA link now HT40");
   assert.equal(ids["opt-sdio-st"].textContent, "active 40 MHz (bus 40 MHz)");
   assert.deepEqual(ui.OPT_SELECTS.slice(-2), [["opt-bw-5g", "bw_5g"], ["opt-sdio", "sdio_mhz"]]);
   ids["opt-bw-5g"].value = "20"; ids["opt-sdio"].value = "50";

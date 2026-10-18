@@ -802,6 +802,14 @@ static void apply_proto(wifi_interface_t ifx, uint8_t mask)
     // Never leave a band without protocols (e.g. only "a" ticked): use the default set for it.
     if (p2 == 0) p2 = RADIO_PROTO_DEFAULT & (RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N);
     if (p5 == 0) p5 = RADIO_PROTO_DEFAULT & (RADIO_PROTO_A | RADIO_PROTO_N | RADIO_PROTO_AC);
+    // v0.9.6: the C5 only does 40 MHz in 11an mode; with 11ac/11ax enabled on 5 GHz the driver
+    // silently stays at 20 MHz (ESP-IDF esp_wifi_set_bandwidths(): "When the interface supports
+    // 11AX/11AC, it only supports setting WIFI_BW20"). So HT40 on 5 GHz means a/n only there.
+    // 2.4 GHz protocols are untouched (2.4 GHz is HT20 anyway).
+    if (opt_bw_5g() == RADIO_BW_40 && (p5 & (RADIO_PROTO_AC | RADIO_PROTO_AX))) {
+        p5 = (p5 & ~(RADIO_PROTO_AC | RADIO_PROTO_AX)) | RADIO_PROTO_A | RADIO_PROTO_N;
+        ESP_LOGI(TAG, "%s 5 GHz HT40 selected: 11ac/11ax disabled on 5 GHz (C5 does 40 MHz only in 11an)", name);
+    }
     wifi_protocols_t p = {.ghz_2g = p2, .ghz_5g = p5};
     esp_err_t err = esp_wifi_set_protocols(ifx, &p);
     ESP_LOGI(TAG, "esp_wifi_set_protocols(%s, 2.4G 0x%02x / 5G 0x%02x): %s", name, p2, p5, esp_err_to_name(err));
@@ -1149,6 +1157,9 @@ static void wifi_task(void *arg)
     apply_ps(opt_ps_mode());
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.sta_proto);
+    // v0.9.6: a protocol change can reset the width, so re-apply it after the protocols.
+    apply_bw(WIFI_IF_STA, opt_bw_5g());
+    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, opt_bw_5g());
 
     // Main loop: connect requests, reconnect with exponential back-off, RSSI refresh.
     uint32_t backoff_s = 1;

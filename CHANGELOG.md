@@ -5,6 +5,15 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.6 — 2026-10-18 (builds, not hardware-tested)
+
+- Fix: 5 GHz HT40 never came up (link stayed HT20 even against an 80 MHz AP). The ESP32-C5 only
+  supports 40 MHz in 11an mode; with 11ac/11ax enabled on 5 GHz the driver keeps 20 MHz. With
+  `bw_5g` = HT40, `apply_proto()` now drops 11ac/11ax from the 5 GHz protocol set (a/n only);
+  HT20 keeps the selected protocols. 2.4 GHz is unchanged (HT20, b/g/n[/ax]).
+- The width is re-applied after the post-start protocol re-apply (a protocol change can reset it).
+- Optimize labels: "HT40 - 11n (default)" / "HT20 - ac/ax allowed", with an explanation.
+
 ## 0.9.5 — 2026-10-18 (builds, not hardware-tested)
 
 - Optimize page, Wi-Fi radio grid: two new dropdowns, both need a reboot.

@@ -260,7 +260,8 @@
       "opt-lwip-core-st": "active " + (OPT_CORE_NAMES[a.lwip_core] || "?") + pend("lwip_core"),
       "opt-napt-max-st": "active " + (OPT_NAPT_MAX_ENTRIES[a.napt_max] || "?") + " sessions" + pend("napt_max"),
       "opt-napt-tcp-to-st": "active " + (OPT_NAPT_TCP_TO_NAMES[a.napt_tcp_to] || "?"),
-      "opt-bw-5g-st": "active 5 GHz HT" + a.bw_5g + " (2.4 GHz always HT20)" +
+      "opt-bw-5g-st": "active 5 GHz HT" + a.bw_5g + (Number(a.bw_5g) === 40 ? " (11n, ac/ax off on 5 GHz)" : "") +
+        " (2.4 GHz always HT20)" +
         (Number(a.bw_5g) !== Number(d.bw_5g) ? " - saved HT" + d.bw_5g + ", reboot pending" : ""),
       "opt-sdio-st": sdioStatus(d),
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +
