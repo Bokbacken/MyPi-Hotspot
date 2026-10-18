@@ -203,14 +203,23 @@ NVS namespace `mypi_opt` (`u8` unless noted):
 | `ps_mode` | `ps_mode` | 0 none / 1 min modem / 2 max modem | 0 | runtime (`esp_wifi_set_ps`); Off recommended in AP+STA |
 | `beacon_ms` (`u16`) | `ap_beacon_ms` | 100 / 200 / 300 | 100 | boot (`wifi_config_t.ap.beacon_interval`) |
 | `country` (string) | `country` | SE / EU / US / JP | SE | boot (`esp_wifi_set_country`, manual policy) |
+| `tcp_wnd_kb` | `tcp_wnd_kb` (v0.9.4) | 32 / 64 / 128 | 32 | boot (`mypi_tcp_wnd`, lwIP `TCP_WND` via `main/lwip_tune.h`) |
+| `lwip_core` | `lwip_core` (v0.9.4) | 0 auto / 1 core 0 / 2 core 1 | 0 | boot (`__wrap_sys_thread_new` pins the tcpip task) |
+| `napt_max` | `napt_max` (v0.9.4) | 5 / 10 / 20 = 512 / 1024 / 2048 entries | 5 | boot (`IP_NAPT_MAX`) |
+| `napt_tcp_to` | `napt_tcp_to` (v0.9.4) | 2 = 2 h / 1 = 1 h / 0 = 30 min | 2 | runtime (`IP_NAPT_TIMEOUT_MS_TCP`) |
 | `sta_last_ch` | internal (v0.9.3) | 1-14, 36-64 / 100-144 / 149-177 (step 4) | - | written on STA connect when changed; AP channel at boot |
 | `sdio_mhz` | none since v0.9.3 | 40 / 50 | 40 | stored value ignored, SDIO always starts at 40 MHz |
 | `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
 | `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
 
-Removed in v0.9.3 (keys erased at boot, fixed values used): `napt` (always on, per AP profile
-NAT flag), `log_lvl` (Info), `lwip_core` (auto, no pinning), `napt_max` (512 entries via
-`main/lwip_tune.h`), `napt_tcp_to` (2 h); `tcp_kb` since v0.9.1.
+Removed (keys erased at boot, fixed values used): `napt` (always on, per AP profile NAT flag) and
+`log_lvl` (Info) since v0.9.3; `tcp_kb` since v0.9.1. `lwip_core`, `napt_max` and `napt_tcp_to`
+were removed in v0.9.3 and are settings again since v0.9.4, together with the new `tcp_wnd_kb`.
+
+TCP window (v0.9.4): lwIP is built with `-include main/lwip_tune.h`, which redefines
+`CONFIG_LWIP_TCP_WND_DEFAULT` (and so lwipopts.h `TCP_WND`) as `mypi_tcp_wnd`. In preprocessor
+`#if` checks the expression evaluates to 131072 (the 128 KB maximum, allowed by `WND_SCALE` /
+`RCV_SCALE=2`); in C code it is the boot value. Only TCP terminated on the P4 uses it.
 
 Radio blob (`mypi` / `radio`, `wifi.c`): since v0.9.3 only `band_mode` and one protocol mask
 shared by STA and AP are used (`sta_proto == ap_proto`; old blobs are merged with
@@ -238,11 +247,11 @@ second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
 after a successful C5 init, or manually via the web UI.
 
 Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
-true when `ap_beacon_ms` or `country` changed), `GET/POST /api/radio` (`band_mode`, shared `proto`,
+true when `ap_beacon_ms`, `country`, `tcp_wnd_kb`, `lwip_core` or `napt_max` changed), `GET/POST /api/radio` (`band_mode`, shared `proto`,
 `last_sta_channel`), `POST /api/clear_emergency`,
 `POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
 dropdowns.
 
-v0.9.1: the TCP window option (`tcp_kb`) was removed; the lwIP window is fixed at 32 KB
-(`CONFIG_LWIP_TCP_WND_DEFAULT=32768`) and the obsolete key is erased at boot. The Wi-Fi
+v0.9.1: the TCP window option (`tcp_kb`) was removed and the obsolete key is erased at boot
+(v0.9.4 brings the window back as `tcp_wnd_kb`, now applied at runtime). The Wi-Fi
 protocol / band / width controls moved from System to the top of Optimize; 2.4 GHz stays HT20.

@@ -226,8 +226,8 @@ static void test_touch_geometry(void)
 
 // --- opt_config (v0.9.0): mock NVS key/value store ---
 typedef struct {
-    char key[12][16];
-    uint8_t val[12];
+    char key[16][16];
+    uint8_t val[16];
     int n, commits, fail_set;
     char key16[4][16];
     uint16_t val16[4];
@@ -252,7 +252,7 @@ static int mock_set(void *ctx, const char *key, uint8_t v)
     for (int i = 0; i < m->n; i++) {
         if (strcmp(m->key[i], key) == 0) { m->val[i] = v; return 0; }
     }
-    assert(m->n < 12 && strlen(key) < 16);
+    assert(m->n < 16 && strlen(key) < 16);
     strcpy(m->key[m->n], key);
     m->val[m->n++] = v;
     return 0;
@@ -320,13 +320,26 @@ static void test_opt_config(void)
     memset(&d, 0xAA, sizeof(d));
     opt_config_load_from(&st, &c);
     assert(c.wifi_tx_power_dbm == 0 && c.ps_mode == 0 && c.ap_beacon_ms == 100 && strcmp(c.country, "SE") == 0);
+    assert(c.tcp_wnd_kb == 32 && c.lwip_core == 0 && c.napt_max == 5 && c.napt_tcp_to == 2);
     assert(opt_config_valid(&c));
     opt_config_load_from(NULL, &d);
     assert(memcmp(&c, &d, sizeof(c)) == 0);
 
     // Fixed values of the settings removed in v0.9.3.
-    assert(OPT_FIXED_NAPT_ENTRIES == 512 && OPT_FIXED_NAPT_TCP_S == 7200 && OPT_FIXED_LOG_LVL == 2);
-    assert(OPT_DEFAULT_SDIO_MHZ == 40);
+    assert(OPT_FIXED_LOG_LVL == 2 && OPT_DEFAULT_SDIO_MHZ == 40);
+
+    // v0.9.4 TCP / LwIP / NAT helpers.
+    assert(opt_tcp_wnd_bytes(32) == 32768 && opt_tcp_wnd_bytes(64) == 65536 && opt_tcp_wnd_bytes(128) == 131072);
+    assert(opt_tcp_wnd_bytes(0) == 32768 && opt_tcp_wnd_bytes(100) == 32768);
+    assert(opt_napt_max_entries(5) == 512 && opt_napt_max_entries(10) == 1024 && opt_napt_max_entries(20) == 2048);
+    assert(opt_napt_max_entries(7) == 512);
+    assert(opt_napt_tcp_timeout_s(2) == 7200 && opt_napt_tcp_timeout_s(1) == 3600 && opt_napt_tcp_timeout_s(0) == 1800);
+    assert(opt_lwip_core_id(0) == -1 && opt_lwip_core_id(1) == 0 && opt_lwip_core_id(2) == 1);
+    // Restored keys are not in the obsolete list (they would be erased at boot).
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) {
+        assert(strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_TCP_WND_KB) && strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_LWIP_CORE) &&
+               strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_NAPT_MAX) && strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_NAPT_TCP_TO));
+    }
 
     // Country table (wifi_country_t values).
     assert(OPT_COUNTRY_COUNT == 4);
@@ -337,16 +350,22 @@ static void test_opt_config(void)
     k = opt_country_find("EU"); assert(k && k->nchan == 13 && k->max_tx_power == 20);
     assert(!opt_country_find("XX") && !opt_country_find(NULL));
 
-    // Save round-trip (only the 4 remaining fields are written).
+    // Save round-trip.
     c.wifi_tx_power_dbm = 14; c.ps_mode = 2; c.ap_beacon_ms = 300; memcpy(c.country, "JP", 3);
+    c.tcp_wnd_kb = 128; c.lwip_core = 2; c.napt_max = 20; c.napt_tcp_to = 0;
     assert(opt_config_save_to(&st, &c) == 0 && m.commits == 1);
     opt_config_load_from(&st, &d);
     assert(d.wifi_tx_power_dbm == 14 && d.ps_mode == 2 && d.ap_beacon_ms == 300 && strcmp(d.country, "JP") == 0);
+    assert(d.tcp_wnd_kb == 128 && d.lwip_core == 2 && d.napt_max == 20 && d.napt_tcp_to == 0);
     uint8_t raw;
     uint16_t raw16;
     char rawcc[4];
     assert(mock_get(&m, OPT_KEY_TX_DBM, &raw) == 0 && raw == 14);
     assert(mock_get(&m, OPT_KEY_PS_MODE, &raw) == 0 && raw == 2);
+    assert(mock_get(&m, OPT_KEY_TCP_WND_KB, &raw) == 0 && raw == 128);
+    assert(mock_get(&m, OPT_KEY_LWIP_CORE, &raw) == 0 && raw == 2);
+    assert(mock_get(&m, OPT_KEY_NAPT_MAX, &raw) == 0 && raw == 20);
+    assert(mock_get(&m, OPT_KEY_NAPT_TCP_TO, &raw) == 0 && raw == 0);
     assert(mock_get16(&m, OPT_KEY_BEACON_MS, &raw16) == 0 && raw16 == 300);
     assert(mock_getstr(&m, OPT_KEY_COUNTRY, rawcc, sizeof(rawcc)) == 0 && strcmp(rawcc, "JP") == 0);
     assert(mock_get(&m, OPT_KEY_SDIO_MHZ, &raw) != 0);           // removed settings are never written
@@ -368,6 +387,10 @@ static void test_opt_config(void)
     bad = d; memcpy(bad.country, "SEX", 3); assert(!opt_config_valid(&bad));   // not NUL-terminated
     bad = d; bad.wifi_tx_power_dbm = 1; assert(!opt_config_valid(&bad));
     bad = d; bad.wifi_tx_power_dbm = 22; assert(!opt_config_valid(&bad));
+    bad = d; bad.tcp_wnd_kb = 48;       assert(!opt_config_valid(&bad));
+    bad = d; bad.lwip_core = 3;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_max = 15;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_tcp_to = 3;       assert(!opt_config_valid(&bad));
     m.fail_set = 1;
     assert(opt_config_save_to(&st, &d) == -2);
     m.fail_set = 0;
@@ -377,17 +400,25 @@ static void test_opt_config(void)
     mock_set(&m, OPT_KEY_PS_MODE, 7);
     mock_set16(&m, OPT_KEY_BEACON_MS, 250);
     mock_setstr(&m, OPT_KEY_COUNTRY, "XX");
+    mock_set(&m, OPT_KEY_TCP_WND_KB, 100);
+    mock_set(&m, OPT_KEY_LWIP_CORE, 9);
+    mock_set(&m, OPT_KEY_NAPT_MAX, 7);
+    mock_set(&m, OPT_KEY_NAPT_TCP_TO, 5);
     opt_config_load_from(&st, &d);
     assert(d.wifi_tx_power_dbm == 0 && d.ps_mode == 0 && d.ap_beacon_ms == 100 && strcmp(d.country, "SE") == 0);
+    assert(d.tcp_wnd_kb == 32 && d.lwip_core == 0 && d.napt_max == 5 && d.napt_tcp_to == 2);
     mock_setstr(&m, OPT_KEY_COUNTRY, "SWED");                  // too long for the 3-byte field
     opt_config_load_from(&st, &d);
     assert(strcmp(d.country, "SE") == 0);
 
-    // Reboot required only for the boot-only fields (beacon interval, country).
+    // Reboot required only for the boot-only fields (beacon, country, TCP window, LwIP core, NAPT size).
     opt_config_t a, s2;
     opt_config_defaults(&a);
-    s2 = a; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1;
+    s2 = a; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1; s2.napt_tcp_to = 0;
     assert(!opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.tcp_wnd_kb = 64;  assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.lwip_core = 1;    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.napt_max = 10;    assert(opt_config_reboot_required(&a, &s2));
     s2 = a; s2.ap_beacon_ms = 200;
     assert(opt_config_reboot_required(&a, &s2));
     s2 = a; memcpy(s2.country, "US", 3);

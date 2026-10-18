@@ -6,8 +6,13 @@
 //   ap_beacon_ms      AP beacon interval 100/200/300 (boot: wifi_config_t.ap.beacon_interval)
 //   country           "SE"/"EU"/"US"/"JP", esp_wifi_set_country() before esp_wifi_start() (boot)
 // Band and the shared STA/AP protocol mask live in the radio blob (wifi.c, POST /api/radio).
+// TCP / LwIP / NAT (v0.9.4, see lwip_tune.h):
+//   tcp_wnd_kb        lwIP TCP window 32/64/128 KB (boot; only TCP terminated on the P4)
+//   lwip_core         tcpip task pinning 0 auto / 1 core 0 / 2 core 1 (boot: sys_thread_new wrapper)
+//   napt_max          NAPT table 5/10/20 = 512/1024/2048 entries (boot)
+//   napt_tcp_to       NAPT idle TCP timeout 2 = 2 h / 1 = 1 h / 0 = 30 min (runtime)
 // Fixed defaults (no UI, old keys erased at boot): SDIO 40 MHz, NAPT on (per AP profile NAT flag),
-// log level info, tcpip core auto, NAPT table 512 entries, NAPT TCP timeout 2 h, TCP window 32 KB.
+// log level info.
 // Plus the emergency flag and the last STA channel (u8 "sta_last_ch", AP channel hint at boot).
 
 #include <stdbool.h>
@@ -22,7 +27,7 @@ void opt_config_load(void);
 void opt_config_get_active(opt_config_t *out);
 void opt_config_get_saved(opt_config_t *out);
 /**
- * Validate, store and apply the runtime fields (TX power, STA power save).
+ * Validate, store and apply the runtime fields (TX power, STA power save, NAPT TCP timeout).
  * *reboot_required = a boot-only field differs from the active value.
  */
 esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required);

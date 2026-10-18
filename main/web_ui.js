@@ -139,9 +139,13 @@
 
   // --- Optimize page (v0.9.0, trimmed v0.9.3): GET/POST /api/opt + /api/radio, POST /api/clear_emergency ---
   // Same field names and defaults as main/opt_config_core.h. Band and the shared STA/AP protocol mask
-  // live in the radio settings (/api/radio); everything else that used to be here now runs on defaults.
-  const OPT_FIELDS = ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country"];
+  // live in the radio settings (/api/radio). v0.9.4: TCP window, LwIP core and NAPT settings are back.
+  const OPT_FIELDS = ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country",
+    "tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to"];
   const OPT_PS_NAMES = ["Off", "Min modem", "Max modem"];
+  const OPT_CORE_NAMES = ["Auto (no pin)", "Core 0", "Core 1"];
+  const OPT_NAPT_MAX_ENTRIES = { 5: 512, 10: 1024, 20: 2048 };
+  const OPT_NAPT_TCP_TO_NAMES = ["30 min", "1 h", "2 h"];
   const OPT_BAND_NAMES = ["Both (2.4 + 5 GHz)", "2.4 GHz only", "5 GHz only"];
   // Same bits as RADIO_PROTO_* in main/wifi.h (ax allowed again since v0.9.3, known C5 fw issue).
   const PROTO_BITS = { a: 16, b: 1, g: 2, n: 4, ac: 32, ax: 64 };
@@ -150,14 +154,19 @@
   const PROTO_5G = 0x74;   // a/n/ac/ax
 
   function optDefaults() {
-    return { wifi_tx_power_dbm: 0, ps_mode: 0, ap_beacon_ms: 100, country: "SE" };
+    return { wifi_tx_power_dbm: 0, ps_mode: 0, ap_beacon_ms: 100, country: "SE",
+      tcp_wnd_kb: 32, lwip_core: 0, napt_max: 5, napt_tcp_to: 2 };
   }
 
-  // AP beacon interval and country are only read at boot (same rule as opt_config_reboot_required()).
+  // AP beacon interval, country, TCP window, LwIP core and NAPT max sessions are only read at boot
+  // (same rule as opt_config_reboot_required()); the NAPT TCP timeout applies immediately.
   function optRebootRequired(active, saved) {
     return !!active && !!saved &&
       (Number(active.ap_beacon_ms) !== Number(saved.ap_beacon_ms) ||
-       String(active.country) !== String(saved.country));
+       String(active.country) !== String(saved.country) ||
+       Number(active.tcp_wnd_kb) !== Number(saved.tcp_wnd_kb) ||
+       Number(active.lwip_core) !== Number(saved.lwip_core) ||
+       Number(active.napt_max) !== Number(saved.napt_max));
   }
 
   /** Protocol bitmask from the a/b/g/n/ac/ax checkboxes (0 = none checked = default). */
@@ -200,7 +209,8 @@
   }
 
   const OPT_SELECTS = [["opt-tx", "wifi_tx_power_dbm"], ["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"],
-    ["opt-country", "country"]];
+    ["opt-country", "country"], ["opt-tcp-wnd", "tcp_wnd_kb"], ["opt-lwip-core", "lwip_core"],
+    ["opt-napt-max", "napt_max"], ["opt-napt-tcp-to", "napt_tcp_to"]];
 
   function optFillForm(document, d) {
     for (const [id, k] of OPT_SELECTS) {
@@ -243,6 +253,10 @@
       "opt-ps-st": (OPT_PS_NAMES[a.ps_mode] || "?") + " - Recommended: Off in AP+STA mode",
       "opt-beacon-st": "active " + a.ap_beacon_ms + " ms" + pend("ap_beacon_ms"),
       "opt-country-st": "active " + a.country + pend("country"),
+      "opt-tcp-wnd-st": "active " + a.tcp_wnd_kb + " KB" + pend("tcp_wnd_kb"),
+      "opt-lwip-core-st": "active " + (OPT_CORE_NAMES[a.lwip_core] || "?") + pend("lwip_core"),
+      "opt-napt-max-st": "active " + (OPT_NAPT_MAX_ENTRIES[a.napt_max] || "?") + " sessions" + pend("napt_max"),
+      "opt-napt-tcp-to-st": "active " + (OPT_NAPT_TCP_TO_NAMES[a.napt_tcp_to] || "?"),
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +
         (d.emergency_mode_now ? " (emergency mode active now)" : "") + "; auto-clears on successful boot",
     };

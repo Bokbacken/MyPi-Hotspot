@@ -5,10 +5,11 @@
 // dependencies, so the host test (tests/test_ui_primitives.c) runs it against a mock store;
 // main/opt_config.c binds it to NVS.
 //
-// v0.9.3: the Optimize page was trimmed back. Only TX power, STA power save, AP beacon interval and
-// country remain here (band + protocol live in the radio blob, wifi.c). SDIO clock, log level, NAPT
-// switch, LwIP core, NAPT table size and NAPT TCP timeout run on fixed defaults; their old NVS keys
-// are ignored and erased at boot (OPT_OBSOLETE_KEYS).
+// v0.9.3: the Optimize page was trimmed back to TX power, STA power save, AP beacon interval and
+// country (band + protocol live in the radio blob, wifi.c). SDIO clock, log level and the NAPT
+// switch run on fixed defaults; their old NVS keys are ignored and erased at boot (OPT_OBSOLETE_KEYS).
+// v0.9.4: TCP window, LwIP tcpip core, NAPT table size and NAPT TCP timeout are settings again
+// (the v0.9.2 hardware tests were invalid - the client was connected to a different AP).
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,15 +25,16 @@
 #define OPT_KEY_SDIO_TRIAL  "sdio_try"      // 1 = 50 MHz boot started but not yet confirmed
 #define OPT_KEY_EMERGENCY   "emerg"         // 1 = emergency mode was entered after a C5 failure
 #define OPT_KEY_STA_LAST_CH "sta_last_ch"   // v0.9.3: last channel the STA connected on (1-14, 5 GHz 36-177)
+#define OPT_KEY_TCP_WND_KB  "tcp_wnd_kb"    // v0.9.4: lwIP TCP window 32 | 64 | 128 KB (boot)
+#define OPT_KEY_LWIP_CORE   "lwip_core"     // tcpip task pinning: 0 auto (no pin), 1 core 0, 2 core 1 (boot)
+#define OPT_KEY_NAPT_MAX    "napt_max"      // NAPT table size code: 5 = 512, 10 = 1024, 20 = 2048 entries (boot)
+#define OPT_KEY_NAPT_TCP_TO "napt_tcp_to"   // NAPT idle TCP timeout code: 2 = 2 h, 1 = 1 h, 0 = 30 min (runtime)
 
 // Keys of removed settings, erased once at boot so stale values can never be applied.
 static const char *const OPT_OBSOLETE_KEYS[] = {
-    "tcp_kb",       // TCP window (v0.9.0, removed v0.9.1)
+    "tcp_kb",       // v0.9.0 TCP window (never applied, removed v0.9.1; v0.9.4 uses OPT_KEY_TCP_WND_KB)
     "napt",         // NAPT master switch (removed v0.9.3: always on, per AP profile NAT flag)
     "log_lvl",      // global log level (removed v0.9.3: info)
-    "lwip_core",    // tcpip core pinning (removed v0.9.3: auto)
-    "napt_max",     // NAPT table size (removed v0.9.3: 512)
-    "napt_tcp_to",  // NAPT TCP timeout (removed v0.9.3: 2 h)
 };
 #define OPT_OBSOLETE_KEY_COUNT ((int)(sizeof(OPT_OBSOLETE_KEYS) / sizeof(OPT_OBSOLETE_KEYS[0])))
 
@@ -41,9 +43,11 @@ static const char *const OPT_OBSOLETE_KEYS[] = {
 #define OPT_DEFAULT_PS_MODE     0
 #define OPT_DEFAULT_BEACON_MS   100
 #define OPT_DEFAULT_COUNTRY     "SE"
+#define OPT_DEFAULT_TCP_WND_KB  32      // == CONFIG_LWIP_TCP_WND_DEFAULT (32768)
+#define OPT_DEFAULT_LWIP_CORE   0
+#define OPT_DEFAULT_NAPT_MAX    5
+#define OPT_DEFAULT_NAPT_TCP_TO 2
 // Fixed values of the removed settings.
-#define OPT_FIXED_NAPT_ENTRIES  512
-#define OPT_FIXED_NAPT_TCP_S    7200
 #define OPT_FIXED_LOG_LVL       2       // info
 
 typedef struct {
@@ -51,6 +55,10 @@ typedef struct {
     uint8_t ps_mode;            // 0..2 == WIFI_PS_NONE / WIFI_PS_MIN_MODEM / WIFI_PS_MAX_MODEM
     uint16_t ap_beacon_ms;      // 100 | 200 | 300
     char country[3];            // OPT_COUNTRIES[].cc
+    uint8_t tcp_wnd_kb;         // 32 | 64 | 128
+    uint8_t lwip_core;          // 0 auto, 1 core 0, 2 core 1
+    uint8_t napt_max;           // 5 | 10 | 20 (see opt_napt_max_entries)
+    uint8_t napt_tcp_to;        // 2 | 1 | 0 (see opt_napt_tcp_timeout_s)
 } opt_config_t;
 
 /** Regulatory domain per country code (2.4 GHz channel range, max TX power in dBm). */
@@ -97,16 +105,50 @@ static inline void opt_config_defaults(opt_config_t *c)
     c->ps_mode = OPT_DEFAULT_PS_MODE;
     c->ap_beacon_ms = OPT_DEFAULT_BEACON_MS;
     memcpy(c->country, OPT_DEFAULT_COUNTRY, sizeof(c->country));
+    c->tcp_wnd_kb = OPT_DEFAULT_TCP_WND_KB;
+    c->lwip_core = OPT_DEFAULT_LWIP_CORE;
+    c->napt_max = OPT_DEFAULT_NAPT_MAX;
+    c->napt_tcp_to = OPT_DEFAULT_NAPT_TCP_TO;
 }
 
 static inline bool opt_tx_valid(int v) { return v == 0 || (v >= 2 && v <= 21); }
 static inline bool opt_ps_valid(int v) { return v >= 0 && v <= 2; }
 static inline bool opt_beacon_valid(int v) { return v == 100 || v == 200 || v == 300; }
+static inline bool opt_tcp_wnd_valid(int v) { return v == 32 || v == 64 || v == 128; }
+static inline bool opt_lwip_core_valid(int v) { return v >= 0 && v <= 2; }
+static inline bool opt_napt_max_valid(int v) { return v == 5 || v == 10 || v == 20; }
+static inline bool opt_napt_tcp_to_valid(int v) { return v >= 0 && v <= 2; }
+
+/** TCP window in bytes for a tcp_wnd_kb value (default size for unknown values). */
+static inline uint32_t opt_tcp_wnd_bytes(uint8_t kb)
+{
+    return (uint32_t)(opt_tcp_wnd_valid(kb) ? kb : OPT_DEFAULT_TCP_WND_KB) * 1024u;
+}
+
+/** NAPT table entries for a napt_max code (5/10/20 -> 512/1024/2048), default size for unknown codes. */
+static inline uint16_t opt_napt_max_entries(uint8_t code)
+{
+    return code == 20 ? 2048 : code == 10 ? 1024 : 512;
+}
+
+/** NAPT idle TCP session timeout in seconds for a napt_tcp_to code (2 -> 2 h, 1 -> 1 h, 0 -> 30 min). */
+static inline uint32_t opt_napt_tcp_timeout_s(uint8_t code)
+{
+    return code == 0 ? 1800 : code == 1 ? 3600 : 7200;
+}
+
+/** FreeRTOS core id for a lwip_core code: -1 = no pinning (tskNO_AFFINITY), else 0 or 1. */
+static inline int opt_lwip_core_id(uint8_t code)
+{
+    return code == 1 ? 0 : code == 2 ? 1 : -1;
+}
 
 static inline bool opt_config_valid(const opt_config_t *c)
 {
     return opt_tx_valid(c->wifi_tx_power_dbm) && opt_ps_valid(c->ps_mode) && opt_beacon_valid(c->ap_beacon_ms) &&
-           memchr(c->country, 0, sizeof(c->country)) && opt_country_find(c->country);
+           memchr(c->country, 0, sizeof(c->country)) && opt_country_find(c->country) &&
+           opt_tcp_wnd_valid(c->tcp_wnd_kb) && opt_lwip_core_valid(c->lwip_core) &&
+           opt_napt_max_valid(c->napt_max) && opt_napt_tcp_to_valid(c->napt_tcp_to);
 }
 
 /** Missing or invalid keys fall back to the defaults (field by field); obsolete keys are never read. */
@@ -121,6 +163,10 @@ static inline void opt_config_load_from(const opt_store_t *s, opt_config_t *c)
     if (s->get_u8(s->ctx, OPT_KEY_PS_MODE, &v) == 0 && opt_ps_valid(v)) c->ps_mode = v;
     if (s->get_u16(s->ctx, OPT_KEY_BEACON_MS, &w) == 0 && opt_beacon_valid(w)) c->ap_beacon_ms = w;
     if (s->get_str(s->ctx, OPT_KEY_COUNTRY, cc, sizeof(cc)) == 0 && opt_country_find(cc)) memcpy(c->country, cc, sizeof(cc));
+    if (s->get_u8(s->ctx, OPT_KEY_TCP_WND_KB, &v) == 0 && opt_tcp_wnd_valid(v)) c->tcp_wnd_kb = v;
+    if (s->get_u8(s->ctx, OPT_KEY_LWIP_CORE, &v) == 0 && opt_lwip_core_valid(v)) c->lwip_core = v;
+    if (s->get_u8(s->ctx, OPT_KEY_NAPT_MAX, &v) == 0 && opt_napt_max_valid(v)) c->napt_max = v;
+    if (s->get_u8(s->ctx, OPT_KEY_NAPT_TCP_TO, &v) == 0 && opt_napt_tcp_to_valid(v)) c->napt_tcp_to = v;
 }
 
 /** Returns 0 on success, -1 for an invalid config (nothing written), else the backend error. */
@@ -132,14 +178,23 @@ static inline int opt_config_save_to(const opt_store_t *s, const opt_config_t *c
     if ((e = s->set_u8(s->ctx, OPT_KEY_PS_MODE, c->ps_mode)) != 0) return e;
     if ((e = s->set_u16(s->ctx, OPT_KEY_BEACON_MS, c->ap_beacon_ms)) != 0) return e;
     if ((e = s->set_str(s->ctx, OPT_KEY_COUNTRY, c->country)) != 0) return e;
+    if ((e = s->set_u8(s->ctx, OPT_KEY_TCP_WND_KB, c->tcp_wnd_kb)) != 0) return e;
+    if ((e = s->set_u8(s->ctx, OPT_KEY_LWIP_CORE, c->lwip_core)) != 0) return e;
+    if ((e = s->set_u8(s->ctx, OPT_KEY_NAPT_MAX, c->napt_max)) != 0) return e;
+    if ((e = s->set_u8(s->ctx, OPT_KEY_NAPT_TCP_TO, c->napt_tcp_to)) != 0) return e;
     return s->commit(s->ctx);
 }
 
-/** AP beacon interval and country are only read at boot; TX power and power save apply at runtime. */
+/**
+ * AP beacon interval, country, TCP window, LwIP core and NAPT table size are only read at boot;
+ * TX power, power save and the NAPT TCP timeout apply at runtime.
+ */
 static inline bool opt_config_reboot_required(const opt_config_t *active, const opt_config_t *saved)
 {
     return active->ap_beacon_ms != saved->ap_beacon_ms ||
-           strncmp(active->country, saved->country, sizeof(active->country)) != 0;
+           strncmp(active->country, saved->country, sizeof(active->country)) != 0 ||
+           active->tcp_wnd_kb != saved->tcp_wnd_kb || active->lwip_core != saved->lwip_core ||
+           active->napt_max != saved->napt_max;
 }
 
 /**

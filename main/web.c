@@ -112,7 +112,8 @@ MYPI_BRAND_HEADER
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
-// AP beacon interval, country. Checkboxes and dropdowns only (no text input). Logic in web_ui.js.
+// AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below. Checkboxes and
+// dropdowns only (no text input). Logic in web_ui.js.
 "<section class='page' data-page='optimize'><h2>Optimize</h2>"
 "<div id='opt-banner' class='opt-banner' hidden><span>Some changes require reboot</span> "
 "<button type='button' onclick='reboot()'>Reboot now</button></div>"
@@ -139,11 +140,25 @@ MYPI_BRAND_HEADER
 "<span class='opt-l'>Wi-Fi country / region</span><span class='opt-c'><select id='opt-country'><option value='SE'>SE (Sweden)</option>"
 "<option value='EU'>EU (Europe)</option><option value='US'>US (United States)</option><option value='JP'>JP (Japan)</option></select></span>"
 "<span class='opt-s' id='opt-country-st'></span>"
+"</div><h3>TCP / LwIP / NAT</h3><div class='opt-grid'>"
+"<span class='opt-l'>TCP window</span><span class='opt-c'><select id='opt-tcp-wnd'><option value='32'>32 KB (default)</option>"
+"<option value='64'>64 KB</option><option value='128'>128 KB</option></select></span><span class='opt-s' id='opt-tcp-wnd-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Receive window for TCP that ends on the P4 itself (web UI, OTA, iperf to the device). "
+"NAT traffic of AP clients is not affected. 128 KB uses more internal RAM. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>LwIP task core affinity</span><span class='opt-c'><select id='opt-lwip-core'><option value='0'>Auto (no pin, default)</option>"
+"<option value='1'>Core 0</option><option value='2'>Core 1</option></select></span><span class='opt-s' id='opt-lwip-core-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Pin the LwIP (tcpip) task to a CPU core. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT max sessions</span><span class='opt-c'><select id='opt-napt-max'><option value='5'>512 (default)</option>"
+"<option value='10'>1024</option><option value='20'>2048</option></select></span><span class='opt-s' id='opt-napt-max-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Size of the NAT table. Larger = more client connections, more RAM. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT TCP timeout</span><span class='opt-c'><select id='opt-napt-tcp-to'><option value='2'>2 h (default)</option>"
+"<option value='1'>1 h</option><option value='0'>30 min</option></select></span><span class='opt-s' id='opt-napt-tcp-to-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Idle TCP session lifetime in the NAT table. Shorter = faster recycling. Applies immediately.</small></span><span class='opt-s'></span>"
 "</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
-"<p><small>TX power and STA power save apply immediately; band, protocols, AP beacon interval and country after a reboot. "
+"<p><small>TX power, STA power save and NAPT TCP timeout apply immediately; band, protocols, AP beacon interval, country, "
+"TCP window, LwIP core and NAPT max sessions after a reboot. "
 "STA and AP share one radio: the AP always follows the STA channel and band. Width is automatic: 2.4 GHz is locked to HT20, "
-"5 GHz uses HT40. Everything else runs on defaults (SDIO 40 MHz, NAPT on with 512 sessions / 2 h TCP timeout, log level Info, "
-"LwIP core auto, TCP window 32 KB).</small></p></section>"
+"5 GHz uses HT40. Everything else runs on defaults (SDIO 40 MHz, NAPT on, log level Info).</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
 // v0.9.3: emergency flag moved here from the Optimize page.
@@ -1427,6 +1442,10 @@ static void add_opt_cfg(cJSON *o, const opt_config_t *c)
     cJSON_AddNumberToObject(o, "ps_mode", c->ps_mode);
     cJSON_AddNumberToObject(o, "ap_beacon_ms", c->ap_beacon_ms);
     cJSON_AddStringToObject(o, "country", c->country);
+    cJSON_AddNumberToObject(o, "tcp_wnd_kb", c->tcp_wnd_kb);
+    cJSON_AddNumberToObject(o, "lwip_core", c->lwip_core);
+    cJSON_AddNumberToObject(o, "napt_max", c->napt_max);
+    cJSON_AddNumberToObject(o, "napt_tcp_to", c->napt_tcp_to);
 }
 
 // GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
@@ -1447,7 +1466,8 @@ static esp_err_t api_opt_get(httpd_req_t *req)
     return send_json(req, j);
 }
 
-// POST /api/opt {wifi_tx_power_dbm, ps_mode, ap_beacon_ms, country} - missing keys keep the saved
+// POST /api/opt {wifi_tx_power_dbm, ps_mode, ap_beacon_ms, country, tcp_wnd_kb, lwip_core, napt_max,
+// napt_tcp_to} - missing keys keep the saved
 // value (removed v0.9.3 keys such as sdio_freq_mhz/napt/log_level are ignored). Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
 static esp_err_t api_opt_post(httpd_req_t *req)
 {
@@ -1457,6 +1477,10 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     bool ok = true;
     radio_field(j, "wifi_tx_power_dbm", 0, 21, &c.wifi_tx_power_dbm, &ok);
     radio_field(j, "ps_mode", 0, 2, &c.ps_mode, &ok);
+    radio_field(j, "tcp_wnd_kb", 32, 128, &c.tcp_wnd_kb, &ok);   // 32|64|128, checked by opt_config_valid()
+    radio_field(j, "lwip_core", 0, 2, &c.lwip_core, &ok);
+    radio_field(j, "napt_max", 5, 20, &c.napt_max, &ok);         // 5|10|20, checked by opt_config_valid()
+    radio_field(j, "napt_tcp_to", 0, 2, &c.napt_tcp_to, &ok);
     if (cJSON_GetObjectItemCaseSensitive(j, "ap_beacon_ms")) {
         int b = jint(j, "ap_beacon_ms", -1);
         if (opt_beacon_valid(b)) c.ap_beacon_ms = (uint16_t)b; else ok = false;
@@ -1470,7 +1494,8 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     esp_err_t err = ok && opt_config_valid(&c) ? opt_config_save(&c, &reboot) : ESP_ERR_INVALID_ARG;
     if (err != ESP_OK) {
         return send_result(req, err, NULL, "wifi_tx_power_dbm: 0 or 2-21, ps_mode: 0-2, ap_beacon_ms: 100|200|300, "
-                           "country: SE|EU|US|JP");
+                           "country: SE|EU|US|JP, tcp_wnd_kb: 32|64|128, lwip_core: 0-2, "
+                           "napt_max: 5|10|20, napt_tcp_to: 0-2");
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);

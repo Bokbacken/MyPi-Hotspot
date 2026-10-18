@@ -134,16 +134,18 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.deepEqual(ui.optDefaults(), {
     wifi_tx_power_dbm: +def("TX_DBM"), ps_mode: +def("PS_MODE"), ap_beacon_ms: +def("BEACON_MS"),
     country: core.match(/#define OPT_DEFAULT_COUNTRY\s+"(\w+)"/)[1],
+    tcp_wnd_kb: +def("TCP_WND_KB"), lwip_core: +def("LWIP_CORE"), napt_max: +def("NAPT_MAX"), napt_tcp_to: +def("NAPT_TCP_TO"),
   });
-  assert.deepEqual(ui.OPT_FIELDS, ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country"]);
-  // Removed settings run on fixed defaults and their old NVS keys are erased at boot.
-  assert.ok(/#define OPT_FIXED_NAPT_ENTRIES\s+512/.test(core) && /#define OPT_FIXED_NAPT_TCP_S\s+7200/.test(core));
-  for (const k of ["tcp_kb", "napt", "log_lvl", "lwip_core", "napt_max", "napt_tcp_to"]) {
-    assert.ok(core.match(/OPT_OBSOLETE_KEYS\[\] = \{([\s\S]*?)\};/)[1].includes(`"${k}"`), `obsolete key ${k}`);
-  }
+  assert.deepEqual(ui.OPT_FIELDS, ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country",
+    "tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to"]);
+  // Removed settings: old NVS keys are erased at boot; the v0.9.4 restored keys must not be in that list.
+  const obsolete = core.match(/OPT_OBSOLETE_KEYS\[\] = \{([\s\S]*?)\};/)[1];
+  for (const k of ["tcp_kb", "napt", "log_lvl"]) assert.ok(obsolete.includes(`"${k}"`), `obsolete key ${k}`);
+  for (const k of ["tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to"]) assert.ok(!obsolete.includes(`"${k}"`), `restored key ${k}`);
   const optC = fs.readFileSync(path.join(__dirname, "../main/opt_config.c"), "utf8");
   assert.ok(/nvs_erase_key\(h, OPT_OBSOLETE_KEYS\[i\]\)/.test(optC));
-  assert.ok(!/__wrap_sys_thread_new|xTaskCreatePinnedToCore/.test(optC), "LwIP core pinning removed");
+  assert.ok(/__wrap_sys_thread_new/.test(optC) && /xTaskCreatePinnedToCore/.test(optC), "LwIP core pinning restored");
+  assert.ok(/mypi_tcp_wnd = opt_tcp_wnd_bytes\(c->tcp_wnd_kb\)/.test(optC), "TCP window applied at boot");
 
   // web.c: GET /api/opt emits exactly these field names (+ read-only emergency_active), POST replies
   // reboot_required from opt_config_save(), the endpoints are registered.
@@ -157,20 +159,25 @@ assert.equal(togglePassword(lone, loneBtn), false);
   }
   assert.ok(/opt_emergency_set\(false\)/.test(webC.match(/api_clear_emergency_post[\s\S]*?\n\}/)[0]));
   const optPost = webC.match(/static esp_err_t api_opt_post[\s\S]*?\n\}/)[0];
-  assert.ok(!/sdio_freq_mhz"|log_level"|lwip_core"|napt_max"|napt_tcp_to"|"napt"/.test(optPost), "removed fields not accepted");
+  assert.ok(!/sdio_freq_mhz"|log_level"|"napt"/.test(optPost), "removed fields not accepted");
+  for (const k of ["tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to"]) assert.ok(optPost.includes(`"${k}"`), `POST accepts ${k}`);
   // /api/radio: one shared protocol mask + band; GET reports the last STA channel.
   const radioPost = webC.match(/static esp_err_t api_radio_post[\s\S]*?\n\}/)[0];
   assert.ok(/"proto"/.test(radioPost) && /"band_mode"/.test(radioPost) && /opt_proto_merge/.test(radioPost));
   assert.ok(!/"sta_bw"|"ap_bw"|"tx_power_dbm"|"ap_dtim"/.test(radioPost), "width/TX/DTIM not settable");
   assert.ok(/"last_sta_channel", opt_sta_last_ch\(\)/.test(webC));
-  // Reboot-required rule mirrors opt_config_reboot_required(): beacon interval, country.
+  // Reboot-required rule mirrors opt_config_reboot_required(): beacon, country, TCP window, LwIP core, NAPT size.
   const rule = core.match(/opt_config_reboot_required\([^)]*\)\s*\{([\s\S]*?)\n\}/)[1];
   assert.ok(/active->ap_beacon_ms != saved->ap_beacon_ms/.test(rule) && /strncmp\(active->country, saved->country/.test(rule) &&
-    !/ps_mode|tx_power|sdio|lwip|napt/.test(rule));
+    /tcp_wnd_kb/.test(rule) && /lwip_core/.test(rule) && /napt_max/.test(rule) &&
+    !/ps_mode|tx_power|sdio|napt_tcp_to/.test(rule));
   const d0 = ui.optDefaults();
   assert.equal(ui.optRebootRequired(d0, { ...d0, ap_beacon_ms: 200 }), true);
   assert.equal(ui.optRebootRequired(d0, { ...d0, country: "US" }), true);
-  assert.equal(ui.optRebootRequired(d0, { ...d0, wifi_tx_power_dbm: 14, ps_mode: 2 }), false);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, wifi_tx_power_dbm: 14, ps_mode: 2, napt_tcp_to: 0 }), false);
+  for (const [k, v] of [["tcp_wnd_kb", 128], ["lwip_core", 1], ["napt_max", 20]]) {
+    assert.equal(ui.optRebootRequired(d0, { ...d0, [k]: v }), true, k);
+  }
 
   // Shared protocol selector helpers (bits == RADIO_PROTO_* in wifi.h).
   const wifiH = fs.readFileSync(path.join(__dirname, "../main/wifi.h"), "utf8");
@@ -195,7 +202,12 @@ assert.equal(togglePassword(lone, loneBtn), false);
   const optHtml = webC.match(/data-page='optimize'[\s\S]*?<\/section>/)[0];
   for (const id of ["opt-band", "opt-tx", "opt-ps", "opt-beacon", "opt-country"]) assert.ok(optHtml.includes(`<select id='${id}'`), id);
   for (const k of ["a", "b", "g", "n", "ac", "ax"]) assert.ok(optHtml.includes(`<input type='checkbox' id='opt-proto-${k}'>`), k);
-  for (const gone of ["opt-sdio", "opt-lwip-core", "opt-napt-max", "opt-napt-tcp-to", "opt-napt'", "opt-log", "id='rsb'", "id='rab'",
+  // v0.9.4: TCP / LwIP / NAT section below the radio items, dropdowns only.
+  assert.ok(optHtml.indexOf("<h3>TCP / LwIP / NAT</h3>") > optHtml.indexOf("<select id='opt-country'"));
+  for (const id of ["opt-tcp-wnd", "opt-lwip-core", "opt-napt-max", "opt-napt-tcp-to"]) assert.ok(optHtml.includes(`<select id='${id}'`), id);
+  assert.ok(/32 KB \(default\)[\s\S]*64 KB[\s\S]*128 KB/.test(optHtml));
+  assert.ok(/512 \(default\)[\s\S]*1024[\s\S]*2048/.test(optHtml) && /2 h \(default\)[\s\S]*1 h[\s\S]*30 min/.test(optHtml));
+  for (const gone of ["opt-sdio", "opt-napt'", "opt-log", "id='rsb'", "id='rab'",
     "ap-dtim", "ht-warn", "opt-emerg"]) {
     assert.ok(!optHtml.includes(gone), `removed from Optimize: ${gone}`);
   }
@@ -215,16 +227,17 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.ok(/beacon_interval = opt_ap_beacon_ms\(\)/.test(wifiC));
   assert.ok(/csa_count = 3/.test(wifiC) && /opt_ap_channel_pick\(/.test(wifiC) && /opt_sta_last_ch_store\(/.test(wifiC));
   assert.ok(/esp_wifi_get_channel\(/.test(wifiC.match(/static void refresh_ap_channel[\s\S]*?\n\}/)[0]));
-  // lwIP: fixed NAPT values, no thread wrapper any more.
+  // lwIP: NAPT size/timeout and the TCP window come from variables, tcpip thread wrapper restored.
   const tune = fs.readFileSync(path.join(__dirname, "../main/lwip_tune.h"), "utf8");
   assert.ok(/#define IP_NAPT_MAX\s+\(mypi_napt_max_entries\)/.test(tune) && /#define IP_NAPT_TIMEOUT_MS_TCP\s+\(mypi_napt_tcp_timeout_ms\)/.test(tune));
+  assert.ok(/#undef CONFIG_LWIP_TCP_WND_DEFAULT/.test(tune) && /#define CONFIG_LWIP_TCP_WND_DEFAULT \(mypi_tcp_wnd \? mypi_tcp_wnd : 131072\)/.test(tune));
   const mainCm = fs.readFileSync(path.join(__dirname, "../main/CMakeLists.txt"), "utf8");
-  assert.ok(/-include\$\{CMAKE_CURRENT_LIST_DIR\}\/lwip_tune\.h/.test(mainCm) && !/-Wl,--wrap=sys_thread_new/.test(mainCm));
+  assert.ok(/-include\$\{CMAKE_CURRENT_LIST_DIR\}\/lwip_tune\.h/.test(mainCm) && /-Wl,--wrap=sys_thread_new/.test(mainCm));
   const sdk = fs.readFileSync(path.join(__dirname, "../sdkconfig.defaults"), "utf8");
   assert.ok(/^CONFIG_LWIP_TCP_MSS=1460$/m.test(sdk) && /^CONFIG_LWIP_TCP_WND_DEFAULT=32768$/m.test(sdk));
-  for (const src of [webC, fs.readFileSync(path.join(__dirname, "../main/web_ui.js"), "utf8")]) {
-    assert.ok(!/tcp_window|opt-tcp|TCP_KB\b/.test(src), "no TCP window option left");
-  }
+  // 128 KB needs window scaling and a recvmbox >= 131072/1460 + 2 = 92.
+  assert.ok(/^CONFIG_LWIP_WND_SCALE=y$/m.test(sdk) && /^CONFIG_LWIP_TCP_RCV_SCALE=2$/m.test(sdk));
+  assert.ok(+sdk.match(/^CONFIG_LWIP_TCP_RECVMBOX_SIZE=(\d+)$/m)[1] >= 92);
 
   // Optimize section: checkboxes, dropdowns and buttons only - no text input.
   const inputs = [...optHtml.matchAll(/<input[^>]*>/g)].map((m) => m[0]);
@@ -247,7 +260,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
       const b = JSON.parse(opt.body);
       for (const k of Object.keys(b)) assert.ok(ui.OPT_FIELDS.includes(k), `unknown field ${k}`);
       dev.saved = { ...dev.saved, ...b };
-      for (const k of ["wifi_tx_power_dbm", "ps_mode"]) dev.active[k] = dev.saved[k];   // runtime fields
+      for (const k of ["wifi_tx_power_dbm", "ps_mode", "napt_tcp_to"]) dev.active[k] = dev.saved[k];   // runtime fields
       return reply({ ok: true, reboot_required: ui.optRebootRequired(dev.active, dev.saved) });
     }
     if (url === "/api/radio" && !opt) {
@@ -267,6 +280,8 @@ assert.equal(togglePassword(lone, loneBtn), false);
     classList: { set: new Set(), toggle(n, on) { if (on) this.set.add(n); else this.set.delete(n); } }, ...extra });
   const ids = {};
   for (const id of ["opt-band", "opt-tx", "opt-ps", "opt-beacon", "opt-country", "opt-banner", "opt-msg", "opt-emerg-btn",
+    "opt-tcp-wnd", "opt-lwip-core", "opt-napt-max", "opt-napt-tcp-to",
+    "opt-tcp-wnd-st", "opt-lwip-core-st", "opt-napt-max-st", "opt-napt-tcp-to-st",
     "opt-band-st", "opt-proto-st", "opt-tx-st", "opt-ps-st", "opt-beacon-st", "opt-country-st", "opt-emerg-st", "opt-form",
     "opt-proto-a", "opt-proto-b", "opt-proto-g", "opt-proto-n", "opt-proto-ac", "opt-proto-ax"]) ids[id] = el();
   ids["opt-banner"].hidden = true;
@@ -283,6 +298,11 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ids["opt-beacon"].value, "100");
   assert.equal(ids["opt-country"].value, "SE");
   assert.match(ids["opt-ps-st"].textContent, /Recommended: Off in AP\+STA mode/);
+  assert.equal(ids["opt-tcp-wnd"].value, "32");
+  assert.equal(ids["opt-napt-max"].value, "5");
+  assert.equal(ids["opt-tcp-wnd-st"].textContent, "active 32 KB");
+  assert.equal(ids["opt-napt-max-st"].textContent, "active 512 sessions");
+  assert.equal(ids["opt-napt-tcp-to-st"].textContent, "active 2 h");
   assert.match(ids["opt-proto-st"].textContent, /default/);
   assert.equal(ids["opt-banner"].hidden, true);
   assert.equal(ids["opt-emerg-btn"].disabled, true);
@@ -333,6 +353,15 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(dev.calls.filter((x) => x[0] === "/api/clear_emergency" && x[1] === "POST").length, 1);
   assert.match(ids["opt-emerg-st"].textContent, /^clear/);
   assert.equal(ids["opt-emerg-btn"].disabled, true);
+
+  // v0.9.4: TCP window 128 KB -> reboot pending; NAPT TCP timeout applies at once.
+  ids["opt-tcp-wnd"].value = "128"; ids["opt-napt-tcp-to"].value = "0";
+  const p9 = await ui.optSave(doc, fetchFn);
+  assert.equal(p9.reboot_required, true);
+  assert.equal(dev.saved.tcp_wnd_kb, 128);
+  assert.equal(dev.active.napt_tcp_to, 0);
+  assert.match(ids["opt-tcp-wnd-st"].textContent, /active 32 KB - saved 128, reboot pending/);
+  assert.equal(ids["opt-napt-tcp-to-st"].textContent, "active 30 min");
 
   console.log("Web UI serial, routing, signal and Optimize tests passed");
 })().catch((e) => { console.error(e); process.exit(1); });

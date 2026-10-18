@@ -5,6 +5,25 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.4 — 2026-10-18 (builds, not hardware-tested)
+
+- The TCP / LwIP / NAT settings are back on the Optimize page, in a new section "TCP / LwIP / NAT"
+  below the radio settings (dropdowns only). The v0.9.1/v0.9.2 "no improvement" hardware results
+  were invalid: the test client was connected to a different AP than the MyPi device.
+  - TCP window (`tcp_wnd_kb`): 32 / 64 / 128 KB, default 32, reboot required. Now really applied:
+    `main/lwip_tune.h` replaces `CONFIG_LWIP_TCP_WND_DEFAULT` inside lwIP with the variable
+    `mypi_tcp_wnd`, set by `opt_config_load()` before the tcpip task starts (v0.9.0's `tcp_kb` was
+    display-only). Affects only TCP that ends on the P4 (web UI, OTA, iperf to the device); NAT
+    forwarded client traffic is not affected. 128 KB pins more internal RAM (see the v0.8.5 OTA note).
+  - LwIP tcpip task core (`lwip_core`): Auto / Core 0 / Core 1, reboot required (`sys_thread_new`
+    wrapper restored, `-Wl,--wrap=sys_thread_new`).
+  - NAPT max sessions (`napt_max`): 512 / 1024 / 2048, reboot required.
+  - NAPT TCP timeout (`napt_tcp_to`): 2 h / 1 h / 30 min, applied immediately.
+- The four keys are no longer in the obsolete-key list, so they are not erased at boot. `tcp_kb`,
+  `napt` and `log_lvl` stay obsolete; SDIO clock and log level stay fixed (40 MHz, Info).
+- Unchanged from 0.9.3: band, shared protocol, TX power, power save, beacon, country,
+  `sta_last_ch`, `csa_count = 3`, emergency flag on Debug. Partition table unchanged (OTA is enough).
+
 ## 0.9.3 — 2026-10-18 (builds, not hardware-tested)
 
 - Wi-Fi APSTA channel handling (single C5 radio, AP always follows the STA):

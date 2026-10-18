@@ -9,6 +9,22 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.9.4 validation (TCP / LwIP / NAT options back, not hardware-tested)
+
+1. Make sure the test client is on the MyPi AP: SSID is the MyPi AP SSID, the client's gateway is
+   the MyPi AP address, and the client appears in the device's client list. (The v0.9.1/v0.9.2
+   results were invalid because the client was on another AP.)
+2. OTA to 0.9.4 (partition table unchanged). Boot log has a `TCP/LwIP/NAT` line with
+   `TCP window 32768 bytes, tcpip core auto, NAPT table 512 entries, NAPT TCP timeout 7200 s`.
+3. Baseline: run the same test 3 times with defaults and note the results.
+4. Change one setting at a time, Apply & Save, reboot, check the boot log, repeat the test:
+   - TCP window 64 KB, then 128 KB (only affects TCP ending on the P4: iperf to the device, web UI,
+     OTA upload). Watch free heap during an OTA with 128 KB; go back to 32/64 KB if SDIO
+     `dma_alloc failed` appears.
+   - LwIP core: Core 0, then Core 1 (boot log: `LwIP tcpip task pinned to core N`).
+   - NAPT max sessions / TCP timeout: only matter with many client connections.
+5. Merge PR #17 to main only after these tests.
+
 ## Hotspot v0.9.3 validation (trimmed Optimize, APSTA channel, not hardware-tested)
 
 1. OTA to 0.9.3 (partition table unchanged). Boot log: `Removed obsolete NVS key ...` once for
