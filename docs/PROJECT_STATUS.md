@@ -21,6 +21,15 @@ No follow-up code is imported or newly marked hardware-tested by this checkpoint
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
 
+## v0.8.7 — 2026-10-18 (builds, not hardware-tested)
+
+- Text input rebuilt as a reusable LVGL module, `mypi_kbd` (Companion-style scroll wheel,
+  placement and size given by the caller, glyph set filtered against `mypi_font_14`).
+- The Wi-Fi password page now uses it full screen; the old framebuffer input is removed.
+- Font coverage: only `å ä ö Å Ä Ö` of the Latin list are available in `mypi_font_14`.
+- Next: test on hardware — drag feel (step = half row height), swipe/tap, BACK/DEL/NEXT/OK,
+  connecting with a password and with an empty password (open network).
+
 ## v0.8.6 — 2026-10-18 (HW-tested, merged to main: PRs #12–#15)
 
 - Hardware result: P4 OTA and C5 OTA both succeeded over the Wi-Fi STA uplink.

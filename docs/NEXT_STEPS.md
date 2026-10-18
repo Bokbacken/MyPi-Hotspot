@@ -9,6 +9,21 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.8.7 validation (keyboard module, not hardware-tested)
+
+1. Wi-Fi → choose a network without a profile → the keyboard opens full screen.
+2. Check drag up/down on the wheel (one character per half row), swipe left/right (range),
+   tab taps, taps on the outer rows, and BACK / DEL / NEXT / OK.
+3. OK with 1–7 bytes must show a hint; 8–63 bytes or empty (open network) must save and connect.
+4. If the drag feels too fast/slow, tune `step_px` in `wheel_event()` (`main/mypi_kbd.c`).
+
+## Keyboard follow-ups
+
+- **`MYPI_KBD_STYLE_FULLKEY`** (reserved in `mypi_kbd.h`): a real on-screen keyboard for
+  considerably larger screens, behind the same create/callback API so callers do not change.
+- Extend `mypi_font_14` (or add a larger font for the current wheel row) if more Latin
+  letters (é è ü ß …) are needed; the keyboard picks them up automatically.
+
 ## Hotspot v0.8.6 validation (done: P4 and C5 OTA over STA OK; emergency-mode path not yet observed)
 
 1. Update via `/update`; confirm normal boot, LCD/touch and web UI (LVGL heap now in PSRAM).

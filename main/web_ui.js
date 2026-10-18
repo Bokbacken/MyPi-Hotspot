@@ -108,8 +108,38 @@
     return !!isShell && !hidden;
   }
 
+  // Show/hide toggle (v0.8.8): flips one input between type="password" and type="text".
+  function togglePassword(input, button) {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    button.textContent = show ? "\u{1F512} Hide" : "\u{1F441} Show";
+    button.setAttribute("aria-pressed", show ? "true" : "false");
+    button.title = show ? "Hide password" : "Show password";
+    return show;
+  }
+
+  // Adds a small Show/Hide button right after every password field on the page.
+  function addPasswordToggles(document) {
+    const inputs = Array.from(document.querySelectorAll("input[type=password]"));
+    for (const input of inputs) {
+      if (input.dataset.pwToggle) continue;
+      input.dataset.pwToggle = "1";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "pw-toggle";
+      button.textContent = "\u{1F441} Show";
+      button.title = "Show password";
+      button.setAttribute("aria-pressed", "false");
+      if (input.id) button.setAttribute("aria-controls", input.id);
+      button.addEventListener("click", () => togglePassword(input, button));
+      input.insertAdjacentElement("afterend", button);
+    }
+    return inputs.length;
+  }
+
   function start(document) {
     drawDividers(document);
+    addPasswordToggles(document);
     const isShell = !!showPage(document, root.location && root.location.hash);
     if (isShell) {
       root.addEventListener("hashchange", () => showPage(document, root.location.hash));
@@ -124,7 +154,7 @@
     }
   }
 
-  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus };
+  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {
