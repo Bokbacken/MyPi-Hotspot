@@ -30,6 +30,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "touch.h"
+#include "ui_lvgl_port.h"
 
 static const char *TAG = "main";
 
@@ -125,9 +126,13 @@ void app_main(void)
             if (was_pressed && n >= 3) {
                 was_pressed = false;   // Treat as finger lifted; don't draw a stale tap
                 dragging = false;
+                ui_lvgl_port_touch_feed(false, 0, 0);
             }
             continue;
         }
+        // Thin LVGL input adapter: publish the rotation-corrected sample for the UI task's
+        // pointer indev. Tap/swipe/rescue routing below stays with this loop (OTA > rescue > UI).
+        ui_lvgl_port_touch_feed(pt.pressed && !diag_ota_ui_visible(), pt.x, pt.y);
         if (diag_ota_ui_visible()) {
             // OTA view owns the panel: ignore touches (no drawing, no tap/drag events).
             was_pressed = pt.pressed;

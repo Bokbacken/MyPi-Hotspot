@@ -29,6 +29,13 @@ static inline int mypi_uart_x(int x, size_t bit_index, int bit_width)
     return x + (int)bit_index * bit_width;
 }
 
+// Fractional bit position: spreads total_bits evenly over width pixels starting at x.
+static inline int mypi_uart_x_span(int x, size_t bit_index, size_t total_bits, int width)
+{
+    if (!total_bits) return x;
+    return x + (int)(bit_index * (size_t)width / total_bits);
+}
+
 static inline int mypi_uart_y(int high_y, int low_y, uint8_t level)
 {
     return level ? high_y : low_y;

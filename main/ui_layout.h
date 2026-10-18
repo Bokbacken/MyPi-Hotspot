@@ -15,6 +15,18 @@
 #define MYPI_UI_MENU_ROW_H  34
 #define MYPI_UI_MENU_GAP    3
 
+// RSSI color gradient: 20 linear steps from red (step 0, <= -80 dBm) to green (step 19, >= -40 dBm).
+#define MYPI_RSSI_COLOR_STEPS 20
+#define MYPI_RSSI_RED_DBM     (-80)
+#define MYPI_RSSI_GREEN_DBM   (-40)
+
+static inline int mypi_rssi_color_step(int rssi)
+{
+    int step = (rssi - MYPI_RSSI_RED_DBM) * (MYPI_RSSI_COLOR_STEPS - 1) /
+               (MYPI_RSSI_GREEN_DBM - MYPI_RSSI_RED_DBM);
+    return step < 0 ? 0 : (step > MYPI_RSSI_COLOR_STEPS - 1 ? MYPI_RSSI_COLOR_STEPS - 1 : step);
+}
+
 static inline int mypi_ui_row_hit(int y, int y0, int height, int gap, int count)
 {
     if (y < y0 || height <= 0 || gap < 0 || count <= 0) return -1;

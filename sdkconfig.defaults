@@ -108,3 +108,6 @@ CONFIG_WIFI_RMT_RX_BA_WIN=64
 # Host-side ESP-Hosted SDIO queues (default 20): more room for uplink bursts.
 CONFIG_ESP_HOSTED_HOST_SDIO_TX_Q_SIZE=64
 CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE=64
+# LVGL is the standard UI path (status viewport + pointer indev); UTF-8 labels required.
+CONFIG_LV_TXT_ENC_UTF8=y
+CONFIG_LV_USE_LABEL=y
