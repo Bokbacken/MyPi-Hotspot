@@ -5,6 +5,22 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.4 — Wi-Fi OTA: less traffic during upload, upload diagnostics (builds, not hardware-tested)
+- **Analysis:** LVGL is not run during OTA (the UI task draws only the OTA view and does
+  not call `lv_timer_handler()`; touch is not fed to LVGL), so LVGL is unlikely to slow
+  the network directly. Changes below remove the extra traffic that v0.8.3 added
+  around the upload and log what happens, so the real cause can be confirmed on hardware.
+- **Web header:** the 5 s `/api/status` RSSI poll now runs only on the main page shell
+  (and not while the tab is hidden). `/update`, `/c5update` and `/pins` read the header
+  RSSI once on load and no longer send requests to the single-task HTTP server while it
+  is busy with an upload.
+- **Wi-Fi task:** the periodic STA RSSI RPC to the C5 (`esp_wifi_sta_get_ap_info`, every 5 s)
+  is skipped while the OTA view is active, keeping the SDIO link free for upload data.
+- **OTA diagnostics in `/api/log`:** peer and local IP of the upload (shows Wi-Fi STA, AP or
+  Ethernet path), Mbit/s and free internal heap at every 10 %, and a summary on success,
+  stall or abort (bytes, seconds, Mbit/s, longest gap between chunks, receive timeouts,
+  minimum free internal heap, `httpd_req_recv` return code).
+
 ## 0.8.3 — LVGL standard, touch → LVGL, paged web UI (builds, not hardware-tested)
 - **LVGL is the standard and only UI path.** Removed `CONFIG_MYPI_UI_LVGL` and the
   `sdkconfig.lvgl` overlay; `ui_lvgl_port.c`, `mypi_ui/lvgl_view.c` are always built and

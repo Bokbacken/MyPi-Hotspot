@@ -101,18 +101,30 @@
     box.style.color = signal.color;
   }
 
+  // Only the main page shell refreshes the header RSSI periodically. Standalone pages
+  // (/update, /c5update, /pins) read it once: the single-task HTTP server is busy with
+  // the upload during OTA, and extra requests would only queue up behind it.
+  function shouldPollStatus(isShell, hidden) {
+    return !!isShell && !hidden;
+  }
+
   function start(document) {
     drawDividers(document);
-    if (showPage(document, root.location && root.location.hash)) {
+    const isShell = !!showPage(document, root.location && root.location.hash);
+    if (isShell) {
       root.addEventListener("hashchange", () => showPage(document, root.location.hash));
     }
     if (typeof root.fetch === "function") {
       updateWifi(document, root.fetch.bind(root));
-      root.setInterval(() => updateWifi(document, root.fetch.bind(root)), 5000);
+      if (isShell) {
+        root.setInterval(() => {
+          if (shouldPollStatus(isShell, document.hidden)) updateWifi(document, root.fetch.bind(root));
+        }, 5000);
+      }
     }
   }
 
-  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal };
+  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {
