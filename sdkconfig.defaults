@@ -91,12 +91,21 @@ CONFIG_ETH_DMA_TX_BUFFER_NUM=20
 # --- Throughput tuning (lwIP + Wi-Fi remote buffers) ---
 # Allow lwIP / Wi-Fi buffers in PSRAM so the larger windows do not exhaust internal RAM.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# v0.8.5: plain malloc() > 4 KB goes to PSRAM (default 16 KB), and 64 KB of internal RAM stays
+# reserved for allocations that must be internal/DMA (SDIO buffers, task stacks).
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_LWIP_WND_SCALE=y
 CONFIG_LWIP_TCP_RCV_SCALE=2
-CONFIG_LWIP_TCP_WND_DEFAULT=131072
+# v0.8.5: 128 KB -> 64 KB. Every received segment sits in its own internal-RAM buffer from the
+# ESP-Hosted SDIO driver until the app reads it. During an OTA the app is slowed by flash writes,
+# so a full 128 KB window pinned ~150 KB of internal RAM (free heap 218 KB -> 50 KB) and the SDIO
+# driver could no longer allocate its 14 KB DMA read buffer ("dma_alloc failed; dropping read").
+# Only TCP terminated on the P4 (web UI, OTA, iperf) is affected; NAT forwarding is not.
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
-# Must be >= TCP_WND_DEFAULT/MSS + 2 (131072/1436 + 2 = 94), otherwise lwIP drops segments
-# while the app is busy (e.g. flash writes during OTA) and large uploads stall.
+# Must be >= TCP_WND_DEFAULT/MSS + 2 (65535/1436 + 2 = 48), otherwise lwIP drops segments
+# while the app is busy (e.g. flash writes during OTA) and large uploads stall. Kept generous.
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=96
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=128

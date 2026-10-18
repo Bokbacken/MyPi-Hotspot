@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "logbuf.h"
+#include "logstore.h"
 #include "lwip/sockets.h"
 #include "net.h"
 #include "pintest.h"
@@ -120,6 +121,12 @@ MYPI_BRAND_HEADER
 "<button onclick='reboot()'>Reboot</button></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
+"<h2>Saved logs (flash)</h2><p><label><input type='checkbox' id='lcap' style='width:auto' onchange=lsCfg()>Capture every session</label> "
+"keep <select id='lkeep' onchange=lsCfg()></select> logs "
+"<button onclick=lsSave()>Save log now</button> <button onclick=lsClear()>Delete saved logs</button><br>"
+"<small>An OTA update is always captured (written every 2 s, survives a hang, reboot or power loss). "
+"With capture on, every session is written every 15 s and the last lines before a crash are kept.</small></p>"
+"<p id='lst'></p><table id='lsl'></table>"
 "<h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
 "<h2>Log <label style='font-size:.8em'><input type='checkbox' id='follow' style='width:auto' checked> follow</label></h2>"
 "<pre id='log'></pre></section><script>"
@@ -234,12 +241,21 @@ MYPI_BRAND_HEADER
 "if($('follow').checked)q.scrollTop=q.scrollHeight;"
 "}catch(e){$('t').innerHTML=row('Error','device unreachable: '+esc(e),'bad');for(let id of ['ns','sp','sc','ap','cl','rd'])$(id).textContent='';$('aps').textContent='Device unreachable';$('es').textContent='Device unreachable';$('is').textContent='Device unreachable';$('log').textContent='Device unreachable'}finally{tickBusy=false}}"
 "function dbg(on){fetch('/api/debug?on='+on,{method:'POST'}).then(tick)}"
+"async function lsLoad(){try{let d=await (await fetch('/api/logstore')).json();"
+"if(!$('lkeep').options.length)for(let i=d.keep_min;i<=d.keep_max;i++)$('lkeep').innerHTML+='<option>'+i+'</option>';"
+"$('lcap').checked=d.enabled;$('lkeep').value=d.keep;"
+"$('lst').textContent=d.mounted?('Boot #'+d.boot+', '+(d.capturing?(d.ota?'capturing OTA':'capturing session'):'not capturing')+', flash '+d.free_kb+' of '+d.total_kb+' KB free'):'Log storage not mounted';"
+"$('lsl').innerHTML=d.logs.length?tr(['File','Size','Start','End'],1)+d.logs.map(l=>tr(['<a href=\"/api/logstore/file?name='+l.name+'\" target=_blank>'+l.name+'</a> <a href=\"/api/logstore/file?name='+l.name+'&dl=1\">&darr;</a>',(l.size/1024).toFixed(1)+' KB',esc(l.head.replace(/^# MyPi log \\| /,'')),esc(l.end||'(not finished)')])).join(''):'<tr><td>(no saved logs)</td></tr>'"
+"}catch(e){$('lst').textContent='Device unreachable'}}"
+"function lsCfg(){fetch('/api/logstore/config?enabled='+($('lcap').checked?1:0)+'&keep='+$('lkeep').value,{method:'POST'}).then(()=>setTimeout(lsLoad,1500))}"
+"function lsSave(){fetch('/api/logstore/save',{method:'POST'}).then(lsLoad)}"
+"function lsClear(){if(confirm('Delete all saved logs?'))fetch('/api/logstore/clear',{method:'POST'}).then(lsLoad)}"
 "let logRun=false;"
 "function resetPeaks(){fetch('/api/netstats/reset',{method:'POST'}).then(tick)}"
 "function logToggle(){fetch('/api/netstats/log/'+(logRun?'stop':'start'),{method:'POST'}).then(tick)}"
 "function dlLog(){location='/api/netstats/log'}"
 "for(let i=0;i<10;i++)$('ss').innerHTML+='<option>'+i+'</option>';for(let i=0;i<4;i++)$('as').innerHTML+='<option>'+i+'</option>';"
-"ld();tick();setInterval(tick,2000);</script><script src='/ui.js' defer></script></body></html>";
+"ld();tick();lsLoad();setInterval(tick,2000);setInterval(lsLoad,30000);</script><script src='/ui.js' defer></script></body></html>";
 
 static const char UPDATE_HTML[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -395,6 +411,7 @@ static esp_err_t api_pin_get(httpd_req_t *req)
 }
 
 static void reboot_task(void *arg);
+static void start_reboot(const char *reason);
 static void add_ap_info(cJSON *o, const wifi_ap_info_t *a);
 static void add_eth_info(cJSON *o);
 
@@ -451,7 +468,7 @@ static esp_err_t api_reboot_post(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"msg\":\"rebooting\"}");
-    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    start_reboot("reboot requested from the web UI");
     return ESP_OK;
 }
 
@@ -562,12 +579,20 @@ static esp_err_t log_get(httpd_req_t *req)
     return err;
 }
 
+// arg = reason (string literal), written as the end line of the captured log.
 static void reboot_task(void *arg)
 {
     // >= 1.5 s: lets the HTTP response go out and the LCD draw "Done - rebooting".
     vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP_LOGW(TAG, "Rebooting into new firmware");
+    const char *reason = arg ? (const char *)arg : "restart";
+    ESP_LOGW(TAG, "Rebooting: %s", reason);
+    logstore_before_restart(reason);
     esp_restart();
+}
+
+static void start_reboot(const char *reason)
+{
+    xTaskCreate(reboot_task, "reboot", 4096, (void *)reason, 5, NULL);
 }
 
 #define UPLOAD_RECV_TIMEOUT_S 15    // must match cfg.recv_wait_timeout
@@ -590,6 +615,23 @@ static void ota_stats_log(const char *what, const ota_stats_t *st)
              st->max_gap_us / 1e6, st->timeouts, (unsigned)st->heap_min_internal);
 }
 
+/** IPv4 text of a socket address; httpd listens on IPv6, so IPv4 peers arrive as ::ffff:a.b.c.d. */
+static void sockaddr_str(const struct sockaddr_storage *sa, char *dst, size_t size)
+{
+    if (sa->ss_family == AF_INET) {
+        inet_ntoa_r(((const struct sockaddr_in *)sa)->sin_addr, dst, size);
+    } else if (sa->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
+        const uint8_t *b = (const uint8_t *)&s6->sin6_addr;
+        static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        if (memcmp(b, mapped, sizeof(mapped)) == 0) {
+            snprintf(dst, size, "%u.%u.%u.%u", b[12], b[13], b[14], b[15]);
+        } else {
+            inet6_ntoa_r(s6->sin6_addr, dst, size);
+        }
+    }
+}
+
 /** Log which local address (Wi-Fi STA, AP or Ethernet) and peer the upload arrives on. */
 static void ota_log_path(httpd_req_t *req)
 {
@@ -597,12 +639,8 @@ static void ota_log_path(httpd_req_t *req)
     struct sockaddr_storage la = {0}, pa = {0};
     socklen_t ll = sizeof(la), pl = sizeof(pa);
     char lip[48] = "?", pip[48] = "?";
-    if (getsockname(fd, (struct sockaddr *)&la, &ll) == 0 && la.ss_family == AF_INET) {
-        inet_ntoa_r(((struct sockaddr_in *)&la)->sin_addr, lip, sizeof(lip));
-    }
-    if (getpeername(fd, (struct sockaddr *)&pa, &pl) == 0 && pa.ss_family == AF_INET) {
-        inet_ntoa_r(((struct sockaddr_in *)&pa)->sin_addr, pip, sizeof(pip));
-    }
+    if (getsockname(fd, (struct sockaddr *)&la, &ll) == 0) sockaddr_str(&la, lip, sizeof(lip));
+    if (getpeername(fd, (struct sockaddr *)&pa, &pl) == 0) sockaddr_str(&pa, pip, sizeof(pip));
     ESP_LOGI(TAG, "OTA upload from %s to local address %s (compare with the STA/AP/Ethernet IPs on the status page)",
              pip, lip);
 }
@@ -651,11 +689,19 @@ static esp_err_t update_post(httpd_req_t *req)
     ota_stats_t st = { .t0_us = esp_timer_get_time(), .total = req->content_len,
                        .heap_min_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) };
     st.last_data_us = st.t0_us;
+    int64_t mem_log_us = 0;
     while (received < req->content_len) {
         int r = httpd_req_recv(req, buf, bufsize);
         int64_t now = esp_timer_get_time();
         size_t heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         if (heap < st.heap_min_internal) st.heap_min_internal = heap;
+        if (now - mem_log_us >= 1000000) {
+            // Once per second: internal heap and the largest DMA block the SDIO driver could get
+            mem_log_us = now;
+            ESP_LOGI(TAG, "OTA mem: %u bytes in, free internal %u, largest internal DMA block %u, recv=%d",
+                     (unsigned)received, (unsigned)heap,
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA), r);
+        }
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
             st.timeouts++;
             ESP_LOGW(TAG, "OTA: no data for %d s (%u / %u bytes)", (idle + 1) * UPLOAD_RECV_TIMEOUT_S,
@@ -733,7 +779,7 @@ static esp_err_t update_post(httpd_req_t *req)
     diag_ota_phase(OTA_PHASE_VERIFIED);
     httpd_resp_sendstr(req, "OK - image verified, rebooting into the new firmware...");
     diag_ota_phase(OTA_PHASE_DONE);
-    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    start_reboot("P4 OTA OK - image verified, rebooting into the new firmware");
     return ESP_OK;
 }
 
@@ -887,7 +933,7 @@ static esp_err_t api_c5update_post(httpd_req_t *req)
              newver, can_activate ? "activated" : "flashed");
     httpd_resp_sendstr(req, msg);
     diag_ota_phase(OTA_PHASE_DONE);
-    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    start_reboot("C5 OTA OK - rebooting the P4 to resync with the co-processor");
     return ESP_OK;
 }
 
@@ -1456,13 +1502,133 @@ static esp_err_t api_iperf_get(httpd_req_t *req)
     return send_json(req, j);
 }
 
+// ---------------------------------------------------------------------------
+// Persistent logs (v0.8.5+), see logstore.h
+// ---------------------------------------------------------------------------
+
+static esp_err_t api_logstore_get(httpd_req_t *req)
+{
+    logstore_info_t in;
+    logstore_get_info(&in);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "mounted", in.mounted);
+    cJSON_AddBoolToObject(j, "enabled", in.enabled);
+    cJSON_AddBoolToObject(j, "capturing", in.capturing);
+    cJSON_AddBoolToObject(j, "ota", in.ota);
+    cJSON_AddNumberToObject(j, "keep", in.keep);
+    cJSON_AddNumberToObject(j, "keep_min", LOGSTORE_KEEP_MIN);
+    cJSON_AddNumberToObject(j, "keep_max", LOGSTORE_KEEP_MAX);
+    cJSON_AddNumberToObject(j, "boot", in.boot);
+    cJSON_AddNumberToObject(j, "total_kb", in.total_kb);
+    cJSON_AddNumberToObject(j, "free_kb", in.free_kb);
+    cJSON *arr = cJSON_AddArrayToObject(j, "logs");
+    const int max = LOGSTORE_KEEP_MAX + 4;
+    logstore_entry_t *e = heap_caps_calloc(max, sizeof(*e), MALLOC_CAP_SPIRAM);
+    int n = e ? logstore_list(e, max) : 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", e[i].name);
+        cJSON_AddNumberToObject(o, "size", e[i].size);
+        cJSON_AddStringToObject(o, "head", e[i].head);
+        cJSON_AddStringToObject(o, "end", e[i].end);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(e);
+    return send_json(req, j);
+}
+
+// GET /api/logstore/file?name=L0000012.TXT  (add &dl=1 to download)
+static esp_err_t api_logstore_file_get(httpd_req_t *req)
+{
+    char q[64], name[LOGSTORE_NAME_LEN] = "", dl[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "name", name, sizeof(name));
+        httpd_query_key_value(q, "dl", dl, sizeof(dl));
+    }
+    if (!logstore_name_ok(name)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: GET /api/logstore/file?name=Lnnnnnnn.TXT");
+    }
+    if (!logstore_lock(5000)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "log store busy");
+    }
+    char path[48];
+    logstore_path(name, path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        logstore_unlock();
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    char disp[80];
+    if (dl[0] == '1') {
+        snprintf(disp, sizeof(disp), "attachment; filename=\"mypi-%s\"", name);
+        httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    }
+    const size_t bs = 4096;
+    char *buf = malloc(bs);
+    esp_err_t err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+    size_t r;
+    while (err == ESP_OK && (r = fread(buf, 1, bs, f)) > 0) {
+        err = httpd_resp_send_chunk(req, buf, r);
+    }
+    fclose(f);
+    logstore_unlock();
+    free(buf);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    return err;
+}
+
+// POST /api/logstore/config?enabled=1|0&keep=5..10
+static esp_err_t api_logstore_config_post(httpd_req_t *req)
+{
+    char q[48], en[4] = "", kp[4] = "";
+    logstore_info_t in;
+    logstore_get_info(&in);
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "enabled", en, sizeof(en));
+        httpd_query_key_value(q, "keep", kp, sizeof(kp));
+    }
+    bool enabled = en[0] ? en[0] == '1' : in.enabled;
+    int keep = kp[0] ? atoi(kp) : in.keep;
+    esp_err_t err = logstore_configure(enabled, keep);
+    if (err == ESP_ERR_INVALID_ARG) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: POST /api/logstore/config?enabled=1|0&keep=5..10");
+    }
+    char out[80];
+    snprintf(out, sizeof(out), "capture %s, keep %d (%s)", enabled ? "on" : "off", keep, esp_err_to_name(err));
+    return httpd_resp_sendstr(req, out);
+}
+
+static esp_err_t api_logstore_save_post(httpd_req_t *req)
+{
+    esp_err_t err = logstore_save_now("saved from the web UI");
+    if (err != ESP_OK) httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, err == ESP_OK ? "saved" : esp_err_to_name(err));
+}
+
+static esp_err_t api_logstore_clear_post(httpd_req_t *req)
+{
+    esp_err_t err = logstore_clear();
+    if (err != ESP_OK) httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, err == ESP_OK ? "cleared" : esp_err_to_name(err));
+}
+
 esp_err_t web_start(void)
 {
+    // httpd_sock_err() logs a warning BEFORE it inspects errno; the logging path can clobber
+    // errno and turn a recv timeout (EAGAIN) into a hard error that aborts OTA uploads.
+    // Silence that warning so the timeout is classified correctly (OTA logs its own errors).
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 10240;
     cfg.recv_wait_timeout = UPLOAD_RECV_TIMEOUT_S;
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 48;
+    cfg.max_uri_handlers = 56;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[FAIL] httpd_start: %s", esp_err_to_name(err));
@@ -1474,6 +1640,11 @@ esp_err_t web_start(void)
         { .uri = "/ui.js",      .method = HTTP_GET,  .handler = ui_js_get },
         { .uri = "/api/status", .method = HTTP_GET,  .handler = status_get },
         { .uri = "/api/log",    .method = HTTP_GET,  .handler = log_get },
+        { .uri = "/api/logstore",        .method = HTTP_GET,  .handler = api_logstore_get },
+        { .uri = "/api/logstore/file",   .method = HTTP_GET,  .handler = api_logstore_file_get },
+        { .uri = "/api/logstore/config", .method = HTTP_POST, .handler = api_logstore_config_post },
+        { .uri = "/api/logstore/save",   .method = HTTP_POST, .handler = api_logstore_save_post },
+        { .uri = "/api/logstore/clear",  .method = HTTP_POST, .handler = api_logstore_clear_post },
         { .uri = "/update",     .method = HTTP_GET,  .handler = update_get },
         { .uri = "/update",     .method = HTTP_POST, .handler = update_post },
         { .uri = "/c5update",   .method = HTTP_GET,  .handler = c5update_get },

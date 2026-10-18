@@ -9,6 +9,13 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.8.5 validation (pending hardware)
+
+1. Wi-Fi OTA via `/update` with v0.8.5; on failure read the saved log under Diagnostics →
+   *Saved logs (flash)* after the reboot. Check the `OTA mem:` lines (internal heap, largest DMA block).
+2. Confirm no `eh_sdio: dma_alloc ... failed` lines and that receive timeouts are retried.
+3. Compare with an Ethernet OTA upload; confirm session capture on/off and keep 5–10.
+
 ## Implemented in this Hotspot update
 
 - The 240×320 ST7789 LCD home screen shows uplink state, AP/client state, Ethernet,
