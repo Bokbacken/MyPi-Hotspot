@@ -11,15 +11,20 @@ path: the home status viewport is rendered by LVGL with a MyPi font (ASCII, å �
 μ/π), and touch is fed to an LVGL pointer input device. Backend/API, OTA and rescue
 paths are unchanged. See [migration boundaries](docs/ARCHITECTURE.md#lvgl-migration).
 
-**0.8.3** (builds, not yet hardware-tested): web dashboard split into pages
-(Overview, Wi-Fi, Access point, Traffic, Ethernet, System, Debug) with a new header
-showing the STA signal in dBm; LCD Wi-Fi icon with a 20-step red→green RSSI gradient
-and a full-width `Hotspot` 8N1 divider.
+**0.9.8** (builds, not hardware-tested): reverts the v0.9.7 buffer tuning (AP link lost in HW
+test); restores v0.9.6 host/C5 buffer defaults. C5 buffer tuning is deferred until an official
+ESP-Hosted 3.0.10+ release. Use the "3.0.9 tuned" C5 firmware with this P4 image.
 
-Current firmware release: **0.8.3** (see above and [CHANGELOG.md](CHANGELOG.md)); 0.8.1 introduced the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
-(APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
-a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.1 (logo/header on top of the v0.8.0 UI) builds cleanly but is not yet hardware-tested. Diagnostics
-are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
+Current firmware release: **0.9.8** (see above and [CHANGELOG.md](CHANGELOG.md)).
+v0.9.6 added 5 GHz channel-width control (HT40 / HT20, Optimize page) and an SDIO clock
+option (40 / 50 MHz); v0.8.7 introduced the reusable LVGL scroll-wheel keyboard; v0.8.1
+introduced the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an
+**Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an
+interactive **LCD menu** with a Wi-Fi password-entry flow and OTA progress view, Wi-Fi uplink
++ own access point (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats
+with peak rates, a CSV traffic log, an iperf throughput test, a responsive web dashboard and
+over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). Diagnostics are
+quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
 
 | Action | Result |
 |---|---|
@@ -362,8 +367,8 @@ Safest upgrade order from v0.5.x (C5 on 2.x):
 
 If P4 v0.6.0 is flashed first, flash the C5 over USB (`c5-slave-esp-hosted-v3.0.9-merged.bin`).
 
-**Buffer tuning (v0.6.3).** The P4 host uses 4 SDIO RX staging slots (default 2); the SDIO clock stays at
-40 MHz. The C5 slave defaults (`c5_slave/sdkconfig.defaults.esp32c5`) raise the Wi-Fi buffers to static RX 16,
+**Buffer tuning (v0.6.3).** The P4 host uses 4 SDIO RX staging slots (default 2); the SDIO clock is
+40 MHz (still the default; 50 MHz is optional on the Optimize page since v0.9.5, with auto-fallback). The C5 slave defaults (`c5_slave/sdkconfig.defaults.esp32c5`) raise the Wi-Fi buffers to static RX 16,
 dynamic RX 64, dynamic TX 64, A-MPDU TX/RX with BA window 32, and the C5 SDIO TX/RX queues to 40. This build is
 published as `c5-slave-esp-hosted-v3.0.9-tuned.bin` (OTA via `/c5update`) and `...-tuned-merged.bin` (USB).
 It still reports slave version 3.0.9, so it stays compatible with the 3.0.9 host.
@@ -438,7 +443,7 @@ All POST endpoints take a small JSON body and answer `{"ok":true,"msg":...}` or 
 | `POST /api/ap/start` / `POST /api/ap/stop` | `{slot}` (`-1` = Kconfig default AP) |
 | `GET /api/apstatus` | AP state + `clients:[{mac,ip,rssi}]` |
 | `GET /api/eth` / `POST /api/eth` | link, speed, IP (WAN), active/saved mode, `bridged`, `bridge_drops` (LAN) / `{mode:"lan"\|"wan"}` |
-| `GET /api/radio` / `POST /api/radio` | active/saved width + protocols, what the C5 reports for STA/AP, upstream AP PHY / `{sta_bw:"auto\|20\|40\|80", ap_bw:"20\|40\|80", sta_proto, ap_proto:"default\|n\|ac\|ax"}` (reboot to apply) |
+| `GET /api/radio` / `POST /api/radio` | band mode, shared protocol mask (`proto`), `last_sta_channel`, what the C5 reports for STA/AP, upstream AP PHY / `{band_mode, proto}` (old `sta_proto`/`ap_proto` still accepted and merged; width is set by `bw_5g` on `/api/opt`; reboot to apply) |
 | `GET /api/netstats` | per interface (`sta`, `ap`, `eth`): bytes, packets, `rx_mbps`/`tx_mbps` (Mbit/s, 2 decimals, 1 s window), `rx_mbps_peak`/`tx_mbps_peak`; plus `log_running`, `log_ever`, `log_samples`, `log_max` |
 | `POST /api/netstats/reset` | clear the peak rates → `{"ok":true}` |
 | `POST /api/netstats/log/start` / `stop` | start (clears old samples) / stop the traffic log → `{"ok":true,"running":…,"samples":N}` |
@@ -527,9 +532,10 @@ LCD and give the laptop a static `192.168.4.x/24` (not .1 or .32).
 - **One radio, one channel.** STA and AP share the C5 radio, so the AP must use the STA's channel and
   airtime is shared: NAT throughput over Wi-Fi-in/Wi-Fi-out is roughly half of the single-link rate.
   When the STA moves to another network/channel, the AP follows, and AP clients may disconnect briefly.
-  Channel width and protocols are runtime settings (web page section *Radio*, `GET/POST /api/radio`,
-  stored in NVS, applied after a reboot). Defaults: STA width auto / driver-default protocols, AP 20 MHz /
-  driver-default protocols. The page also shows what the C5 reports for STA and AP and the upstream AP's
+  Band and protocols are runtime settings on the *Optimize* page (`GET/POST /api/radio`, one protocol
+  set shared by STA and AP, stored in NVS, applied after a reboot). 2.4 GHz is always HT20; the 5 GHz
+  width (`bw_5g`) defaults to HT40, but HT20 is recommended (the C5 does 40 MHz only in 11n/11an, and
+  HT40 tested slower). 11ax is selectable but not default (C5 upload issue, ESP-IDF #19238). The page also shows what the C5 reports for STA and AP and the upstream AP's
   PHY capabilities, so combinations can be compared without reflashing.
 - NAPT is enabled per interface with the lwIP call `ip_napt_enable_netif()` (instead of
   `esp_netif_napt_enable()`, which only allows one NAT interface). Wired LAN clients are NATed through the AP
@@ -539,8 +545,10 @@ LCD and give the laptop a static `192.168.4.x/24` (not .1 or .32).
   If the AP is stopped (or the C5 fails), wired LAN clients get no DHCP and cannot reach the device —
   switch Ethernet to WAN mode or start the AP.
 - Ethernet uses the internal EMAC + generic PHY driver (IP101 on the NANO); mode changes need a reboot.
-- 802.11 throughput tuning (larger lwIP/Wi-Fi buffers, BA windows) is in `sdkconfig.defaults`;
-  values on the C5 side are fixed by its ESP-Hosted slave firmware.
+- 802.11 throughput tuning (larger lwIP/Wi-Fi buffers, BA windows) is in `sdkconfig.defaults`; most
+  Wi-Fi buffer counts are sent to the C5 at `esp_wifi_init()`, while the TX BA window and C5 SDIO queues
+  come from the C5 slave firmware. Buffer tuning is on hold until an official ESP-Hosted 3.0.10+ (the
+  v0.9.7 attempt was reverted in v0.9.8).
 
 ---
 

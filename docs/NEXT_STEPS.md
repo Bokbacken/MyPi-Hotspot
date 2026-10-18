@@ -9,7 +9,28 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
-## Hotspot v0.9.4 validation (TCP / LwIP / NAT options back, not hardware-tested)
+## Hotspot v0.9.8 validation (revert of buffer tuning, pending hardware test)
+
+v0.9.8 is the current main. Flash `mypi-hotspot-v0.9.8-ota.bin` via `/update`
+(keep the existing "3.0.9 tuned" C5 firmware — do **not** reflash the C5).
+
+1. Boot log: SDIO clock 40000 kHz; no `IRAM_OPT` or `RX_STAGING` overrides (should match v0.9.6 boot log).
+2. Optimize → 5 GHz bandwidth: the firmware default is still `bw_5g = 40` (HT40). Select
+   "HT20 - ac/ax allowed" manually (recommended), reboot, and verify the link comes up at HT20.
+3. Run an iperf download and upload (with a client on the MyPi AP) and compare with the v0.9.6 baseline.
+4. If AP stays up, stable throughput, and OTA succeeds: deployment ready.
+
+**Recommended setting:** ac / HT20 on 5 GHz — HT40 links up but is slower and disturbs Wi-Fi 7 APs.
+
+## Hotspot v0.9.5–v0.9.6 — HW-tested (PRs merged)
+
+- v0.9.5 (PR #18): SDIO 40/50 MHz and 5 GHz HT40/HT20 Optimize dropdowns. HW result: HT40 stayed at
+  HT20 — root cause was the ac/ax protocol conflict (fixed in v0.9.6).
+- v0.9.6 (PR #18): Strip ac/ax from 5 GHz protocol when HT40 selected; re-apply width after
+  post-start protocol re-apply. HW result: HT40 links up at 40 MHz but is slower than ac/HT20.
+- **Decision:** HT40 option stays for users on uncrowded 5 GHz; ac/HT20 is the recommended setting (the firmware default is still HT40).
+
+## Hotspot v0.9.4 validation (TCP / LwIP / NAT options back — done, merged to main)
 
 1. Make sure the test client is on the MyPi AP: SSID is the MyPi AP SSID, the client's gateway is
    the MyPi AP address, and the client appears in the device's client list. (The v0.9.1/v0.9.2
@@ -23,7 +44,6 @@ describe the transitional UI, not an LVGL implementation.
      `dma_alloc failed` appears.
    - LwIP core: Core 0, then Core 1 (boot log: `LwIP tcpip task pinned to core N`).
    - NAPT max sessions / TCP timeout: only matter with many client connections.
-5. Merge PR #17 to main only after these tests.
 
 ## Hotspot v0.9.3 validation (trimmed Optimize, APSTA channel, not hardware-tested)
 

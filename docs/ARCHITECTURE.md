@@ -175,7 +175,7 @@ the safe option ("better safe than sorry").
 | Buffer | Placement | Reason |
 |---|---|---|
 | ESP-Hosted SDIO DMA buffers | Internal (driver-managed, DMA-capable) | DMA/latency critical |
-| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 32 KB fixed since v0.9.1) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
+| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 32 KB default, 32/64/128 KB via Optimize since v0.9.4) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
 | LVGL flush buffers `s_pixels` + `s_kbd_pixels` (2 x 9.6 KB, `ui_lvgl_port.c`) | Internal `.bss` (moved from PSRAM in 0.9.0) | flush path, feeds the display DMA |
 | Display DMA bounce buffers (`display.c`) | Internal DMA heap | DMA requirement |
 | LVGL heap (64 KB), framebuffer-sized buffers | PSRAM | large, not latency critical |
@@ -188,7 +188,10 @@ Always-on build options in `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=
 already 32 (`WIFI_RMT_STATIC_RX_BUFFER_NUM`, higher than the suggested 10) and
 `CONFIG_SPIRAM_SPEED=80` is the applicable P4 symbol (`CONFIG_ESP32P4_SPIRAM_SPEED`
 does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
-(`esp_wifi_set_bandwidths`). 802.11ax is selectable again since v0.9.3 (known C5 upload issue).
+(`esp_wifi_set_bandwidths`). 802.11ax is selectable again since v0.9.3 but not in the default
+set; the UI warns about the known C5 upload issue (ESP-IDF #19238). Host SDIO RX queue 64 and RX
+staging 4 are the v0.9.6 values restored in v0.9.8; C5 buffer tuning is on hold until an official
+ESP-Hosted 3.0.10+.
 
 ## opt_config module (0.9.0)
 
@@ -226,7 +229,8 @@ Radio blob (`mypi` / `radio`, `wifi.c`): since v0.9.3 only `band_mode` and one p
 shared by STA and AP are used (`sta_proto == ap_proto`; old blobs are merged with
 `opt_proto_merge`: STA value if non-zero, else AP). The blob's `sta_bw` / `ap_bw` are ignored:
 2.4 GHz is always HT20 and the 5 GHz width comes from `bw_5g` (v0.9.5, HT40 default), one value
-for STA and AP since they share the radio. TX power comes from `tx_dbm`, DTIM is the driver default.
+for STA and AP since they share the radio. The C5 does 40 MHz only in 11n/11an, so HT40 drops
+11ac/11ax on 5 GHz (v0.9.6); HT20 is the recommended setting (HW-tested faster than HT40). TX power comes from `tx_dbm`, DTIM is the driver default.
 
 AP channel (`opt_ap_channel_pick`): current STA channel > current AP channel > `sta_last_ch`
 if usable for the band mode / country > 1 (36 in 5 GHz-only mode). `ap.csa_count = 3`.
