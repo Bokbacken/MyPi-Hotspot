@@ -75,4 +75,10 @@ assert.equal(staSignal({ wifi_state: "disconnected", rssi: -56 }).text, "\u2014"
 assert.equal(staSignal({ wifi_state: "connected", rssi: 0 }).text, "\u2014");
 assert.equal(staSignal(null).text, "\u2014");
 
+// Header polling: only on the visible main shell, never on standalone pages such as /update.
+const { shouldPollStatus } = require("../main/web_ui.js");
+assert.equal(shouldPollStatus(true, false), true);
+assert.equal(shouldPollStatus(true, true), false);
+assert.equal(shouldPollStatus(false, false), false);
+
 console.log("Web UI serial, routing and signal tests passed");

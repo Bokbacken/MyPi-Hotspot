@@ -24,6 +24,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "logbuf.h"
+#include "lwip/sockets.h"
 #include "net.h"
 #include "pintest.h"
 #include "profiles.h"
@@ -572,6 +573,40 @@ static void reboot_task(void *arg)
 #define UPLOAD_RECV_TIMEOUT_S 15    // must match cfg.recv_wait_timeout
 #define UPLOAD_IDLE_MAX       3     // give up after 3 consecutive receive timeouts (45 s without data)
 
+// Upload statistics for the P4 OTA, logged to /api/log so Wi-Fi vs Ethernet failures can be compared.
+typedef struct {
+    int64_t t0_us, last_data_us, max_gap_us;
+    size_t received, total;
+    int timeouts;
+    size_t heap_min_internal;
+} ota_stats_t;
+
+static void ota_stats_log(const char *what, const ota_stats_t *st)
+{
+    double secs = (esp_timer_get_time() - st->t0_us) / 1e6;
+    double mbps = secs > 0 ? st->received * 8.0 / secs / 1e6 : 0;
+    ESP_LOGI(TAG, "OTA %s: %u / %u bytes in %.1f s (%.2f Mbit/s), longest gap %.1f s, recv timeouts %d, "
+             "min free internal heap %u", what, (unsigned)st->received, (unsigned)st->total, secs, mbps,
+             st->max_gap_us / 1e6, st->timeouts, (unsigned)st->heap_min_internal);
+}
+
+/** Log which local address (Wi-Fi STA, AP or Ethernet) and peer the upload arrives on. */
+static void ota_log_path(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage la = {0}, pa = {0};
+    socklen_t ll = sizeof(la), pl = sizeof(pa);
+    char lip[48] = "?", pip[48] = "?";
+    if (getsockname(fd, (struct sockaddr *)&la, &ll) == 0 && la.ss_family == AF_INET) {
+        inet_ntoa_r(((struct sockaddr_in *)&la)->sin_addr, lip, sizeof(lip));
+    }
+    if (getpeername(fd, (struct sockaddr *)&pa, &pl) == 0 && pa.ss_family == AF_INET) {
+        inet_ntoa_r(((struct sockaddr_in *)&pa)->sin_addr, pip, sizeof(pip));
+    }
+    ESP_LOGI(TAG, "OTA upload from %s to local address %s (compare with the STA/AP/Ethernet IPs on the status page)",
+             pip, lip);
+}
+
 static esp_err_t ota_fail(httpd_req_t *req, esp_ota_handle_t h, const char *status, const char *msg)
 {
     if (h) esp_ota_abort(h);
@@ -612,20 +647,33 @@ static esp_err_t update_post(httpd_req_t *req)
     esp_err_t err;
 
     int idle = 0;
+    ota_log_path(req);
+    ota_stats_t st = { .t0_us = esp_timer_get_time(), .total = req->content_len,
+                       .heap_min_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) };
+    st.last_data_us = st.t0_us;
     while (received < req->content_len) {
         int r = httpd_req_recv(req, buf, bufsize);
+        int64_t now = esp_timer_get_time();
+        size_t heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        if (heap < st.heap_min_internal) st.heap_min_internal = heap;
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            st.timeouts++;
             ESP_LOGW(TAG, "OTA: no data for %d s (%u / %u bytes)", (idle + 1) * UPLOAD_RECV_TIMEOUT_S,
                      (unsigned)received, (unsigned)req->content_len);
             if (++idle < UPLOAD_IDLE_MAX) continue;
             free(buf);
+            ota_stats_log("stalled", &st);
             return ota_fail(req, h, "408 Request Timeout", "Upload stalled (no data received for 45 s)");
         }
         idle = 0;
         if (r <= 0) {
             free(buf);
+            ESP_LOGW(TAG, "OTA: httpd_req_recv returned %d (%s)", r, r == 0 ? "closed by browser" : "socket error");
+            ota_stats_log("aborted", &st);
             return ota_fail(req, h, "400 Bad Request", "Connection closed during upload");
         }
+        if (now - st.last_data_us > st.max_gap_us) st.max_gap_us = now - st.last_data_us;
+        st.last_data_us = now;
         if (!header_checked) {
             // Validate the image header before touching flash.
             const size_t need = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
@@ -655,15 +703,20 @@ static esp_err_t update_post(httpd_req_t *req)
             return ota_fail(req, h, "500 Internal Server Error", esp_err_to_name(err));
         }
         received += r;
+        st.received = received;
         diag_ota_progress((uint32_t)received);
         int pct = (int)(received * 100 / req->content_len);
         if (pct / 10 != last_pct / 10) {
-            ESP_LOGI(TAG, "OTA %d%% (%u / %u)", pct, (unsigned)received, (unsigned)req->content_len);
+            double secs = (esp_timer_get_time() - st.t0_us) / 1e6;
+            ESP_LOGI(TAG, "OTA %d%% (%u / %u), %.2f Mbit/s, free internal heap %u", pct, (unsigned)received,
+                     (unsigned)req->content_len, secs > 0 ? received * 8.0 / secs / 1e6 : 0.0,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             diag_set_ota_status("writing %d%%", pct);
             last_pct = pct;
         }
     }
     free(buf);
+    ota_stats_log("received", &st);
 
     diag_ota_phase(OTA_PHASE_VERIFYING);
     err = esp_ota_end(h);   // Verifies image integrity (checksum / SHA-256)

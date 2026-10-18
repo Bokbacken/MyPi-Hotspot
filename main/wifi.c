@@ -1041,7 +1041,8 @@ static void wifi_task(void *arg)
         } else if (xEventGroupGetBits(s_events) & BIT_GOT_IP) {
             backoff_s = 1;
             wifi_ap_record_t ap = {0};
-            if (lock()) {
+            // No RSSI RPC to the C5 during an OTA: keep the SDIO link free for upload data.
+            if (!diag_ota_ui_visible() && lock()) {
                 esp_err_t err = esp_wifi_sta_get_ap_info(&ap);
                 unlock();
                 if (err == ESP_OK) {
