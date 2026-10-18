@@ -5,7 +5,20 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
-## 0.9.7 — 2026-10-18 (builds, not hardware-tested)
+## 0.9.8 — 2026-10-18 (builds, not hardware-tested)
+
+- Revert the v0.9.7 buffer tuning. HW test of v0.9.7: AP disappeared shortly
+  after start (download ~1.5 Mbit/s, upload 0, then link lost). Host
+  `sdkconfig.defaults` and `c5_slave/sdkconfig.defaults.esp32c5` are restored to
+  the v0.9.6 values (host SDIO RX queue 64, RX staging 4, default cache TX,
+  C5 buffers 16/64/64, BA 32, C5 SDIO queues 40/40).
+- C5 tuning is on hold until an official ESP-Hosted release (3.0.10+); use the
+  previous "3.0.9 tuned" C5 firmware.
+- Kept: the log line in `wifi.c` showing the Wi-Fi buffer config sent to the C5.
+- 0.9.7 HW result: not usable (see above). 0.9.6 HW result: HT40 links at
+  40 MHz but is slower than ac/HT20; ac/HT20 stays the recommended setting.
+
+## 0.9.7 — 2026-10-18 (HW-tested: unstable, reverted in 0.9.8)
 
 C5 buffer / upload throughput tuning. Upload path: client -> C5 Wi-Fi RX -> SDIO C5->P4 -> Ethernet.
 
