@@ -208,7 +208,8 @@ NVS namespace `mypi_opt` (`u8` unless noted):
 | `napt_max` | `napt_max` (v0.9.4) | 5 / 10 / 20 = 512 / 1024 / 2048 entries | 5 | boot (`IP_NAPT_MAX`) |
 | `napt_tcp_to` | `napt_tcp_to` (v0.9.4) | 2 = 2 h / 1 = 1 h / 0 = 30 min | 2 | runtime (`IP_NAPT_TIMEOUT_MS_TCP`) |
 | `sta_last_ch` | internal (v0.9.3) | 1-14, 36-64 / 100-144 / 149-177 (step 4) | - | written on STA connect when changed; AP channel at boot |
-| `sdio_mhz` | none since v0.9.3 | 40 / 50 | 40 | stored value ignored, SDIO always starts at 40 MHz |
+| `bw_5g` | `bw_5g` (v0.9.5) | 40 = HT40 / 20 = HT20 | 40 | boot (`opt_bw_5g()` -> `apply_bw()` for STA and AP; 2.4 GHz always HT20) |
+| `sdio_mhz` | `sdio_mhz` (v0.9.5) | 40 / 50 | 40 | boot (`opt_sdio_begin()` -> `esp_hosted_sdio_set_config`), auto-fallback to 40 |
 | `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
 | `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
 
@@ -223,8 +224,9 @@ TCP window (v0.9.4): lwIP is built with `-include main/lwip_tune.h`, which redef
 
 Radio blob (`mypi` / `radio`, `wifi.c`): since v0.9.3 only `band_mode` and one protocol mask
 shared by STA and AP are used (`sta_proto == ap_proto`; old blobs are merged with
-`opt_proto_merge`: STA value if non-zero, else AP). Width is always auto (2.4 GHz HT20, 5 GHz
-HT40), TX power comes from `tx_dbm`, DTIM is the driver default.
+`opt_proto_merge`: STA value if non-zero, else AP). The blob's `sta_bw` / `ap_bw` are ignored:
+2.4 GHz is always HT20 and the 5 GHz width comes from `bw_5g` (v0.9.5, HT40 default), one value
+for STA and AP since they share the radio. TX power comes from `tx_dbm`, DTIM is the driver default.
 
 AP channel (`opt_ap_channel_pick`): current STA channel > current AP channel > `sta_last_ch`
 if usable for the band mode / country > 1 (36 in 5 GHz-only mode). `ap.csa_count = 3`.
@@ -233,7 +235,13 @@ Boot: `main.c` calls `opt_config_load()` (applies log level). `wifi.c` initialis
 ESP-Hosted manually (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN` off) so the
 SDIO clock from `opt_sdio_begin()` can be set before the transport starts.
 
-SDIO 50 MHz auto-fallback (mechanism kept; since v0.9.3 the configured clock is always 40 MHz):
+SDIO clock (v0.9.5): `sdio_mhz` is used again. IDF v6.1's `sdmmc_io_enable_hs_mode()` caps an
+SDIO card at 40 MHz (`SDMMC_FREQ_HIGHSPEED`), so `main/sdio_clk.c` wraps it
+(`-Wl,--wrap=sdmmc_io_enable_hs_mode`) and raises the card limit to the host's configured clock
+(max 50 MHz; the P4 makes exactly 50 MHz from its 200 MHz SDIO PLL). The real bus clock is read
+back with `sdmmc_host_get_real_freq()`, logged at boot and returned as `sdio_real_khz`.
+
+SDIO 50 MHz auto-fallback:
 1. A 50 MHz boot writes `sdio_try=1` before the transport starts.
 2. When the transport is up and `esp_wifi_init` succeeds, `opt_sdio_confirm()`
    writes `sdio_try=0`.
@@ -247,7 +255,8 @@ second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
 after a successful C5 init, or manually via the web UI.
 
 Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
-true when `ap_beacon_ms`, `country`, `tcp_wnd_kb`, `lwip_core` or `napt_max` changed), `GET/POST /api/radio` (`band_mode`, shared `proto`,
+true when `ap_beacon_ms`, `country`, `tcp_wnd_kb`, `lwip_core`, `napt_max`, `bw_5g` or `sdio_mhz` changed;
+GET also returns `sdio_active_mhz`, `sdio_fell_back` and `sdio_real_khz`), `GET/POST /api/radio` (`band_mode`, shared `proto`,
 `last_sta_channel`), `POST /api/clear_emergency`,
 `POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
 dropdowns.

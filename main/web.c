@@ -28,6 +28,7 @@
 #include "lwip/sockets.h"
 #include "net.h"
 #include "opt_config.h"
+#include "sdio_clk.h"
 #include "pintest.h"
 #include "profiles.h"
 #include "rescue.h"
@@ -112,7 +113,8 @@ MYPI_BRAND_HEADER
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
-// AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below. Checkboxes and
+// AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
+// width (HT40/HT20) and the SDIO clock (40/50 MHz, auto-fallback) to the radio grid. Checkboxes and
 // dropdowns only (no text input). Logic in web_ui.js.
 "<section class='page' data-page='optimize'><h2>Optimize</h2>"
 "<div id='opt-banner' class='opt-banner' hidden><span>Some changes require reboot</span> "
@@ -140,6 +142,12 @@ MYPI_BRAND_HEADER
 "<span class='opt-l'>Wi-Fi country / region</span><span class='opt-c'><select id='opt-country'><option value='SE'>SE (Sweden)</option>"
 "<option value='EU'>EU (Europe)</option><option value='US'>US (United States)</option><option value='JP'>JP (Japan)</option></select></span>"
 "<span class='opt-s' id='opt-country-st'></span>"
+"<span class='opt-l'>5 GHz channel width (STA = AP)</span><span class='opt-c'><select id='opt-bw-5g'><option value='40'>HT40 (default)</option>"
+"<option value='20'>HT20</option></select></span><span class='opt-s' id='opt-bw-5g-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>HT20 = narrower, more robust in crowded 5 GHz. 2.4 GHz is always HT20. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>SDIO clock (P4 &harr; C5)</span><span class='opt-c'><select id='opt-sdio'><option value='40'>40 MHz (default)</option>"
+"<option value='50'>50 MHz</option></select></span><span class='opt-s' id='opt-sdio-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>50 MHz automatically falls back to 40 MHz if the C5 fails to start. Reboot required.</small></span><span class='opt-s'></span>"
 "</div><h3>TCP / LwIP / NAT</h3><div class='opt-grid'>"
 "<span class='opt-l'>TCP window</span><span class='opt-c'><select id='opt-tcp-wnd'><option value='32'>32 KB (default)</option>"
 "<option value='64'>64 KB</option><option value='128'>128 KB</option></select></span><span class='opt-s' id='opt-tcp-wnd-st'></span>"
@@ -156,9 +164,9 @@ MYPI_BRAND_HEADER
 "<span class='opt-l'></span><span class='opt-c'><small>Idle TCP session lifetime in the NAT table. Shorter = faster recycling. Applies immediately.</small></span><span class='opt-s'></span>"
 "</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
 "<p><small>TX power, STA power save and NAPT TCP timeout apply immediately; band, protocols, AP beacon interval, country, "
-"TCP window, LwIP core and NAPT max sessions after a reboot. "
-"STA and AP share one radio: the AP always follows the STA channel and band. Width is automatic: 2.4 GHz is locked to HT20, "
-"5 GHz uses HT40. Everything else runs on defaults (SDIO 40 MHz, NAPT on, log level Info).</small></p></section>"
+"5 GHz width, SDIO clock, TCP window, LwIP core and NAPT max sessions after a reboot. "
+"STA and AP share one radio: the AP always follows the STA channel and band. 2.4 GHz is always locked to HT20; "
+"5 GHz uses the selected width (HT40 default). Everything else runs on defaults (NAPT on, log level Info).</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
 // v0.9.3: emergency flag moved here from the Optimize page.
@@ -268,7 +276,7 @@ MYPI_BRAND_HEADER
 "tr(['AP',r.ap_channel?r.ap_channel+' ('+band(r.ap_channel)+')':'-',f.ap_width,f.ap_proto_str])+"
 "tr(['Upstream AP','2nd ch '+f.upstream_second,'',f.upstream_phy])+"
 "tr(['TX power (driver)',f.tx_power_dbm?f.tx_power_dbm+' dBm':'?','',''])+"
-"tr(['Setting','band '+(BN[r.active.band_mode]||'?'),'auto','proto '+hx(r.active.proto)+(r.last_sta_channel?', last STA ch '+r.last_sta_channel:'')])+"
+"tr(['Setting','band '+(BN[r.active.band_mode]||'?'),'2.4 GHz HT20, 5 GHz per Optimize','proto '+hx(r.active.proto)+(r.last_sta_channel?', last STA ch '+r.last_sta_channel:'')])+"
 "(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','band '+(BN[r.saved.band_mode]||'?'),'','proto '+hx(r.saved.proto)]):'');"
 "let p=await (await fetch('/api/iperf')).json();"
 "$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
@@ -1413,7 +1421,8 @@ static esp_err_t api_display_post(httpd_req_t *req)
 
 // POST /api/radio {band_mode (0-2), proto (bitmask, shared by STA and AP)} - missing keys keep the
 // saved value; applied after reboot. Older clients may send sta_proto/ap_proto: merged (STA wins).
-// Width (2.4 GHz HT20 / 5 GHz auto), TX power (Optimize) and DTIM (driver default) are not settings.
+// Width (2.4 GHz HT20 locked / 5 GHz via /api/opt bw_5g), TX power (Optimize) and DTIM (driver default)
+// are not radio settings.
 static esp_err_t api_radio_post(httpd_req_t *req)
 {
     READ_BODY_OR_400(j);
@@ -1446,6 +1455,8 @@ static void add_opt_cfg(cJSON *o, const opt_config_t *c)
     cJSON_AddNumberToObject(o, "lwip_core", c->lwip_core);
     cJSON_AddNumberToObject(o, "napt_max", c->napt_max);
     cJSON_AddNumberToObject(o, "napt_tcp_to", c->napt_tcp_to);
+    cJSON_AddNumberToObject(o, "bw_5g", c->bw_5g);
+    cJSON_AddNumberToObject(o, "sdio_mhz", c->sdio_mhz);
 }
 
 // GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
@@ -1463,11 +1474,12 @@ static esp_err_t api_opt_get(httpd_req_t *req)
     cJSON_AddBoolToObject(j, "reboot_required", opt_config_reboot_required(&a, &s));
     cJSON_AddNumberToObject(j, "sdio_active_mhz", opt_sdio_active_mhz());
     cJSON_AddBoolToObject(j, "sdio_fell_back", opt_sdio_fell_back());
+    cJSON_AddNumberToObject(j, "sdio_real_khz", sdio_clk_real_khz());
     return send_json(req, j);
 }
 
 // POST /api/opt {wifi_tx_power_dbm, ps_mode, ap_beacon_ms, country, tcp_wnd_kb, lwip_core, napt_max,
-// napt_tcp_to} - missing keys keep the saved
+// napt_tcp_to, bw_5g (20|40), sdio_mhz (40|50)} - missing keys keep the saved
 // value (removed v0.9.3 keys such as sdio_freq_mhz/napt/log_level are ignored). Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
 static esp_err_t api_opt_post(httpd_req_t *req)
 {
@@ -1481,6 +1493,8 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     radio_field(j, "lwip_core", 0, 2, &c.lwip_core, &ok);
     radio_field(j, "napt_max", 5, 20, &c.napt_max, &ok);         // 5|10|20, checked by opt_config_valid()
     radio_field(j, "napt_tcp_to", 0, 2, &c.napt_tcp_to, &ok);
+    radio_field(j, "bw_5g", 20, 40, &c.bw_5g, &ok);             // 20|40, checked by opt_config_valid()
+    radio_field(j, "sdio_mhz", 40, 50, &c.sdio_mhz, &ok);       // 40|50, checked by opt_config_valid()
     if (cJSON_GetObjectItemCaseSensitive(j, "ap_beacon_ms")) {
         int b = jint(j, "ap_beacon_ms", -1);
         if (opt_beacon_valid(b)) c.ap_beacon_ms = (uint16_t)b; else ok = false;
@@ -1495,7 +1509,7 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     if (err != ESP_OK) {
         return send_result(req, err, NULL, "wifi_tx_power_dbm: 0 or 2-21, ps_mode: 0-2, ap_beacon_ms: 100|200|300, "
                            "country: SE|EU|US|JP, tcp_wnd_kb: 32|64|128, lwip_core: 0-2, "
-                           "napt_max: 5|10|20, napt_tcp_to: 0-2");
+                           "napt_max: 5|10|20, napt_tcp_to: 0-2, bw_5g: 20|40, sdio_mhz: 40|50");
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);

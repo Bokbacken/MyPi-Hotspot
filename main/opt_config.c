@@ -130,9 +130,11 @@ void opt_config_load(void)
     } else {
         opt_config_defaults(&c);    // namespace not created yet = all defaults
     }
-    // v0.9.3: the SDIO clock has no UI any more - always the known-good 40 MHz (a stored 50 is ignored).
+    // v0.9.5: SDIO clock from the Optimize setting. A 50 MHz boot whose trial was never confirmed
+    // (hang/crash/power cut during C5 init) falls back to 40 MHz and stores 40 (auto-fallback).
     bool fallback;
-    uint8_t mhz = opt_sdio_boot_mhz(OPT_DEFAULT_SDIO_MHZ, trial != 0, &fallback);
+    uint8_t mhz = opt_sdio_boot_mhz(c.sdio_mhz, trial != 0, &fallback);
+    if (fallback) c.sdio_mhz = 40;
     // Drop the keys of removed settings once so stale values can never come back.
     if (nvs_open(OPT_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         bool dirty = false;
@@ -143,10 +145,13 @@ void opt_config_load(void)
             }
         }
         if (trial && nvs_set_u8(h, OPT_KEY_SDIO_TRIAL, 0) == ESP_OK) dirty = true;
+        if (fallback && nvs_set_u8(h, OPT_KEY_SDIO_MHZ, 40) == ESP_OK) dirty = true;
         if (dirty) nvs_commit(h);
         nvs_close(h);
     }
     s_sdio_mhz = mhz;
+    s_sdio_fell_back = fallback;
+    if (fallback) ESP_LOGW(TAG, "Previous SDIO 50 MHz boot never confirmed - using and storing 40 MHz (auto-fallback)");
     apply_lwip_tune(&c, true);
     s_active = s_saved = c;
     s_emergency = emerg != 0;
@@ -160,7 +165,9 @@ void opt_config_load(void)
     ESP_LOGI(TAG, "TCP/LwIP/NAT: TCP window %lu bytes, tcpip core %s, NAPT table %u entries, NAPT TCP timeout %lu s",
              (unsigned long)mypi_tcp_wnd, c.lwip_core == 0 ? "auto" : c.lwip_core == 1 ? "0" : "1",
              (unsigned)mypi_napt_max_entries, (unsigned long)(mypi_napt_tcp_timeout_ms / 1000u));
-    ESP_LOGI(TAG, "Fixed defaults: SDIO %d MHz, NAPT on (per AP profile), log level info", mhz);
+    ESP_LOGI(TAG, "Radio/SDIO: 5 GHz width HT%d (2.4 GHz HT20 locked), SDIO %d MHz%s", c.bw_5g, mhz,
+             fallback ? " (fell back from 50)" : mhz == 50 ? " (trial)" : "");
+    ESP_LOGI(TAG, "Fixed defaults: NAPT on (per AP profile), log level info");
 }
 
 void opt_config_get_active(opt_config_t *out)
@@ -200,7 +207,8 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     portENTER_CRITICAL(&s_mux);
     old = s_active;
     s_saved = *c;
-    // Runtime fields take effect now; beacon interval and country stay until the next boot.
+    // Runtime fields take effect now; the boot-only fields (beacon, country, TCP window, LwIP core,
+    // NAPT table, 5 GHz width, SDIO clock) stay until the next boot.
     s_active.wifi_tx_power_dbm = c->wifi_tx_power_dbm;
     s_active.ps_mode = c->ps_mode;
     s_active.napt_tcp_to = c->napt_tcp_to;
@@ -212,8 +220,9 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     bool rb = opt_config_reboot_pending();
     if (reboot_required) *reboot_required = rb;
     ESP_LOGI(TAG, "Optimize settings saved: TX %d dBm, PS %d, beacon %d ms, country %s, TCP window %d KB, "
-             "lwip core %d, napt max %d, napt tcp to %d%s", c->wifi_tx_power_dbm, c->ps_mode, c->ap_beacon_ms,
-             c->country, c->tcp_wnd_kb, c->lwip_core, c->napt_max, c->napt_tcp_to, rb ? " (reboot required)" : "");
+             "lwip core %d, napt max %d, napt tcp to %d, 5 GHz HT%d, SDIO %d MHz%s", c->wifi_tx_power_dbm,
+             c->ps_mode, c->ap_beacon_ms, c->country, c->tcp_wnd_kb, c->lwip_core, c->napt_max, c->napt_tcp_to,
+             c->bw_5g, c->sdio_mhz, rb ? " (reboot required)" : "");
     return ESP_OK;
 }
 
@@ -235,6 +244,12 @@ uint8_t opt_ps_mode(void)
 uint16_t opt_ap_beacon_ms(void)
 {
     return s_loaded ? s_active.ap_beacon_ms : OPT_DEFAULT_BEACON_MS;
+}
+
+uint8_t opt_bw_5g(void)
+{
+    uint8_t mhz = s_loaded ? s_active.bw_5g : OPT_DEFAULT_BW_5G;
+    return mhz == 20 ? RADIO_BW_20 : RADIO_BW_40;
 }
 
 const opt_country_t *opt_country(void)
@@ -286,6 +301,9 @@ bool opt_sdio_fallback_to_40(void)
     ESP_LOGW(TAG, "C5 failure at SDIO 50 MHz - storing 40 MHz (auto-fallback)");
     set_flag(OPT_KEY_SDIO_MHZ, 40);
     set_flag(OPT_KEY_SDIO_TRIAL, 0);
+    portENTER_CRITICAL(&s_mux);
+    s_saved.sdio_mhz = 40;      // the web page shows the stored value (40) until the restart
+    portEXIT_CRITICAL(&s_mux);
     s_sdio_trial = false;
     s_sdio_fell_back = true;
     return true;

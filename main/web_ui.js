@@ -140,8 +140,9 @@
   // --- Optimize page (v0.9.0, trimmed v0.9.3): GET/POST /api/opt + /api/radio, POST /api/clear_emergency ---
   // Same field names and defaults as main/opt_config_core.h. Band and the shared STA/AP protocol mask
   // live in the radio settings (/api/radio). v0.9.4: TCP window, LwIP core and NAPT settings are back.
+  // v0.9.5: 5 GHz width (bw_5g 40|20, 2.4 GHz always HT20) and SDIO clock (sdio_mhz 40|50, auto-fallback).
   const OPT_FIELDS = ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country",
-    "tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to"];
+    "tcp_wnd_kb", "lwip_core", "napt_max", "napt_tcp_to", "bw_5g", "sdio_mhz"];
   const OPT_PS_NAMES = ["Off", "Min modem", "Max modem"];
   const OPT_CORE_NAMES = ["Auto (no pin)", "Core 0", "Core 1"];
   const OPT_NAPT_MAX_ENTRIES = { 5: 512, 10: 1024, 20: 2048 };
@@ -155,10 +156,10 @@
 
   function optDefaults() {
     return { wifi_tx_power_dbm: 0, ps_mode: 0, ap_beacon_ms: 100, country: "SE",
-      tcp_wnd_kb: 32, lwip_core: 0, napt_max: 5, napt_tcp_to: 2 };
+      tcp_wnd_kb: 32, lwip_core: 0, napt_max: 5, napt_tcp_to: 2, bw_5g: 40, sdio_mhz: 40 };
   }
 
-  // AP beacon interval, country, TCP window, LwIP core and NAPT max sessions are only read at boot
+  // AP beacon interval, country, TCP window, LwIP core, NAPT max sessions, 5 GHz width and SDIO clock are only read at boot
   // (same rule as opt_config_reboot_required()); the NAPT TCP timeout applies immediately.
   function optRebootRequired(active, saved) {
     return !!active && !!saved &&
@@ -166,7 +167,9 @@
        String(active.country) !== String(saved.country) ||
        Number(active.tcp_wnd_kb) !== Number(saved.tcp_wnd_kb) ||
        Number(active.lwip_core) !== Number(saved.lwip_core) ||
-       Number(active.napt_max) !== Number(saved.napt_max));
+       Number(active.napt_max) !== Number(saved.napt_max) ||
+       Number(active.bw_5g) !== Number(saved.bw_5g) ||
+       Number(active.sdio_mhz) !== Number(saved.sdio_mhz));
   }
 
   /** Protocol bitmask from the a/b/g/n/ac/ax checkboxes (0 = none checked = default). */
@@ -210,7 +213,7 @@
 
   const OPT_SELECTS = [["opt-tx", "wifi_tx_power_dbm"], ["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"],
     ["opt-country", "country"], ["opt-tcp-wnd", "tcp_wnd_kb"], ["opt-lwip-core", "lwip_core"],
-    ["opt-napt-max", "napt_max"], ["opt-napt-tcp-to", "napt_tcp_to"]];
+    ["opt-napt-max", "napt_max"], ["opt-napt-tcp-to", "napt_tcp_to"], ["opt-bw-5g", "bw_5g"], ["opt-sdio", "sdio_mhz"]];
 
   function optFillForm(document, d) {
     for (const [id, k] of OPT_SELECTS) {
@@ -257,6 +260,9 @@
       "opt-lwip-core-st": "active " + (OPT_CORE_NAMES[a.lwip_core] || "?") + pend("lwip_core"),
       "opt-napt-max-st": "active " + (OPT_NAPT_MAX_ENTRIES[a.napt_max] || "?") + " sessions" + pend("napt_max"),
       "opt-napt-tcp-to-st": "active " + (OPT_NAPT_TCP_TO_NAMES[a.napt_tcp_to] || "?"),
+      "opt-bw-5g-st": "active 5 GHz HT" + a.bw_5g + " (2.4 GHz always HT20)" +
+        (Number(a.bw_5g) !== Number(d.bw_5g) ? " - saved HT" + d.bw_5g + ", reboot pending" : ""),
+      "opt-sdio-st": sdioStatus(d),
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +
         (d.emergency_mode_now ? " (emergency mode active now)" : "") + "; auto-clears on successful boot",
     };
@@ -266,8 +272,19 @@
         (ra.band_mode !== rs.band_mode ? " - saved " + (OPT_BAND_NAMES[rs.band_mode] || "?") + ", reboot pending" : "");
       st["opt-proto-st"] = "active " + protoHint(ra.proto, ra.band_mode) +
         (ra.proto !== rs.proto ? " - saved " + protoLabel(rs.proto) + ", reboot pending" : "");
+      if (r.info && r.info.sta_width && Number(r.sta_channel) > 14) st["opt-bw-5g-st"] += "; STA link now " + r.info.sta_width;
     }
     return st;
+  }
+
+  /** SDIO row: clock in use this boot (real bus clock if known), fallback notice, pending change. */
+  function sdioStatus(d) {
+    const mhz = d.sdio_active_mhz !== undefined ? Number(d.sdio_active_mhz) : Number((d.active || d).sdio_mhz);
+    let t = "active " + mhz + " MHz";
+    if (d.sdio_real_khz) t += " (bus " + (Number(d.sdio_real_khz) / 1000) + " MHz)";
+    if (d.sdio_fell_back) t += " - fell back from 50 MHz after a C5 failure";
+    else if (d.sdio_mhz !== undefined && Number(d.sdio_mhz) !== mhz) t += " - saved " + d.sdio_mhz + " MHz, reboot pending";
+    return t;
   }
 
   function radioRebootRequired(r) {
@@ -372,7 +389,7 @@
   }
 
   const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles,
-    OPT_FIELDS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, optLoad, optSave, optClearEmergency,
+    OPT_FIELDS, OPT_SELECTS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, sdioStatus, optLoad, optSave, optClearEmergency,
     PROTO_BITS, protoMaskFromChecks, protoSetChecks, protoFilterForBand, protoLabel, protoHint, radioFillForm, radioReadForm,
     radioRebootRequired };
   root.MyPiSerial = api;

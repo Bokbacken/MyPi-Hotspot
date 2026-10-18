@@ -23,6 +23,7 @@
 #include "esp_hosted_transport_config.h"
 #include "nvs.h"
 #include "opt_config.h"
+#include "sdio_clk.h"
 #include "profiles.h"
 #include "rescue.h"
 #include "sdkconfig.h"
@@ -258,7 +259,8 @@ void wifi_coproc_refresh(void)
     c.sdio_clk = CP_SDIO_CLK; c.sdio_cmd = CP_SDIO_CMD;
     c.sdio_d0 = CP_SDIO_D0; c.sdio_d1 = CP_SDIO_D1; c.sdio_d2 = CP_SDIO_D2; c.sdio_d3 = CP_SDIO_D3;
     c.reset_gpio = CP_RESET_GPIO;
-    c.sdio_freq_khz = opt_sdio_active_mhz() * 1000;     // v0.9.0: runtime clock from the Optimize settings
+    int real_khz = sdio_clk_real_khz();                 // v0.9.5: what the SDMMC host really runs at
+    c.sdio_freq_khz = real_khz > 0 ? real_khz : opt_sdio_active_mhz() * 1000;
 
     esp_hosted_coprocessor_fwver_t ver = {0};
     char target[16] = "?";
@@ -581,7 +583,7 @@ esp_err_t wifi_ap_start(int slot)
     }
     if (err == ESP_OK && mode != WIFI_MODE_APSTA) {
         apply_proto(WIFI_IF_AP, s_radio.sta_proto);    // shared mask (v0.9.3)
-        apply_bw(WIFI_IF_AP, RADIO_BW_AUTO);           // 2.4 GHz HT20 / 5 GHz HT40
+        apply_bw(WIFI_IF_AP, opt_bw_5g());             // 2.4 GHz HT20 (locked) / 5 GHz Optimize width
     }
     if (err == ESP_OK) err = ap_configure(slot);
     unlock();
@@ -760,7 +762,8 @@ esp_err_t wifi_radio_save(const wifi_radio_cfg_t *in)
 
 // Set the channel width of an interface. HARD RULE: 2.4 GHz is always HT20 (never HT40),
 // whatever the selection, so the per-band esp_wifi_set_bandwidths() is used with ghz_2g =
-// WIFI_BW20; the selection (20/40, "auto" = 40 where allowed) only applies to 5 GHz.
+// WIFI_BW20; the selection (Optimize bw_5g via opt_bw_5g(): 20/40, "auto" = 40) only applies to 5 GHz.
+// The radio blob's sta_bw/ap_bw fields are ignored (kept for NVS compatibility).
 // If the per-band call is rejected, the single-band call is only used with 20 MHz.
 static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 {
@@ -1092,6 +1095,8 @@ static void wifi_task(void *arg)
     if (hr != 0) {
         ESP_LOGE(TAG, "ESP-Hosted init/connect failed (%d) at %d MHz", hr, opt_sdio_active_mhz());
         init_err = ESP_FAIL;
+    } else {
+        ESP_LOGI(TAG, "SDIO bus clock: configured %d MHz, actual %d kHz", opt_sdio_active_mhz(), sdio_clk_real_khz());
     }
 
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
@@ -1134,8 +1139,9 @@ static void wifi_task(void *arg)
     apply_band_mode(s_radio.band_mode);
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.sta_proto);
-    apply_bw(WIFI_IF_STA, RADIO_BW_AUTO);
-    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, RADIO_BW_AUTO);
+    // v0.9.5: 5 GHz width from Optimize (HT40 default / HT20), shared by STA and AP; 2.4 GHz HT20 locked.
+    apply_bw(WIFI_IF_STA, opt_bw_5g());
+    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, opt_bw_5g());
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect
     // TX power needs a started radio; protocols are re-applied in case the
     // driver reset them on start.

@@ -11,8 +11,10 @@
 //   lwip_core         tcpip task pinning 0 auto / 1 core 0 / 2 core 1 (boot: sys_thread_new wrapper)
 //   napt_max          NAPT table 5/10/20 = 512/1024/2048 entries (boot)
 //   napt_tcp_to       NAPT idle TCP timeout 2 = 2 h / 1 = 1 h / 0 = 30 min (runtime)
-// Fixed defaults (no UI, old keys erased at boot): SDIO 40 MHz, NAPT on (per AP profile NAT flag),
-// log level info.
+// Radio / transport (v0.9.5, boot):
+//   bw_5g             5 GHz channel width 40 / 20 MHz, shared by STA and AP (2.4 GHz is always HT20)
+//   sdio_mhz          SDIO clock 40 / 50 MHz; 50 is a trial with auto-fallback to 40 on a C5 failure
+// Fixed defaults (no UI, old keys erased at boot): NAPT on (per AP profile NAT flag), log level info.
 // Plus the emergency flag and the last STA channel (u8 "sta_last_ch", AP channel hint at boot).
 
 #include <stdbool.h>
@@ -40,6 +42,8 @@ uint8_t opt_tx_power_dbm(void);
 uint8_t opt_ps_mode(void);
 /** AP beacon interval in ms/TU (100/200/300), value read at boot. */
 uint16_t opt_ap_beacon_ms(void);
+/** 5 GHz channel width read at boot: RADIO_BW_20 or RADIO_BW_40 (wifi.h). 2.4 GHz stays HT20 regardless. */
+uint8_t opt_bw_5g(void);
 /** Regulatory domain read at boot (never NULL). */
 const opt_country_t *opt_country(void);
 /** Global log level (fixed info since v0.9.3). */

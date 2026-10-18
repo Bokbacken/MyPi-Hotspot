@@ -5,6 +5,21 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.5 — 2026-10-18 (builds, not hardware-tested)
+
+- Optimize page, Wi-Fi radio grid: two new dropdowns, both need a reboot.
+  - 5 GHz channel width (`bw_5g`): HT40 (default) / HT20. One value for STA and AP (same radio),
+    passed to `apply_bw()` via `opt_bw_5g()`. 2.4 GHz stays locked to HT20. The radio blob's
+    `sta_bw` / `ap_bw` stay ignored. The status shows the active width and the current STA link width.
+  - SDIO clock (`sdio_mhz`): 40 MHz (default) / 50 MHz. The stored value is used again at boot,
+    with the existing trial / auto-fallback: if the C5 fails at 50 MHz, the key is rewritten to 40
+    and the page shows "fell back from 50 MHz".
+- 50 MHz is now really used: IDF v6.1 capped SDIO cards at 40 MHz in `sdmmc_io_enable_hs_mode()`.
+  New `main/sdio_clk.c` wraps it (`-Wl,--wrap=sdmmc_io_enable_hs_mode`) and lifts the card limit
+  to the configured host clock (max 50 MHz). The real bus clock is logged at boot and returned by
+  `GET /api/opt` as `sdio_real_khz`.
+- 50 MHz signal integrity on the P4 <-> C5 wiring is untested; the auto-fallback protects the boot.
+
 ## 0.9.4 — 2026-10-18 (builds, not hardware-tested)
 
 - The TCP / LwIP / NAT settings are back on the Optimize page, in a new section "TCP / LwIP / NAT"
