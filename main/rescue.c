@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 #include "eth.h"
 #include "logstore.h"
+#include "opt_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "profiles.h"
@@ -142,6 +143,9 @@ static void rescue_task(void *arg)
     char msg[96];
     snprintf(msg, sizeof(msg), "emergency mode: %s (after %lu automatic restart(s))", rescue_reason_text(s_st.reason),
              (unsigned long)s_retry.count);
+    // v0.9.0: remember in NVS that emergency mode was entered because of the C5 (shown on the
+    // Optimize page; cleared automatically after the next successful C5 init, or manually).
+    if (s_st.reason != RESCUE_REASON_SWIPE) opt_emergency_set(true);
     for (int i = 0; i < 30 && logstore_save_now(msg) == ESP_ERR_INVALID_STATE; i++) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
@@ -171,6 +175,33 @@ void rescue_select(int option)
     if (s_task) xTaskNotifyGive(s_task);
 }
 
+void rescue_c5_init_ok(void)
+{
+    // v0.9.0: the C5 came up (ESP-Hosted transport + esp_wifi_init OK) - a stale emergency flag
+    // from an earlier boot is cleared automatically.
+    if (!opt_emergency_flag()) return;
+    if (opt_emergency_set(false) == ESP_OK) {
+        ESP_LOGI(TAG, "Emergency flag cleared after successful C5 init");
+    } else {
+        ESP_LOGW(TAG, "Could not clear the emergency flag in NVS");
+    }
+}
+
+// SDIO 50 MHz auto-fallback (v0.9.0): 40 MHz is stored in NVS by opt_sdio_fallback_to_40()
+// and the P4 restarts (resetting the C5). Does not use the automatic-restart budget.
+static void sdio_fallback_task(void *arg)
+{
+    rescue_reason_t reason = (rescue_reason_t)(uintptr_t)arg;
+    char msg[96];
+    opt_sdio_fallback_to_40();
+    snprintf(msg, sizeof(msg), "SDIO 50 MHz auto-fallback to 40 MHz (%s) - restarting", rescue_reason_text(reason));
+    ESP_LOGE(TAG, "=== %s ===", msg);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    logstore_save_now(msg);
+    logstore_before_restart(msg);
+    esp_restart();
+}
+
 void rescue_request(rescue_reason_t reason)
 {
     retry_check();
@@ -181,6 +212,15 @@ void rescue_request(rescue_reason_t reason)
             portEXIT_CRITICAL(&s_mux);
             return;     // restart already on its way
         }
+        bool sdio50 = opt_sdio_active_mhz() == 50;
+        if (sdio50) s_retry_pending = true;
+        portEXIT_CRITICAL(&s_mux);
+        if (sdio50) {
+            if (xTaskCreate(sdio_fallback_task, "sdio_fb", 4096, (void *)(uintptr_t)reason, 5, NULL) == pdPASS) return;
+            s_retry_pending = false;
+            ESP_LOGE(TAG, "Failed to create SDIO fallback task");
+        }
+        portENTER_CRITICAL(&s_mux);
         if (s_retry.count < RETRY_MAX) {
             s_retry.count++;
             s_retry.reason = reason;

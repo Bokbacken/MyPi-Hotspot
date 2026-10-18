@@ -16,6 +16,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs.h"
+#include "opt_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -271,10 +272,14 @@ static const char *const DEBUG_TAGS[] = { "main", "display", "touch", "pintest",
 
 static void apply_debug_levels(void)
 {
+    // Debug mode wins; otherwise the app tags follow the Optimize log level (default INFO).
+    esp_log_level_t base = opt_log_esp_level();
     for (size_t i = 0; i < sizeof(DEBUG_TAGS) / sizeof(DEBUG_TAGS[0]); i++) {
-        esp_log_level_set(DEBUG_TAGS[i], s_debug ? ESP_LOG_DEBUG : ESP_LOG_INFO);
+        esp_log_level_set(DEBUG_TAGS[i], s_debug ? ESP_LOG_DEBUG : base);
     }
 }
+
+void diag_log_levels_refresh(void) { apply_debug_levels(); }
 
 void diag_debug_load(void)
 {

@@ -9,6 +9,54 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.9.4 validation (TCP / LwIP / NAT options back, not hardware-tested)
+
+1. Make sure the test client is on the MyPi AP: SSID is the MyPi AP SSID, the client's gateway is
+   the MyPi AP address, and the client appears in the device's client list. (The v0.9.1/v0.9.2
+   results were invalid because the client was on another AP.)
+2. OTA to 0.9.4 (partition table unchanged). Boot log has a `TCP/LwIP/NAT` line with
+   `TCP window 32768 bytes, tcpip core auto, NAPT table 512 entries, NAPT TCP timeout 7200 s`.
+3. Baseline: run the same test 3 times with defaults and note the results.
+4. Change one setting at a time, Apply & Save, reboot, check the boot log, repeat the test:
+   - TCP window 64 KB, then 128 KB (only affects TCP ending on the P4: iperf to the device, web UI,
+     OTA upload). Watch free heap during an OTA with 128 KB; go back to 32/64 KB if SDIO
+     `dma_alloc failed` appears.
+   - LwIP core: Core 0, then Core 1 (boot log: `LwIP tcpip task pinned to core N`).
+   - NAPT max sessions / TCP timeout: only matter with many client connections.
+5. Merge PR #17 to main only after these tests.
+
+## Hotspot v0.9.3 validation (trimmed Optimize, APSTA channel, not hardware-tested)
+
+1. OTA to 0.9.3 (partition table unchanged). Boot log: `Removed obsolete NVS key ...` once for
+   old settings, `SDIO clock 40000 kHz`, radio settings with one shared protocol mask.
+2. Optimize: Band, protocol checkboxes (STA = AP), TX power, power save, beacon, country only.
+   Check that saved n+ac (old STA value) shows as checked after the update.
+3. Connect the STA on a 5 GHz channel, reboot: the AP should start on the same channel
+   (`sta_last_ch`) before the STA reconnects. Repeat with Band = 2.4 GHz only: the 5 GHz value
+   must be ignored (AP on 1 until the STA connects).
+4. Move the upstream AP to another channel: AP clients should follow (CSA, `csa_count = 3`).
+5. ax: tick ax, reboot, run an upload test — expect the known C5 issue; untick to recover.
+6. Debug page: emergency flag status and Clear button still work.
+
+## Hotspot v0.9.0 validation (Optimize, not hardware-tested)
+
+1. OTA to 0.9.0; boot log must show `ESP-Hosted SDIO clock 40000 kHz` and Wi-Fi as before
+   (ESP-Hosted is now initialized from `wifi_task()`, not by the constructor).
+2. Optimize tab: defaults 40 MHz / radio setting / 64 KB / NAPT on / Info; emergency "clear".
+3. Change log level and NAPT → applied immediately, no banner. Select 50 MHz → banner, Reboot now.
+4. After reboot: `SDIO clock 50 MHz (trial ...)` then `SDIO 50 MHz confirmed (C5 up)`; run iperf
+   and compare with 40 MHz. If the C5 fails at 50 MHz the log shows `SDIO 50 MHz auto-fallback to
+   40 MHz` and the next boot runs at 40 MHz (Optimize tab shows "auto-fallback").
+5. Emergency: provoke emergency mode (C5 unplugged/held in reset, 2 failed inits) → flag SET;
+   reconnect, reboot → `Emergency flag cleared after successful C5 init`. Also test Clear button.
+6. 5 GHz and 2.4 GHz: confirm in the System tab that 2.4 GHz runs at 20 MHz with width "40/auto".
+
+## Optimize follow-ups
+
+- v0.9.1 on hardware: STA power save Off/Min/Max applies without reboot (check throughput and
+  AP client stability); beacon 200/300 ms and country JP/US take effect after reboot.
+- Watch internal heap after moving the LVGL flush buffers to internal RAM (+19.2 KB DRAM).
+
 ## Hotspot v0.8.7 validation (keyboard module, not hardware-tested)
 
 1. Wi-Fi → choose a network without a profile → the keyboard opens full screen.

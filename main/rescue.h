@@ -45,6 +45,12 @@ typedef struct {
 void rescue_request(rescue_reason_t reason);
 /** Wi-Fi came up properly: re-arm the automatic C5 restart. */
 void rescue_c5_ok(void);
+/**
+ * C5 init succeeded (ESP-Hosted transport up, esp_wifi_init OK): if the emergency flag is set in
+ * NVS (OPT_KEY_EMERGENCY) it is cleared automatically (v0.9.0). Emergency mode itself is still
+ * entered on the second failed init (rescue_request()).
+ */
+void rescue_c5_init_ok(void);
 /** Automatic C5 restarts since Wi-Fi last came up, and the cause of the last one. */
 int rescue_auto_restarts(rescue_reason_t *last_reason);
 bool rescue_active(void);

@@ -5,6 +5,202 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.8 — 2026-10-18 (builds, not hardware-tested)
+
+- Revert the v0.9.7 buffer tuning. HW test of v0.9.7: AP disappeared shortly
+  after start (download ~1.5 Mbit/s, upload 0, then link lost). Host
+  `sdkconfig.defaults` and `c5_slave/sdkconfig.defaults.esp32c5` are restored to
+  the v0.9.6 values (host SDIO RX queue 64, RX staging 4, default cache TX,
+  C5 buffers 16/64/64, BA 32, C5 SDIO queues 40/40).
+- C5 tuning is on hold until an official ESP-Hosted release (3.0.10+); use the
+  previous "3.0.9 tuned" C5 firmware.
+- Kept: the log line in `wifi.c` showing the Wi-Fi buffer config sent to the C5.
+- 0.9.7 HW result: not usable (see above). 0.9.6 HW result: HT40 links at
+  40 MHz but is slower than ac/HT20; ac/HT20 stays the recommended setting.
+
+## 0.9.7 — 2026-10-18 (HW-tested: unstable, reverted in 0.9.8)
+
+C5 buffer / upload throughput tuning. Upload path: client -> C5 Wi-Fi RX -> SDIO C5->P4 -> Ethernet.
+
+- **What reaches the C5:** at `esp_wifi_init()` the P4 sends a `wifi_init_config_t` built from
+  `WIFI_RMT_*`. The C5 slave (esp_hosted 3.0.9, RPC v2) applies static/dynamic RX (32/128),
+  dynamic TX (128), AMPDU flags, RX BA window (64) and the AMSDU flag from the host as-is.
+  **Not applied on the C5:** cache TX buffers (the C5 has no PSRAM, so it replaces the host value
+  with 0) and the TX BA window (not a `wifi_init_config_t` field; C5-local Kconfig only).
+- P4 `sdkconfig.defaults`:
+  - `CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM` 32 -> 64 (no effect with the current C5, see above).
+  - `CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE` 64 -> 128 (C5 -> P4, upload direction).
+    `TX_Q_SIZE` stays 64.
+  - `CONFIG_ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS` 4 -> 6 (range 2-8; 8 not used because each
+    slot is up to ~14 KB internal DMA RAM, cf. the v0.8.5 SDIO DMA starvation). Duplicate entry removed.
+  - `WIFI_RMT_IRAM_OPT` / `RX_IRAM_OPT` / `EXTRA_IRAM_OPT` pinned to y (were already y; code
+    placement of the Wi-Fi driver, which runs on the C5, so no effect on the P4 image).
+  - `CONFIG_WIFI_RMT_AMSDU_TX_ENABLED` deliberately left off: the flag is forwarded to the C5,
+    where IDF only allows AMSDU TX with PSRAM cache TX buffers; untested and only helps download.
+- `c5_slave/sdkconfig.defaults.esp32c5` (needs a new C5 build + `/c5update`, still esp_hosted
+  3.0.9 / RPC v2): static RX 16 -> 32, dynamic RX 64 -> 128, dynamic TX 64 -> 128 (fallback
+  values, matching what the P4 already sends), TX BA window 32 -> 64, RX BA window 32 -> 64,
+  slave SDIO TX queue (C5 -> P4) 40 -> 64, RX queue 40 -> 48, `ESP_WIFI_EXTRA_IRAM_OPT=y`.
+  Cache TX / AMSDU TX are not available on the C5 (no PSRAM).
+- `main/wifi.c`: one log line after `esp_wifi_init()` prints the buffer config sent to the C5.
+
+## 0.9.6 — 2026-10-18 (builds, not hardware-tested)
+
+- Fix: 5 GHz HT40 never came up (link stayed HT20 even against an 80 MHz AP). The ESP32-C5 only
+  supports 40 MHz in 11an mode; with 11ac/11ax enabled on 5 GHz the driver keeps 20 MHz. With
+  `bw_5g` = HT40, `apply_proto()` now drops 11ac/11ax from the 5 GHz protocol set (a/n only);
+  HT20 keeps the selected protocols. 2.4 GHz is unchanged (HT20, b/g/n[/ax]).
+- The width is re-applied after the post-start protocol re-apply (a protocol change can reset it).
+- Optimize labels: "HT40 - 11n (default)" / "HT20 - ac/ax allowed", with an explanation.
+
+## 0.9.5 — 2026-10-18 (builds, not hardware-tested)
+
+- Optimize page, Wi-Fi radio grid: two new dropdowns, both need a reboot.
+  - 5 GHz channel width (`bw_5g`): HT40 (default) / HT20. One value for STA and AP (same radio),
+    passed to `apply_bw()` via `opt_bw_5g()`. 2.4 GHz stays locked to HT20. The radio blob's
+    `sta_bw` / `ap_bw` stay ignored. The status shows the active width and the current STA link width.
+  - SDIO clock (`sdio_mhz`): 40 MHz (default) / 50 MHz. The stored value is used again at boot,
+    with the existing trial / auto-fallback: if the C5 fails at 50 MHz, the key is rewritten to 40
+    and the page shows "fell back from 50 MHz".
+- 50 MHz is now really used: IDF v6.1 capped SDIO cards at 40 MHz in `sdmmc_io_enable_hs_mode()`.
+  New `main/sdio_clk.c` wraps it (`-Wl,--wrap=sdmmc_io_enable_hs_mode`) and lifts the card limit
+  to the configured host clock (max 50 MHz). The real bus clock is logged at boot and returned by
+  `GET /api/opt` as `sdio_real_khz`.
+- 50 MHz signal integrity on the P4 <-> C5 wiring is untested; the auto-fallback protects the boot.
+
+## 0.9.4 — 2026-10-18 (builds, not hardware-tested)
+
+- The TCP / LwIP / NAT settings are back on the Optimize page, in a new section "TCP / LwIP / NAT"
+  below the radio settings (dropdowns only). The v0.9.1/v0.9.2 "no improvement" hardware results
+  were invalid: the test client was connected to a different AP than the MyPi device.
+  - TCP window (`tcp_wnd_kb`): 32 / 64 / 128 KB, default 32, reboot required. Now really applied:
+    `main/lwip_tune.h` replaces `CONFIG_LWIP_TCP_WND_DEFAULT` inside lwIP with the variable
+    `mypi_tcp_wnd`, set by `opt_config_load()` before the tcpip task starts (v0.9.0's `tcp_kb` was
+    display-only). Affects only TCP that ends on the P4 (web UI, OTA, iperf to the device); NAT
+    forwarded client traffic is not affected. 128 KB pins more internal RAM (see the v0.8.5 OTA note).
+  - LwIP tcpip task core (`lwip_core`): Auto / Core 0 / Core 1, reboot required (`sys_thread_new`
+    wrapper restored, `-Wl,--wrap=sys_thread_new`).
+  - NAPT max sessions (`napt_max`): 512 / 1024 / 2048, reboot required.
+  - NAPT TCP timeout (`napt_tcp_to`): 2 h / 1 h / 30 min, applied immediately.
+- The four keys are no longer in the obsolete-key list, so they are not erased at boot. `tcp_kb`,
+  `napt` and `log_lvl` stay obsolete; SDIO clock and log level stay fixed (40 MHz, Info).
+- Unchanged from 0.9.3: band, shared protocol, TX power, power save, beacon, country,
+  `sta_last_ch`, `csa_count = 3`, emergency flag on Debug. Partition table unchanged (OTA is enough).
+
+## 0.9.3 — 2026-10-18 (builds, not hardware-tested)
+
+- Wi-Fi APSTA channel handling (single C5 radio, AP always follows the STA):
+  - The last channel the STA connected on is stored in NVS (`mypi_opt` / `sta_last_ch`, u8,
+    1-14 or a 5 GHz channel 36-177). Written from the Wi-Fi task only when it changes.
+  - `ap_configure()` picks the AP channel as: current STA channel > current AP channel >
+    persisted last STA channel (only if it matches the band mode and the country's 2.4 GHz
+    range) > 1 (36 in 5 GHz-only mode).
+  - `ap.csa_count = 3`, so AP clients get channel switch announcements when the AP follows
+    the STA to a new channel.
+  - `refresh_ap_channel()` reads the live channel with `esp_wifi_get_channel()` and is forced
+    once after every `STA_CONNECTED` (dirty flag).
+  - `connect_now()` passes the last STA channel as scan hint (`wifi_config_t.sta.channel`) when it
+    fits the band mode; no `esp_wifi_set_channel()` and no AP restart. The hint is dropped after a
+    failed attempt so a moved upstream AP is still found by a full scan.
+- Optimize page trimmed back. Kept: Band (both / 2.4 / 5 GHz), one protocol selector shared by
+  STA and AP (checkboxes a / b / g / n / ac / ax), Wi-Fi TX power (default, 8 dBm .. 21 dBm max),
+  STA power save, AP beacon interval, Wi-Fi country. Emergency flag status / Clear moved to Debug.
+- 802.11ax can be selected again (known C5 firmware issue: upload can drop to ~0, ESP-IDF
+  #19238). "None checked" still means b/g/n + a/n/ac without ax. A band left without any checked
+  protocol uses its default set.
+- Removed settings now run on fixed defaults: SDIO 40 MHz (auto-fallback mechanism kept, no UI),
+  LwIP core auto (the `sys_thread_new` wrapper is gone), NAPT 512 sessions / 2 h TCP timeout,
+  NAPT always on (per AP profile NAT flag), log level Info, width auto (2.4 GHz HT20 locked,
+  5 GHz HT40), driver default DTIM, TX power only from Optimize.
+  Old NVS keys `napt`, `log_lvl`, `lwip_core`, `napt_max`, `napt_tcp_to` are erased at boot; a
+  stored `sdio_mhz` is ignored. In the radio blob the width, TX power and DTIM fields are ignored.
+- Protocol migration: the old separate masks are merged once — the STA value wins if non-zero,
+  else the AP value — and the same mask is applied to both interfaces.
+- API: `/api/radio` takes `{band_mode, proto}` (old `sta_proto`/`ap_proto` still accepted and
+  merged) and reports `proto` and `last_sta_channel`; `/api/opt` only has `wifi_tx_power_dbm`,
+  `ps_mode`, `ap_beacon_ms`, `country`.
+- OTA is enough (partition table unchanged).
+
+## 0.9.2 — 2026-10-18 (builds, not hardware-tested)
+
+- Optimize: new "LwIP / NAT" section below "C5 Radio / APSTA" (dropdowns only, NVS `mypi_opt`):
+  - LwIP task core affinity `lwip_core` (u8 0 auto / 1 core 0 / 2 core 1, default 0); reboot
+    required. `CONFIG_LWIP_TCPIP_TASK_AFFINITY` is a Kconfig constant in IDF v6.1, so the
+    firmware wraps `sys_thread_new()` (`-Wl,--wrap=sys_thread_new`) and creates the `tcpip`
+    task pinned to the selected core when `esp_netif_init()` starts it.
+  - NAPT max sessions `napt_max` (u8 5/10/20 = 512/1024/2048 entries, default 5); reboot
+    required. lwIP's `IP_NAPT_MAX` is redirected to a variable set at boot (`main/lwip_tune.h`,
+    force-included into the lwip component); the table is allocated (PSRAM preferred) on the
+    first NAPT enable.
+  - NAPT TCP timeout `napt_tcp_to` (u8 2/1/0 = 2 h / 1 h / 30 min, default 2); applies
+    immediately (`IP_NAPT_TIMEOUT_MS_TCP` is read by every NAPT GC pass). Note: the lwIP
+    default was 30 min; the new default is 2 h as requested.
+- sdkconfig.defaults: `CONFIG_LWIP_TCP_MSS=1460` (was the IDF default 1440).
+  The requested `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=8192`, `CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64` and
+  `CONFIG_LWIP_TCP_RECVMBOX_SIZE=12` were not applied: the project already uses 65535 / 128 / 96,
+  so they would be reductions, and 12 is below the required TCP_WND/MSS + 2 = 25.
+
+## 0.9.1 — 2026-10-18 (builds, not hardware-tested)
+
+- Web: the Wi-Fi protocol / band / width controls moved from System to the top of Optimize
+  (before the SDIO setting). Selecting HT40 shows "HT40 on 2.4 GHz is not recommended — AP+STA
+  share the same channel. Use HT20." HT40 stays selectable for future 5 GHz use; the firmware
+  still always applies HT20 on 2.4 GHz (`apply_bw`, `.ghz_2g = WIFI_BW20`).
+- Web: Max TX power and AP DTIM in that block are now dropdowns (no text/number inputs on Optimize).
+  The AP beacon field of the radio block is replaced by the Optimize beacon setting below.
+- New "C5 Radio / APSTA" settings (NVS namespace `mypi_opt`):
+  - STA power save `ps_mode` (u8 0/1/2 = WIFI_PS_NONE / MIN_MODEM / MAX_MODEM, default 0),
+    applied immediately via `esp_wifi_set_ps()`; UI tip "Recommended: Off in AP+STA mode".
+  - AP beacon interval `beacon_ms` (u16 100/200/300, default 100; u16 because 200/300 do not fit
+    in u8), set in `wifi_config_t.ap.beacon_interval`; reboot required.
+  - Wi-Fi country `country` (string SE/EU/US/JP, default SE) set with `esp_wifi_set_country()`
+    before Wi-Fi start (manual policy; SE/EU 1-13 @ 20 dBm, US 1-11 @ 30 dBm, JP 1-14 @ 23 dBm);
+    reboot required.
+- Removed the TCP window option (32/64/128 KB): no measurable difference on hardware. The lwIP
+  window is fixed at 32 KB (`CONFIG_LWIP_TCP_WND_DEFAULT=32768`, saves internal RAM) and the
+  obsolete `tcp_kb` NVS key is erased once at boot.
+
+## 0.9.0 — 2026-10-18 (builds, not hardware-tested)
+
+### Added
+- **Optimize settings** (`main/opt_config.c/.h`, pure logic in `main/opt_config_core.h`),
+  NVS namespace `mypi_opt` (all `u8`): `sdio_mhz` (40|50), `tx_dbm` (0 = radio setting, 2–21),
+  `tcp_kb` (32|64|128), `napt` (0|1), `log_lvl` (0 error .. 3 debug), plus the internal flags
+  `sdio_try` (50 MHz trial not yet confirmed) and `emerg` (emergency flag). Loaded in `app_main()`
+  right after NVS init; log level, TX power and NAPT apply at runtime, SDIO clock and TCP window at boot.
+- **SDIO 50 MHz with auto-fallback**: ESP-Hosted is no longer initialized by its constructor
+  (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n`); `wifi_task()` sets the SDIO clock from
+  NVS (`esp_hosted_sdio_set_config()`) before `esp_hosted_init()` + `esp_hosted_connect_to_slave()`.
+  A 50 MHz boot is a trial (`sdio_try=1` before the transport starts). Confirmed when the transport
+  and `esp_wifi_init()` succeed. On any C5 failure at 50 MHz (`rescue_request()`: init failure/timeout,
+  transport failure, no response) 40 MHz is stored and the P4 restarts — without consuming the
+  automatic-restart budget. If a 50 MHz boot hangs/crashes before confirming, the next boot sees
+  `sdio_try=1` and falls back to 40 MHz as well.
+- **Emergency auto-clear**: emergency mode (entered on the second failed C5 init, logic unchanged)
+  now also sets `emerg=1`. After a successful C5 init (`rescue_c5_init_ok()`) a set flag is cleared
+  and `Emergency flag cleared after successful C5 init` is logged.
+- **Web "Optimize" tab** (radio buttons, dropdowns, checkbox only — no text input): SDIO clock,
+  TX power, TCP window, NAPT, log level, emergency status with **Clear**, **Apply & Save** and a
+  yellow "Some changes require reboot" banner with **Reboot now**.
+- API: `GET /api/opt`, `POST /api/opt` (→ `{"ok":true,"reboot_required":bool}`),
+  `POST /api/clear_emergency`. JSON fields: `sdio_freq_mhz`, `wifi_tx_power_dbm`, `tcp_window_kb`,
+  `napt`, `log_level`, `emergency_active` (read-only).
+
+### Changed
+- 2.4 GHz is hard-locked to HT20: `apply_bw()` always uses `esp_wifi_set_bandwidths()` with
+  `ghz_2g = WIFI_BW20`; the width selection only applies to 5 GHz. 11ax stays off.
+- `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=y`, `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535`.
+  `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10` was not added: the P4 uses `esp_wifi_remote`
+  (`CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=32`, kept; 10 would lower it). `CONFIG_ESP32P4_SPIRAM_SPEED`
+  does not exist; PSRAM already runs at 80 MHz (`CONFIG_SPIRAM_SPEED_80M`).
+- RAM/PSRAM: LVGL flush buffers (status + keyboard, 2 × 9.6 KB) moved to internal RAM
+  (time-critical); pin-test report (1.5 KB) and STA profiles (1.6 KB) moved to PSRAM.
+- Optimize log level is the base level for the app tags; debug mode still wins.
+
+### Known limitations
+- `tcp_window_kb` is stored and reported, but lwIP's `TCP_WND` is a build-time constant
+  (`CONFIG_LWIP_TCP_WND_DEFAULT`, 64 KB); the selection does not change the window yet.
+
 ## 0.8.9 — 2026-10-18 (bugfix, builds, not hardware-tested)
 
 - Fix: password reveal now works — server populates value attribute (`/api/profiles` and `/api/approfiles` return the stored password; the STA/AP edit forms are filled on page load, on Edit and on slot change; fields stay `type="password"` until Show is clicked).

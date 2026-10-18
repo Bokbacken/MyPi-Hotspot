@@ -21,6 +21,17 @@ No follow-up code is imported or newly marked hardware-tested by this checkpoint
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
 
+## v0.9.0 — 2026-10-18 (builds, not hardware-tested)
+
+- New Optimize module (`opt_config`) and web tab: SDIO 40/50 MHz with auto-fallback to 40 MHz,
+  TX power cap, TCP window (stored only, see limitations), NAPT master switch, log level,
+  emergency flag with Clear. API `GET/POST /api/opt`, `POST /api/clear_emergency`.
+- Emergency flag in NVS (`mypi_opt/emerg`) is cleared automatically after a successful C5 init.
+- 2.4 GHz hard-locked to HT20 in `apply_bw()`; 11ax still off. lwIP IRAM optimization on.
+- RAM/PSRAM review: LVGL flush buffers in internal RAM, small static text/profile tables in PSRAM
+  (see `ARCHITECTURE.md`).
+- Build: 0 warnings; host tests (4 suites) green. Not yet run on hardware.
+
 ## v0.8.7 — 2026-10-18 (builds, not hardware-tested)
 
 - Text input rebuilt as a reusable LVGL module, `mypi_kbd` (Companion-style scroll wheel,

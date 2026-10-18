@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "mypi_kbd_core.h"
+#include "opt_config_core.h"
 #include "ui_input.h"
 #include "ui_layout.h"
 #include "ui_serial.h"
@@ -223,6 +224,282 @@ static void test_touch_geometry(void)
     assert(mypi_ui_button_hit(239 - 8, 319 - 268, 8, 319 - 315, 231, 319 - 268));
 }
 
+// --- opt_config (v0.9.0): mock NVS key/value store ---
+typedef struct {
+    char key[16][16];
+    uint8_t val[16];
+    int n, commits, fail_set;
+    char key16[4][16];
+    uint16_t val16[4];
+    int n16;
+    char keys[4][16], vals[4][8];
+    int ns;
+} mock_nvs_t;
+
+static int mock_get(void *ctx, const char *key, uint8_t *out)
+{
+    mock_nvs_t *m = ctx;
+    for (int i = 0; i < m->n; i++) {
+        if (strcmp(m->key[i], key) == 0) { *out = m->val[i]; return 0; }
+    }
+    return -1;      // ESP_ERR_NVS_NOT_FOUND
+}
+
+static int mock_set(void *ctx, const char *key, uint8_t v)
+{
+    mock_nvs_t *m = ctx;
+    if (m->fail_set) return -2;
+    for (int i = 0; i < m->n; i++) {
+        if (strcmp(m->key[i], key) == 0) { m->val[i] = v; return 0; }
+    }
+    assert(m->n < 16 && strlen(key) < 16);
+    strcpy(m->key[m->n], key);
+    m->val[m->n++] = v;
+    return 0;
+}
+
+static int mock_get16(void *ctx, const char *key, uint16_t *out)
+{
+    mock_nvs_t *m = ctx;
+    for (int i = 0; i < m->n16; i++) {
+        if (strcmp(m->key16[i], key) == 0) { *out = m->val16[i]; return 0; }
+    }
+    return -1;
+}
+
+static int mock_set16(void *ctx, const char *key, uint16_t v)
+{
+    mock_nvs_t *m = ctx;
+    if (m->fail_set) return -2;
+    for (int i = 0; i < m->n16; i++) {
+        if (strcmp(m->key16[i], key) == 0) { m->val16[i] = v; return 0; }
+    }
+    assert(m->n16 < 4 && strlen(key) < 16);
+    strcpy(m->key16[m->n16], key);
+    m->val16[m->n16++] = v;
+    return 0;
+}
+
+static int mock_getstr(void *ctx, const char *key, char *out, unsigned len)
+{
+    mock_nvs_t *m = ctx;
+    for (int i = 0; i < m->ns; i++) {
+        if (strcmp(m->keys[i], key) == 0) {
+            if (strlen(m->vals[i]) + 1 > len) return -3;    // ESP_ERR_NVS_INVALID_LENGTH
+            strcpy(out, m->vals[i]);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int mock_setstr(void *ctx, const char *key, const char *v)
+{
+    mock_nvs_t *m = ctx;
+    if (m->fail_set) return -2;
+    assert(strlen(v) < 8);
+    for (int i = 0; i < m->ns; i++) {
+        if (strcmp(m->keys[i], key) == 0) { strcpy(m->vals[i], v); return 0; }
+    }
+    assert(m->ns < 4 && strlen(key) < 16);
+    strcpy(m->keys[m->ns], key);
+    strcpy(m->vals[m->ns++], v);
+    return 0;
+}
+
+static int mock_commit(void *ctx) { ((mock_nvs_t *)ctx)->commits++; return 0; }
+
+static void test_opt_config(void)
+{
+    mock_nvs_t m = {0};
+    opt_store_t st = {mock_get, mock_set, mock_get16, mock_set16, mock_getstr, mock_setstr, mock_commit, &m};
+    opt_config_t c, d;
+
+    // Load from an empty store = defaults (driver TX power, PS off, 100 ms, SE).
+    memset(&c, 0xAA, sizeof(c));
+    memset(&d, 0xAA, sizeof(d));
+    opt_config_load_from(&st, &c);
+    assert(c.wifi_tx_power_dbm == 0 && c.ps_mode == 0 && c.ap_beacon_ms == 100 && strcmp(c.country, "SE") == 0);
+    assert(c.tcp_wnd_kb == 32 && c.lwip_core == 0 && c.napt_max == 5 && c.napt_tcp_to == 2);
+    assert(c.bw_5g == 40 && c.sdio_mhz == 40);          // v0.9.5: HT40 on 5 GHz, SDIO 40 MHz
+    assert(opt_config_valid(&c));
+    opt_config_load_from(NULL, &d);
+    assert(memcmp(&c, &d, sizeof(c)) == 0);
+
+    // Fixed values of the settings removed in v0.9.3; defaults of the v0.9.5 settings.
+    assert(OPT_FIXED_LOG_LVL == 2 && OPT_DEFAULT_SDIO_MHZ == 40 && OPT_DEFAULT_BW_5G == 40);
+    assert(opt_bw_5g_valid(20) && opt_bw_5g_valid(40) && !opt_bw_5g_valid(0) && !opt_bw_5g_valid(80));
+    assert(opt_sdio_mhz_valid(40) && opt_sdio_mhz_valid(50) && !opt_sdio_mhz_valid(0) && !opt_sdio_mhz_valid(45));
+
+    // v0.9.4 TCP / LwIP / NAT helpers.
+    assert(opt_tcp_wnd_bytes(32) == 32768 && opt_tcp_wnd_bytes(64) == 65536 && opt_tcp_wnd_bytes(128) == 131072);
+    assert(opt_tcp_wnd_bytes(0) == 32768 && opt_tcp_wnd_bytes(100) == 32768);
+    assert(opt_napt_max_entries(5) == 512 && opt_napt_max_entries(10) == 1024 && opt_napt_max_entries(20) == 2048);
+    assert(opt_napt_max_entries(7) == 512);
+    assert(opt_napt_tcp_timeout_s(2) == 7200 && opt_napt_tcp_timeout_s(1) == 3600 && opt_napt_tcp_timeout_s(0) == 1800);
+    assert(opt_lwip_core_id(0) == -1 && opt_lwip_core_id(1) == 0 && opt_lwip_core_id(2) == 1);
+    // Restored keys are not in the obsolete list (they would be erased at boot).
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) {
+        assert(strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_TCP_WND_KB) && strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_LWIP_CORE) &&
+               strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_NAPT_MAX) && strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_NAPT_TCP_TO) &&
+               strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_SDIO_MHZ) && strcmp(OPT_OBSOLETE_KEYS[i], OPT_KEY_BW_5G));
+    }
+
+    // Country table (wifi_country_t values).
+    assert(OPT_COUNTRY_COUNT == 4);
+    const opt_country_t *k = opt_country_find("US");
+    assert(k && k->schan == 1 && k->nchan == 11 && k->max_tx_power == 30);
+    k = opt_country_find("JP"); assert(k && k->nchan == 14 && k->max_tx_power == 23);
+    k = opt_country_find("SE"); assert(k && k->nchan == 13 && k->max_tx_power == 20);
+    k = opt_country_find("EU"); assert(k && k->nchan == 13 && k->max_tx_power == 20);
+    assert(!opt_country_find("XX") && !opt_country_find(NULL));
+
+    // Save round-trip.
+    c.wifi_tx_power_dbm = 14; c.ps_mode = 2; c.ap_beacon_ms = 300; memcpy(c.country, "JP", 3);
+    c.tcp_wnd_kb = 128; c.lwip_core = 2; c.napt_max = 20; c.napt_tcp_to = 0;
+    c.bw_5g = 20; c.sdio_mhz = 50;
+    assert(opt_config_save_to(&st, &c) == 0 && m.commits == 1);
+    opt_config_load_from(&st, &d);
+    assert(d.wifi_tx_power_dbm == 14 && d.ps_mode == 2 && d.ap_beacon_ms == 300 && strcmp(d.country, "JP") == 0);
+    assert(d.tcp_wnd_kb == 128 && d.lwip_core == 2 && d.napt_max == 20 && d.napt_tcp_to == 0);
+    assert(d.bw_5g == 20 && d.sdio_mhz == 50);
+    uint8_t raw;
+    uint16_t raw16;
+    char rawcc[4];
+    assert(mock_get(&m, OPT_KEY_TX_DBM, &raw) == 0 && raw == 14);
+    assert(mock_get(&m, OPT_KEY_PS_MODE, &raw) == 0 && raw == 2);
+    assert(mock_get(&m, OPT_KEY_TCP_WND_KB, &raw) == 0 && raw == 128);
+    assert(mock_get(&m, OPT_KEY_LWIP_CORE, &raw) == 0 && raw == 2);
+    assert(mock_get(&m, OPT_KEY_NAPT_MAX, &raw) == 0 && raw == 20);
+    assert(mock_get(&m, OPT_KEY_NAPT_TCP_TO, &raw) == 0 && raw == 0);
+    assert(mock_get16(&m, OPT_KEY_BEACON_MS, &raw16) == 0 && raw16 == 300);
+    assert(mock_getstr(&m, OPT_KEY_COUNTRY, rawcc, sizeof(rawcc)) == 0 && strcmp(rawcc, "JP") == 0);
+    assert(mock_get(&m, OPT_KEY_BW_5G, &raw) == 0 && raw == 20);
+    assert(mock_get(&m, OPT_KEY_SDIO_MHZ, &raw) == 0 && raw == 50);    // v0.9.5: stored again
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) assert(mock_get(&m, OPT_OBSOLETE_KEYS[i], &raw) != 0);
+
+    // Stale values of removed settings in NVS do not change anything.
+    opt_config_t before = d;
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) mock_set(&m, OPT_OBSOLETE_KEYS[i], 3);
+    opt_config_load_from(&st, &d);
+    assert(memcmp(&before, &d, sizeof(d)) == 0);
+
+    // Invalid configs are rejected and nothing is written.
+    opt_config_t bad = d;
+    bad.ps_mode = 3;
+    assert(opt_config_save_to(&st, &bad) == -1 && m.commits == 1);
+    bad = d; bad.ap_beacon_ms = 150;    assert(!opt_config_valid(&bad));
+    bad = d; memcpy(bad.country, "XX", 3); assert(!opt_config_valid(&bad));
+    bad = d; memcpy(bad.country, "SEX", 3); assert(!opt_config_valid(&bad));   // not NUL-terminated
+    bad = d; bad.wifi_tx_power_dbm = 1; assert(!opt_config_valid(&bad));
+    bad = d; bad.wifi_tx_power_dbm = 22; assert(!opt_config_valid(&bad));
+    bad = d; bad.tcp_wnd_kb = 48;       assert(!opt_config_valid(&bad));
+    bad = d; bad.lwip_core = 3;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_max = 15;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_tcp_to = 3;       assert(!opt_config_valid(&bad));
+    bad = d; bad.bw_5g = 80;            assert(!opt_config_valid(&bad));
+    bad = d; bad.bw_5g = 0;             assert(!opt_config_valid(&bad));
+    bad = d; bad.sdio_mhz = 45;         assert(!opt_config_valid(&bad));
+    bad = d; bad.sdio_mhz = 0;          assert(!opt_config_valid(&bad));
+    m.fail_set = 1;
+    assert(opt_config_save_to(&st, &d) == -2);
+    m.fail_set = 0;
+
+    // Corrupt values in NVS fall back to the default field by field.
+    mock_set(&m, OPT_KEY_TX_DBM, 30);
+    mock_set(&m, OPT_KEY_PS_MODE, 7);
+    mock_set16(&m, OPT_KEY_BEACON_MS, 250);
+    mock_setstr(&m, OPT_KEY_COUNTRY, "XX");
+    mock_set(&m, OPT_KEY_TCP_WND_KB, 100);
+    mock_set(&m, OPT_KEY_LWIP_CORE, 9);
+    mock_set(&m, OPT_KEY_NAPT_MAX, 7);
+    mock_set(&m, OPT_KEY_NAPT_TCP_TO, 5);
+    mock_set(&m, OPT_KEY_BW_5G, 80);
+    mock_set(&m, OPT_KEY_SDIO_MHZ, 60);
+    opt_config_load_from(&st, &d);
+    assert(d.wifi_tx_power_dbm == 0 && d.ps_mode == 0 && d.ap_beacon_ms == 100 && strcmp(d.country, "SE") == 0);
+    assert(d.tcp_wnd_kb == 32 && d.lwip_core == 0 && d.napt_max == 5 && d.napt_tcp_to == 2);
+    assert(d.bw_5g == 40 && d.sdio_mhz == 40);
+    mock_setstr(&m, OPT_KEY_COUNTRY, "SWED");                  // too long for the 3-byte field
+    opt_config_load_from(&st, &d);
+    assert(strcmp(d.country, "SE") == 0);
+
+    // Reboot required only for the boot-only fields (beacon, country, TCP window, LwIP core, NAPT size).
+    opt_config_t a, s2;
+    opt_config_defaults(&a);
+    s2 = a; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1; s2.napt_tcp_to = 0;
+    assert(!opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.tcp_wnd_kb = 64;  assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.lwip_core = 1;    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.napt_max = 10;    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.bw_5g = 20;       assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.sdio_mhz = 50;    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.ap_beacon_ms = 200;
+    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; memcpy(s2.country, "US", 3);
+    assert(opt_config_reboot_required(&a, &s2));
+
+    // SDIO trial / auto-fallback decision; the configured clock is the stored setting (v0.9.5).
+    bool fb;
+    assert(opt_sdio_boot_mhz(40, false, &fb) == 40 && !fb);
+    assert(opt_sdio_boot_mhz(40, true, &fb) == 40 && !fb);
+    assert(opt_sdio_boot_mhz(50, false, &fb) == 50 && !fb);
+    assert(opt_sdio_boot_mhz(50, true, &fb) == 40 && fb);
+
+    // Boot sequence as in opt_config_load(): stored 50 MHz -> trial boot at 50; an unconfirmed trial
+    // -> 40 MHz, and the fallback rewrites the stored setting to 40 (next boot is a plain 40 MHz boot).
+    mock_nvs_t m2 = {0};
+    opt_store_t st2 = {mock_get, mock_set, mock_get16, mock_set16, mock_getstr, mock_setstr, mock_commit, &m2};
+    opt_config_defaults(&c);
+    c.sdio_mhz = 50;
+    assert(opt_config_save_to(&st2, &c) == 0);
+    opt_config_load_from(&st2, &d);
+    assert(opt_sdio_boot_mhz(d.sdio_mhz, false, &fb) == 50 && !fb);     // first boot: 50 MHz trial
+    assert(opt_sdio_boot_mhz(d.sdio_mhz, true, &fb) == 40 && fb);       // trial never confirmed
+    if (fb) mock_set(&m2, OPT_KEY_SDIO_MHZ, 40);                        // opt_sdio_fallback_to_40 / load
+    opt_config_load_from(&st2, &d);
+    assert(d.sdio_mhz == 40 && opt_sdio_boot_mhz(d.sdio_mhz, false, &fb) == 40 && !fb);
+    // Active 50 vs saved 40 after a runtime fallback = reboot pending (the caller restarts).
+    a = d; a.sdio_mhz = 50;
+    assert(opt_config_reboot_required(&a, &d));
+}
+
+// v0.9.3: last STA channel persistence and AP channel choice.
+static void test_sta_channel(void)
+{
+    const int ok[] = {1, 6, 13, 14, 36, 40, 64, 100, 144, 149, 165, 177};
+    const int no[] = {0, -1, 15, 35, 37, 65, 99, 145, 148, 178, 255};
+    for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) assert(opt_sta_ch_valid(ok[i]));
+    for (unsigned i = 0; i < sizeof(no) / sizeof(no[0]); i++) assert(!opt_sta_ch_valid(no[i]));
+    assert(opt_ch_band(6) == 1 && opt_ch_band(36) == 2 && opt_ch_band(15) == 0);
+
+    // Band mode and country range.
+    assert(opt_ch_usable(6, 0, 13) && opt_ch_usable(6, 1, 13) && !opt_ch_usable(6, 2, 13));
+    assert(opt_ch_usable(44, 0, 13) && opt_ch_usable(44, 2, 13) && !opt_ch_usable(44, 1, 13));
+    assert(!opt_ch_usable(13, 0, 11) && opt_ch_usable(11, 0, 11) && opt_ch_usable(14, 1, 14));
+    assert(!opt_ch_usable(0, 0, 13));
+
+    // Write only valid, changed channels (flash wear).
+    assert(opt_sta_ch_should_store(0, 6) && !opt_sta_ch_should_store(6, 6));
+    assert(opt_sta_ch_should_store(6, 44) && !opt_sta_ch_should_store(6, 0) && !opt_sta_ch_should_store(6, 15));
+
+    // AP channel: STA > AP > persisted (if usable) > 1 / 36.
+    assert(opt_ap_channel_pick(44, 6, 1, 0, 13) == 44);
+    assert(opt_ap_channel_pick(0, 6, 44, 0, 13) == 6);
+    assert(opt_ap_channel_pick(0, 0, 44, 0, 13) == 44);
+    assert(opt_ap_channel_pick(0, 0, 44, 1, 13) == 1);     // 5 GHz channel with 2.4-only band: ignored
+    assert(opt_ap_channel_pick(0, 0, 6, 2, 13) == 36);     // 2.4 GHz channel with 5-only band: ignored
+    assert(opt_ap_channel_pick(0, 0, 13, 0, 11) == 1);     // outside the country range
+    assert(opt_ap_channel_pick(0, 0, 0, 0, 13) == 1);
+
+    // Shared protocol mask migration: STA wins, else AP; ax kept, unknown bits dropped.
+    assert(opt_proto_merge(0x37, 0x07) == 0x37);
+    assert(opt_proto_merge(0, 0x36) == 0x36);
+    assert(opt_proto_merge(0, 0) == 0);
+    assert(opt_proto_merge(0x74, 0) == 0x74);
+    assert(opt_proto_merge(0x88, 0x04) == 0x04);
+}
+
 int main(void)
 {
     test_serial();
@@ -232,6 +509,8 @@ int main(void)
     test_password_utf8_and_length();
     test_kbd_core();
     test_touch_geometry();
+    test_opt_config();
+    test_sta_channel();
     puts("UI primitive tests passed");
     return 0;
 }

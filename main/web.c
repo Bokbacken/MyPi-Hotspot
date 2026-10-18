@@ -27,6 +27,8 @@
 #include "logstore.h"
 #include "lwip/sockets.h"
 #include "net.h"
+#include "opt_config.h"
+#include "sdio_clk.h"
 #include "pintest.h"
 #include "profiles.h"
 #include "rescue.h"
@@ -61,7 +63,7 @@ extern const char _binary_web_ui_js_end[];
     "<div class='mypi-divider'><svg data-text='Hotspot'></svg></div>" \
     "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/#overview'>Overview</a><a href='/#wifi'>Wi-Fi</a>" \
     "<a href='/#access-point'>Access point</a><a href='/#traffic'>Traffic</a><a href='/#ethernet'>Ethernet</a>" \
-    "<a href='/#system'>System</a><a href='/#debug'>Debug</a></nav></header>"
+    "<a href='/#system'>System</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -105,22 +107,71 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='ethernet'><h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p></section>"
-"<section class='page' data-page='system'><h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
-"<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
-"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
-"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
-"Band <select id='band-mode'><option value='0'>Auto (2.4+5 GHz)</option><option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select> "
-"Max TX power (dBm, 0=default) <input type=number id='tx-power' min=0 max=21 style='width:5em'><br>"
-"AP beacon interval (&times;100 TU, 0=default=100) <input type=number id='ap-beacon' min=0 max=10 style='width:5em'> "
-"AP DTIM period (0=default=1) <input type=number id='ap-dtim' min=0 max=255 style='width:5em'><br>"
-"<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
-"<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
+"<section class='page' data-page='system'>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
+// v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
+// AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
+// width (HT40/HT20) and the SDIO clock (40/50 MHz, auto-fallback) to the radio grid. Checkboxes and
+// dropdowns only (no text input). Logic in web_ui.js.
+"<section class='page' data-page='optimize'><h2>Optimize</h2>"
+"<div id='opt-banner' class='opt-banner' hidden><span>Some changes require reboot</span> "
+"<button type='button' onclick='reboot()'>Reboot now</button></div>"
+"<h3>Wi-Fi radio (STA + AP)</h3><table id='rd'></table>"
+"<div id='opt-form' class='opt-grid'>"
+"<span class='opt-l'>Band</span><span class='opt-c'><select id='opt-band'><option value='0'>Both (2.4 + 5 GHz)</option>"
+"<option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select></span><span class='opt-s' id='opt-band-st'></span>"
+"<span class='opt-l'>Protocols (STA = AP)</span><span class='opt-c'>"
+"<label><input type='checkbox' id='opt-proto-a'>a</label> <label><input type='checkbox' id='opt-proto-b'>b</label> "
+"<label><input type='checkbox' id='opt-proto-g'>g</label> <label><input type='checkbox' id='opt-proto-n'>n</label> "
+"<label><input type='checkbox' id='opt-proto-ac'>ac</label> <label><input type='checkbox' id='opt-proto-ax'>ax</label></span>"
+"<span class='opt-s' id='opt-proto-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>None checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz, no ax). "
+"<b>ax:</b> known C5 firmware issue &mdash; upload can drop to ~0 (ESP-IDF #19238).</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>Wi-Fi TX power</span><span class='opt-c'><select id='opt-tx'><option value='0'>Default</option>"
+"<option value='8'>8 dBm</option><option value='11'>11 dBm</option><option value='14'>14 dBm</option><option value='17'>17 dBm</option>"
+"<option value='19'>19 dBm</option><option value='20'>20 dBm</option><option value='21'>21 dBm (max)</option></select></span>"
+"<span class='opt-s' id='opt-tx-st'></span>"
+"<span class='opt-l'>STA power save</span><span class='opt-c'><select id='opt-ps'><option value='0'>Off (best throughput)</option>"
+"<option value='1'>Min (balanced)</option><option value='2'>Max (lowest power)</option></select></span>"
+"<span class='opt-s' id='opt-ps-st'></span>"
+"<span class='opt-l'>AP beacon interval</span><span class='opt-c'><select id='opt-beacon'><option value='100'>100 ms (default)</option>"
+"<option value='200'>200 ms</option><option value='300'>300 ms</option></select></span><span class='opt-s' id='opt-beacon-st'></span>"
+"<span class='opt-l'>Wi-Fi country / region</span><span class='opt-c'><select id='opt-country'><option value='SE'>SE (Sweden)</option>"
+"<option value='EU'>EU (Europe)</option><option value='US'>US (United States)</option><option value='JP'>JP (Japan)</option></select></span>"
+"<span class='opt-s' id='opt-country-st'></span>"
+"<span class='opt-l'>5 GHz channel width (STA = AP)</span><span class='opt-c'><select id='opt-bw-5g'><option value='40'>HT40 - 11n (default)</option>"
+"<option value='20'>HT20 - ac/ax allowed</option></select></span><span class='opt-s' id='opt-bw-5g-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>The C5 only does 40 MHz in 11n: HT40 turns 11ac/11ax off on 5 GHz. "
+"HT20 keeps the selected protocols (ac/ax at 20 MHz). 2.4 GHz is always HT20. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>SDIO clock (P4 &harr; C5)</span><span class='opt-c'><select id='opt-sdio'><option value='40'>40 MHz (default)</option>"
+"<option value='50'>50 MHz</option></select></span><span class='opt-s' id='opt-sdio-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>50 MHz automatically falls back to 40 MHz if the C5 fails to start. Reboot required.</small></span><span class='opt-s'></span>"
+"</div><h3>TCP / LwIP / NAT</h3><div class='opt-grid'>"
+"<span class='opt-l'>TCP window</span><span class='opt-c'><select id='opt-tcp-wnd'><option value='32'>32 KB (default)</option>"
+"<option value='64'>64 KB</option><option value='128'>128 KB</option></select></span><span class='opt-s' id='opt-tcp-wnd-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Receive window for TCP that ends on the P4 itself (web UI, OTA, iperf to the device). "
+"NAT traffic of AP clients is not affected. 128 KB uses more internal RAM. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>LwIP task core affinity</span><span class='opt-c'><select id='opt-lwip-core'><option value='0'>Auto (no pin, default)</option>"
+"<option value='1'>Core 0</option><option value='2'>Core 1</option></select></span><span class='opt-s' id='opt-lwip-core-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Pin the LwIP (tcpip) task to a CPU core. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT max sessions</span><span class='opt-c'><select id='opt-napt-max'><option value='5'>512 (default)</option>"
+"<option value='10'>1024</option><option value='20'>2048</option></select></span><span class='opt-s' id='opt-napt-max-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Size of the NAT table. Larger = more client connections, more RAM. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT TCP timeout</span><span class='opt-c'><select id='opt-napt-tcp-to'><option value='2'>2 h (default)</option>"
+"<option value='1'>1 h</option><option value='0'>30 min</option></select></span><span class='opt-s' id='opt-napt-tcp-to-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Idle TCP session lifetime in the NAT table. Shorter = faster recycling. Applies immediately.</small></span><span class='opt-s'></span>"
+"</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
+"<p><small>TX power, STA power save and NAPT TCP timeout apply immediately; band, protocols, AP beacon interval, country, "
+"5 GHz width, SDIO clock, TCP window, LwIP core and NAPT max sessions after a reboot. "
+"STA and AP share one radio: the AP always follows the STA channel and band. 2.4 GHz is always locked to HT20; "
+"5 GHz uses the selected width (HT40 default). Everything else runs on defaults (NAPT on, log level Info).</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
+// v0.9.3: emergency flag moved here from the Optimize page.
+"<p>Emergency flag: <span id='opt-emerg-st'></span> <button type='button' id='opt-emerg-btn' onclick='MyPiSerial.optClearEmergency()'>Clear</button></p>"
 "<h2>Saved logs (flash)</h2><p><label><input type='checkbox' id='lcap' style='width:auto' onchange=lsCfg()>Capture every session</label> "
 "keep <select id='lkeep' onchange=lsCfg()></select> logs "
 "<button onclick=lsSave()>Save log now</button> <button onclick=lsClear()>Delete saved logs</button><br>"
@@ -154,9 +205,7 @@ MYPI_BRAND_HEADER
 "x.has_pass?'WPA2':'open',x.nat?'yes':'no',x.on_boot?'yes':'',"
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
-"let r=await (await fetch('/api/radio')).json();$('rsb').value=r.sta_bw;$('rab').value=r.ap_bw;setProtoMask('sta',r.sta_proto);setProtoMask('ap',r.ap_proto);"
 "let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
-"$('band-mode').value=r.band_mode;$('tx-power').value=r.tx_power_dbm;$('ap-beacon').value=r.ap_beacon_tu;$('ap-dtim').value=r.ap_dtim;protoHint();"
 "if(FL){FL=0;edS(SP[p.active]?p.active:0);edA(0)}"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value=x.pass||'';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
@@ -173,12 +222,6 @@ MYPI_BRAND_HEADER
 "async function disc(){if(!confirm('Disconnect the Wi-Fi uplink? AP clients may lose internet access.'))return;await post('/api/disconnect');ld()}"
 "async function apStart(i){if(confirm('Starting this profile may replace the running AP and disconnect clients. Continue?'))await post('/api/ap/start',{slot:i})}"
 "async function apStop(){if(confirm('Stop the access point and disconnect its clients?'))await post('/api/ap/stop')}"
-"const PBITS={b:1,g:2,n:4,a:16,ac:32};"
-"function buildProtoMask(p){let m=0;for(let k in PBITS)if($(p+'-proto-'+k).checked)m|=PBITS[k];return m}"
-"function setProtoMask(p,m){for(let k in PBITS)$(p+'-proto-'+k).checked=!!(m&PBITS[k])}"
-"function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(default, no ax)'}"
-"async function saveRadio(){await post('/api/radio',{sta_bw:+$('rsb').value,ap_bw:+$('rab').value,sta_proto:buildProtoMask('sta'),ap_proto:buildProtoMask('ap'),"
-"band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_beacon_tu:+$('ap-beacon').value,ap_dtim:+$('ap-dtim').value})}"
 "async function saveRot(){await post('/api/display',{rotate:$('lrot').checked?1:0})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
@@ -228,14 +271,14 @@ MYPI_BRAND_HEADER
 "let a=await (await fetch('/api/apstatus')).json();"
 "$('aps').textContent=a.running?'Running: '+a.ssid+' ('+(a.open?'open':'WPA2')+') at '+a.ip+', '+chText(a):'AP stopped';"
 "$('cl').innerHTML=a.clients.length?tr(['MAC','IP','RSSI'],1)+a.clients.map(c=>tr([c.mac,c.ip,c.rssi+' dBm'])).join(''):'<tr><td>(none)</td></tr>';"
-"let r=await (await fetch('/api/radio')).json(),f=r.info,BWN=['auto','20','40','40'],hx=m=>m?'0x'+m.toString(16):'default';"
-"let rc=x=>'width '+BWN[x.sta_bw]+'/'+BWN[x.ap_bw]+', proto '+hx(x.sta_proto)+'/'+hx(x.ap_proto)+', band '+x.band_mode+', tx '+(x.tx_power_dbm||'default');"
-"$('rd').innerHTML=tr(['','Width (C5)','Protocols (C5)','Setting (width / proto)'],1)+"
-"tr(['STA (ch '+r.sta_channel+')',f.sta_width,f.sta_proto_str,BWN[r.active.sta_bw]+' / '+hx(r.active.sta_proto)])+"
-"tr(['AP (ch '+r.ap_channel+')',f.ap_width,f.ap_proto_str,BWN[r.active.ap_bw]+' / '+hx(r.active.ap_proto)])+"
-"tr(['Upstream AP','2nd ch '+f.upstream_second,f.upstream_phy,''])+"
-"tr(['TX power',f.tx_power_dbm?f.tx_power_dbm+' dBm':'?','',r.active.tx_power_dbm?r.active.tx_power_dbm+' dBm':'default'])+"
-"(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','','',rc(r.saved)]):'');"
+"let r=await (await fetch('/api/radio')).json(),f=r.info,BN=['both','2.4 GHz','5 GHz'],hx=m=>m?'0x'+m.toString(16):'default';"
+"$('rd').innerHTML=tr(['','Channel','Width (C5)','Protocols (C5)'],1)+"
+"tr(['STA',r.sta_channel?r.sta_channel+' ('+band(r.sta_channel)+')':'-',f.sta_width,f.sta_proto_str])+"
+"tr(['AP',r.ap_channel?r.ap_channel+' ('+band(r.ap_channel)+')':'-',f.ap_width,f.ap_proto_str])+"
+"tr(['Upstream AP','2nd ch '+f.upstream_second,'',f.upstream_phy])+"
+"tr(['TX power (driver)',f.tx_power_dbm?f.tx_power_dbm+' dBm':'?','',''])+"
+"tr(['Setting','band '+(BN[r.active.band_mode]||'?'),'2.4 GHz HT20, 5 GHz per Optimize','proto '+hx(r.active.proto)+(r.last_sta_channel?', last STA ch '+r.last_sta_channel:'')])+"
+"(r.reboot_pending?tr(['<span class=bad>Saved, reboot pending</span>','band '+(BN[r.saved.band_mode]||'?'),'','proto '+hx(r.saved.proto)]):'');"
 "let p=await (await fetch('/api/iperf')).json();"
 "$('is').textContent=p.armed?'armed ('+p.armed_left_s+' s left) - '+(p.running?'RUNNING '+p.last_mbps.toFixed(1)+' Mbit/s':'waiting for client'):'not armed';"
 "if(p.summary_mbps>0)$('is').textContent+=' | last test: '+p.summary_mbps.toFixed(1)+' Mbit/s';"
@@ -1316,14 +1359,12 @@ static esp_err_t api_eth_post(httpd_req_t *req)
 
 static void add_radio_cfg(cJSON *o, const wifi_radio_cfg_t *c)
 {
-    cJSON_AddNumberToObject(o, "sta_bw", c->sta_bw);
-    cJSON_AddNumberToObject(o, "ap_bw", c->ap_bw);
+    // v0.9.3: band + one shared protocol mask (STA and AP always use the same one).
+    // sta_proto/ap_proto are kept for older clients and always equal "proto".
+    cJSON_AddNumberToObject(o, "proto", c->sta_proto);
     cJSON_AddNumberToObject(o, "sta_proto", c->sta_proto);
     cJSON_AddNumberToObject(o, "ap_proto", c->ap_proto);
     cJSON_AddNumberToObject(o, "band_mode", c->band_mode);
-    cJSON_AddNumberToObject(o, "tx_power_dbm", c->tx_power_dbm);
-    cJSON_AddNumberToObject(o, "ap_beacon_tu", c->ap_beacon_interval_tu);
-    cJSON_AddNumberToObject(o, "ap_dtim", c->ap_dtim);
 }
 
 static void add_width(cJSON *o, const char *k, int mhz, bool known)
@@ -1346,6 +1387,7 @@ static esp_err_t api_radio_get(httpd_req_t *req)
     cJSON_AddBoolToObject(j, "reboot_pending", memcmp(&r.active, &r.saved, sizeof(r.active)) != 0);
     cJSON_AddNumberToObject(j, "sta_channel", r.sta_channel);
     cJSON_AddNumberToObject(j, "ap_channel", r.ap_channel);
+    cJSON_AddNumberToObject(j, "last_sta_channel", opt_sta_last_ch());
     cJSON *f = cJSON_AddObjectToObject(j, "info");
     add_width(f, "sta_width", r.sta_bw_mhz, true);
     cJSON_AddStringToObject(f, "sta_proto_str", r.sta_proto);
@@ -1378,8 +1420,10 @@ static esp_err_t api_display_post(httpd_req_t *req)
     return send_result(req, display_set_rotated(rot == 1), rot ? "rotated 180" : "normal orientation", NULL);
 }
 
-// POST /api/radio {sta_bw,ap_bw (0-3), sta_proto,ap_proto (bitmask), band_mode, tx_power_dbm,
-// ap_beacon_tu, ap_dtim} - missing keys keep the saved value; applied after reboot
+// POST /api/radio {band_mode (0-2), proto (bitmask, shared by STA and AP)} - missing keys keep the
+// saved value; applied after reboot. Older clients may send sta_proto/ap_proto: merged (STA wins).
+// Width (2.4 GHz HT20 locked / 5 GHz via /api/opt bw_5g), TX power (Optimize) and DTIM (driver default)
+// are not radio settings.
 static esp_err_t api_radio_post(httpd_req_t *req)
 {
     READ_BODY_OR_400(j);
@@ -1387,20 +1431,105 @@ static esp_err_t api_radio_post(httpd_req_t *req)
     wifi_get_radio_info(&r);
     wifi_radio_cfg_t c = r.saved;
     bool ok = true;
-    radio_field(j, "sta_bw", RADIO_BW_AUTO, RADIO_BW_MAX, &c.sta_bw, &ok);
-    radio_field(j, "ap_bw", RADIO_BW_AUTO, RADIO_BW_MAX, &c.ap_bw, &ok);
-    radio_field(j, "sta_proto", 0, RADIO_PROTO_ALL, &c.sta_proto, &ok);
-    radio_field(j, "ap_proto", 0, RADIO_PROTO_ALL, &c.ap_proto, &ok);
-    c.sta_proto &= RADIO_PROTO_ALLOWED;     // 11ax is stripped (ESP-IDF issue #19238)
-    c.ap_proto &= RADIO_PROTO_ALLOWED;
+    uint8_t sta = 0, ap = 0;
+    radio_field(j, "sta_proto", 0, RADIO_PROTO_ALL, &sta, &ok);
+    radio_field(j, "ap_proto", 0, RADIO_PROTO_ALL, &ap, &ok);
+    if (sta || ap) c.sta_proto = c.ap_proto = opt_proto_merge(sta, ap);
+    uint8_t p = c.sta_proto;
+    radio_field(j, "proto", 0, RADIO_PROTO_ALL, &p, &ok);
+    c.sta_proto = c.ap_proto = p & RADIO_PROTO_ALLOWED;
     radio_field(j, "band_mode", RADIO_BAND_AUTO, RADIO_BAND_5G, &c.band_mode, &ok);
-    radio_field(j, "tx_power_dbm", 0, 21, &c.tx_power_dbm, &ok);
-    radio_field(j, "ap_beacon_tu", 0, 10, &c.ap_beacon_interval_tu, &ok);
-    radio_field(j, "ap_dtim", 0, 255, &c.ap_dtim, &ok);
     cJSON_Delete(j);
     return send_result(req, ok ? wifi_radio_save(&c) : ESP_ERR_INVALID_ARG, "saved - reboot to apply",
-                       "*_bw: 0-2 (auto/20/40), *_proto: bitmask b=1 g=2 n=4 a=16 ac=32 (ax=64 is stripped), band_mode: 0-2, "
-                       "tx_power_dbm: 0 or 2-21, ap_beacon_tu: 0-10, ap_dtim: 0-255");
+                       "proto: bitmask b=1 g=2 n=4 a=16 ac=32 ax=64 (0 = default b/g/n/a/ac), band_mode: 0-2");
+}
+
+// --- Optimize settings (v0.9.0) ---
+
+static void add_opt_cfg(cJSON *o, const opt_config_t *c)
+{
+    cJSON_AddNumberToObject(o, "wifi_tx_power_dbm", c->wifi_tx_power_dbm);
+    cJSON_AddNumberToObject(o, "ps_mode", c->ps_mode);
+    cJSON_AddNumberToObject(o, "ap_beacon_ms", c->ap_beacon_ms);
+    cJSON_AddStringToObject(o, "country", c->country);
+    cJSON_AddNumberToObject(o, "tcp_wnd_kb", c->tcp_wnd_kb);
+    cJSON_AddNumberToObject(o, "lwip_core", c->lwip_core);
+    cJSON_AddNumberToObject(o, "napt_max", c->napt_max);
+    cJSON_AddNumberToObject(o, "napt_tcp_to", c->napt_tcp_to);
+    cJSON_AddNumberToObject(o, "bw_5g", c->bw_5g);
+    cJSON_AddNumberToObject(o, "sdio_mhz", c->sdio_mhz);
+}
+
+// GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
+// reboot is pending and the emergency flag (read-only here, cleared via /api/clear_emergency).
+static esp_err_t api_opt_get(httpd_req_t *req)
+{
+    opt_config_t a, s;
+    opt_config_get_active(&a);
+    opt_config_get_saved(&s);
+    cJSON *j = cJSON_CreateObject();
+    add_opt_cfg(j, &s);
+    cJSON_AddBoolToObject(j, "emergency_active", opt_emergency_flag());
+    cJSON_AddBoolToObject(j, "emergency_mode_now", rescue_active());
+    add_opt_cfg(cJSON_AddObjectToObject(j, "active"), &a);
+    cJSON_AddBoolToObject(j, "reboot_required", opt_config_reboot_required(&a, &s));
+    cJSON_AddNumberToObject(j, "sdio_active_mhz", opt_sdio_active_mhz());
+    cJSON_AddBoolToObject(j, "sdio_fell_back", opt_sdio_fell_back());
+    cJSON_AddNumberToObject(j, "sdio_real_khz", sdio_clk_real_khz());
+    return send_json(req, j);
+}
+
+// POST /api/opt {wifi_tx_power_dbm, ps_mode, ap_beacon_ms, country, tcp_wnd_kb, lwip_core, napt_max,
+// napt_tcp_to, bw_5g (20|40), sdio_mhz (40|50)} - missing keys keep the saved
+// value (removed v0.9.3 keys such as sdio_freq_mhz/napt/log_level are ignored). Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
+static esp_err_t api_opt_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    opt_config_t c;
+    opt_config_get_saved(&c);
+    bool ok = true;
+    radio_field(j, "wifi_tx_power_dbm", 0, 21, &c.wifi_tx_power_dbm, &ok);
+    radio_field(j, "ps_mode", 0, 2, &c.ps_mode, &ok);
+    radio_field(j, "tcp_wnd_kb", 32, 128, &c.tcp_wnd_kb, &ok);   // 32|64|128, checked by opt_config_valid()
+    radio_field(j, "lwip_core", 0, 2, &c.lwip_core, &ok);
+    radio_field(j, "napt_max", 5, 20, &c.napt_max, &ok);         // 5|10|20, checked by opt_config_valid()
+    radio_field(j, "napt_tcp_to", 0, 2, &c.napt_tcp_to, &ok);
+    radio_field(j, "bw_5g", 20, 40, &c.bw_5g, &ok);             // 20|40, checked by opt_config_valid()
+    radio_field(j, "sdio_mhz", 40, 50, &c.sdio_mhz, &ok);       // 40|50, checked by opt_config_valid()
+    if (cJSON_GetObjectItemCaseSensitive(j, "ap_beacon_ms")) {
+        int b = jint(j, "ap_beacon_ms", -1);
+        if (opt_beacon_valid(b)) c.ap_beacon_ms = (uint16_t)b; else ok = false;
+    }
+    if (cJSON_GetObjectItemCaseSensitive(j, "country")) {
+        const char *cc = jstr(j, "country");
+        if (strlen(cc) < sizeof(c.country) && opt_country_find(cc)) strlcpy(c.country, cc, sizeof(c.country)); else ok = false;
+    }
+    cJSON_Delete(j);
+    bool reboot = false;
+    esp_err_t err = ok && opt_config_valid(&c) ? opt_config_save(&c, &reboot) : ESP_ERR_INVALID_ARG;
+    if (err != ESP_OK) {
+        return send_result(req, err, NULL, "wifi_tx_power_dbm: 0 or 2-21, ps_mode: 0-2, ap_beacon_ms: 100|200|300, "
+                           "country: SE|EU|US|JP, tcp_wnd_kb: 32|64|128, lwip_core: 0-2, "
+                           "napt_max: 5|10|20, napt_tcp_to: 0-2, bw_5g: 20|40, sdio_mhz: 40|50");
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", true);
+    cJSON_AddBoolToObject(r, "reboot_required", reboot);
+    cJSON_AddStringToObject(r, "msg", reboot ? "saved - some changes require reboot" : "saved and applied");
+    return send_json(req, r);
+}
+
+// POST /api/clear_emergency - clear the emergency NVS flag (OPT_KEY_EMERGENCY).
+static esp_err_t api_clear_emergency_post(httpd_req_t *req)
+{
+    esp_err_t err = opt_emergency_set(false);
+    if (err == ESP_OK) ESP_LOGI(TAG, "Emergency flag cleared from the web UI");
+    if (err != ESP_OK) return send_result(req, err, NULL, "could not write NVS");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", true);
+    cJSON_AddBoolToObject(r, "emergency_active", false);
+    cJSON_AddStringToObject(r, "msg", "emergency flag cleared");
+    return send_json(req, r);
 }
 
 // --- Traffic stats ---
@@ -1680,6 +1809,9 @@ esp_err_t web_start(void)
         { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
         { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
         { .uri = "/api/display",        .method = HTTP_POST, .handler = api_display_post },
+        { .uri = "/api/opt",            .method = HTTP_GET,  .handler = api_opt_get },
+        { .uri = "/api/opt",            .method = HTTP_POST, .handler = api_opt_post },
+        { .uri = "/api/clear_emergency", .method = HTTP_POST, .handler = api_clear_emergency_post },
         { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
         { .uri = "/api/netstats/reset", .method = HTTP_POST, .handler = api_netstats_reset },
         { .uri = "/api/netstats/log/start", .method = HTTP_POST, .handler = api_netlog_start },

@@ -20,7 +20,10 @@
 #include "freertos/task.h"
 #include "mdns.h"
 #include "net.h"
+#include "esp_hosted_transport_config.h"
 #include "nvs.h"
+#include "opt_config.h"
+#include "sdio_clk.h"
 #include "profiles.h"
 #include "rescue.h"
 #include "sdkconfig.h"
@@ -48,6 +51,11 @@ static volatile int s_pinned_slot = -1;     // -1 = automatic profile selection
 static volatile int s_cur_slot = -1;
 static volatile bool s_ignore_disc;         // disconnect requested by us
 static volatile uint8_t s_sta_channel;
+// v0.9.3 channel memory: s_sta_channel is cleared on disconnect, s_last_sta_ch keeps the last one.
+static volatile uint8_t s_last_sta_ch;              // 0 = none this boot (NVS value via opt_sta_last_ch())
+static volatile bool s_sta_ch_persist_pending;      // STA_CONNECTED -> wifi_task stores it in NVS
+static volatile bool s_ap_ch_dirty;                 // STA_CONNECTED -> wifi_task re-reads the AP channel
+static volatile bool s_ch_hint_ok = true;           // false after an attempt with the hint failed
 static sta_profile_t s_cur;                 // profile currently in use
 static int s_rr;                            // round robin index for blind attempts
 
@@ -61,6 +69,12 @@ static uint8_t s_ap_channel;
 static void apply_bw(wifi_interface_t ifx, uint8_t sel);
 static void apply_proto(wifi_interface_t ifx, uint8_t mask);
 static wifi_radio_cfg_t s_radio;
+
+/** Last channel the STA was connected on: this boot, else the one stored in NVS (0 = none). */
+static uint8_t last_sta_channel(void)
+{
+    return s_last_sta_ch ? s_last_sta_ch : opt_sta_last_ch();
+}
 
 static bool lock(void) { return xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(LOCK_TIMEOUT_MS)) == pdTRUE; }
 static void unlock(void) { xSemaphoreGiveRecursive(s_lock); }
@@ -114,6 +128,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case WIFI_EVENT_STA_CONNECTED: {
             wifi_event_sta_connected_t *ev = data;
             s_sta_channel = ev->channel;
+            s_last_sta_ch = ev->channel;
+            s_ch_hint_ok = true;
+            s_sta_ch_persist_pending = true;    // NVS write in wifi_task, not in the event loop
+            s_ap_ch_dirty = true;
             ESP_LOGI(TAG, "Associated with \"%.*s\" on channel %d", ev->ssid_len, (const char *)ev->ssid, ev->channel);
             diag_set_wifi(WIFI_STATE_CONNECTED, NULL, 0);
             if (s_cur.valid && !s_cur.dhcp) apply_static_ip();
@@ -122,6 +140,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *ev = data;
             ESP_LOGW(TAG, "Disconnected: reason %d (%s), rssi %d", ev->reason, disconnect_reason_name(ev->reason), ev->rssi);
+            if (!s_sta_channel) s_ch_hint_ok = false;   // attempt never associated: next scan without hint
             s_sta_channel = 0;
             diag_set_wifi(WIFI_STATE_DISCONNECTED, "0.0.0.0", 0);
             xEventGroupClearBits(s_events, BIT_GOT_IP);
@@ -135,7 +154,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case WIFI_EVENT_AP_START:
             ESP_LOGI(TAG, "AP \"%s\" started", s_ap_cur.ssid);
             s_ap_clients = 0;
-            if (s_ap_cur.nat) net_napt(s_ap, true);
+            if (s_ap_cur.nat && opt_napt_enabled()) net_napt(s_ap, true);
             eth_bridge_start();     // LAN mode: wired clients join the AP subnet
             if (rescue_active()) {
                 ESP_LOGW(TAG, "AP started during emergency mode - stopping it again");
@@ -240,7 +259,8 @@ void wifi_coproc_refresh(void)
     c.sdio_clk = CP_SDIO_CLK; c.sdio_cmd = CP_SDIO_CMD;
     c.sdio_d0 = CP_SDIO_D0; c.sdio_d1 = CP_SDIO_D1; c.sdio_d2 = CP_SDIO_D2; c.sdio_d3 = CP_SDIO_D3;
     c.reset_gpio = CP_RESET_GPIO;
-    c.sdio_freq_khz = CP_SDIO_KHZ;
+    int real_khz = sdio_clk_real_khz();                 // v0.9.5: what the SDMMC host really runs at
+    c.sdio_freq_khz = real_khz > 0 ? real_khz : opt_sdio_active_mhz() * 1000;
 
     esp_hosted_coprocessor_fwver_t ver = {0};
     char target[16] = "?";
@@ -288,7 +308,7 @@ static void log_hosted_info(void)
     ESP_LOGI(TAG, "ESP-Hosted host component v%d.%d.%d, transport SDIO (CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d, "
              "slave reset GPIO%d, %d kHz)", ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1,
              ESP_HOSTED_VERSION_PATCH_1, CP_SDIO_CLK, CP_SDIO_CMD, CP_SDIO_D0, CP_SDIO_D1, CP_SDIO_D2, CP_SDIO_D3,
-             CP_RESET_GPIO, CP_SDIO_KHZ);
+             CP_RESET_GPIO, opt_sdio_active_mhz() * 1000);
     wifi_coproc_refresh();
 }
 
@@ -399,6 +419,10 @@ static void connect_now(int forced)
     w.sta.threshold.authmode = p.pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
     w.sta.pmf_cfg.capable = true;
     w.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    // v0.9.3: scan hint = last known STA channel (the scan starts there; 0 = full scan). Only a
+    // hint for the STA config - no esp_wifi_set_channel() in APSTA and no AP restart.
+    uint8_t hint = last_sta_channel();
+    if (s_ch_hint_ok && opt_ch_usable(hint, s_radio.band_mode, opt_country()->nchan)) w.sta.channel = hint;
     s_cur = p;
     s_cur_slot = slot;
     if (p.dhcp) {
@@ -516,10 +540,14 @@ static esp_err_t ap_configure(int slot)
     strlcpy((char *)c.ap.password, p.pass, sizeof(c.ap.password));
     c.ap.authmode = p.pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     c.ap.max_connection = CONFIG_MYPI_AP_MAX_CONN;
-    c.ap.channel = s_sta_channel ? s_sta_channel : (s_ap_channel ? s_ap_channel : 1);
+    // Current STA channel > current AP channel > persisted last STA channel (if it fits the band
+    // mode and country) > 1 (36 in 5 GHz-only mode). Single radio: the AP follows the STA anyway.
+    c.ap.channel = (uint8_t)opt_ap_channel_pick(s_sta_channel, s_ap_channel, last_sta_channel(), s_radio.band_mode,
+                                                opt_country()->nchan);
+    c.ap.csa_count = 3;         // announce channel switches (CSA) so clients follow the STA channel
     c.ap.pmf_cfg.required = false;
-    if (s_radio.ap_beacon_interval_tu > 0) c.ap.beacon_interval = s_radio.ap_beacon_interval_tu * 100;
-    if (s_radio.ap_dtim > 0) c.ap.dtim_period = s_radio.ap_dtim > 10 ? 10 : s_radio.ap_dtim;   // driver range 1..10
+    c.ap.beacon_interval = opt_ap_beacon_ms();     // v0.9.1 Optimize setting (boot value), 100/200/300 TU
+    // DTIM: driver default since v0.9.3 (no setting).
     s_ap_cur = p;   // read by the AP_START handler (NAT)
     esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &c);
     if (err != ESP_OK) {
@@ -530,7 +558,7 @@ static esp_err_t ap_configure(int slot)
     s_ap_channel = c.ap.channel;
     s_ap_running = true;
     // If the AP was already up the AP_START event may not fire again.
-    net_napt(s_ap, p.nat);
+    net_napt(s_ap, p.nat && opt_napt_enabled());
     eth_bridge_start();
     ESP_LOGI(TAG, "AP \"%s\" (%s) on %d.%d.%d.1/24, channel %d, NAT %s, max %d clients", p.ssid,
              p.pass[0] ? "WPA2" : "open", sn[0], sn[1], sn[2], c.ap.channel, p.nat ? "on" : "off",
@@ -554,8 +582,8 @@ esp_err_t wifi_ap_start(int slot)
         }
     }
     if (err == ESP_OK && mode != WIFI_MODE_APSTA) {
-        apply_proto(WIFI_IF_AP, s_radio.ap_proto);
-        apply_bw(WIFI_IF_AP, s_radio.ap_bw);
+        apply_proto(WIFI_IF_AP, s_radio.sta_proto);    // shared mask (v0.9.3)
+        apply_bw(WIFI_IF_AP, opt_bw_5g());             // 2.4 GHz HT20 (locked) / 5 GHz Optimize width
     }
     if (err == ESP_OK) err = ap_configure(slot);
     unlock();
@@ -674,9 +702,9 @@ static bool radio_cfg_valid(const wifi_radio_cfg_t *c)
 
 static void radio_log(const char *what, const wifi_radio_cfg_t *c)
 {
-    ESP_LOGI(TAG, "%s: STA bw %s proto 0x%02x, AP bw %s proto 0x%02x, band %d, tx %d dBm, beacon %d, dtim %d", what,
+    ESP_LOGI(TAG, "%s: STA bw %s proto 0x%02x, AP bw %s proto 0x%02x, band %d, tx %d dBm, dtim %d", what,
              wifi_radio_bw_name(c->sta_bw), c->sta_proto, wifi_radio_bw_name(c->ap_bw), c->ap_proto, c->band_mode,
-             c->tx_power_dbm, c->ap_beacon_interval_tu, c->ap_dtim);
+             c->tx_power_dbm, c->ap_dtim);
 }
 
 static void radio_load(void)
@@ -687,11 +715,17 @@ static void radio_load(void)
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         esp_err_t err = nvs_get_blob(h, NVS_KEY_RADIO, &c, &len);
         if (err == ESP_OK && len == sizeof(c)) {
-            // v0.5.5: the C5 supports max 40 MHz and 11ax is disabled - migrate older settings
-            if (c.sta_bw > RADIO_BW_MAX) c.sta_bw = RADIO_BW_MAX;
-            if (c.ap_bw > RADIO_BW_MAX) c.ap_bw = RADIO_BW_MAX;
-            c.sta_proto &= ~RADIO_PROTO_AX;
-            c.ap_proto &= ~RADIO_PROTO_AX;
+            // v0.9.3: only band + one shared protocol mask are settings. Old separate STA/AP masks
+            // are merged (STA value wins, else AP); width, TX power, DTIM go back to defaults.
+            uint8_t proto = opt_proto_merge(c.sta_proto, c.ap_proto);
+            if (c.sta_proto != c.ap_proto)
+                ESP_LOGI(TAG, "Radio: STA proto 0x%02x / AP proto 0x%02x merged to 0x%02x", c.sta_proto, c.ap_proto, proto);
+            c.sta_proto = c.ap_proto = proto;
+            c.sta_bw = c.ap_bw = RADIO_BW_AUTO;
+            c.tx_power_dbm = 0;
+            c.ap_beacon_interval_tu = 0;
+            c.ap_dtim = 0;
+            if (c.band_mode > RADIO_BAND_5G) c.band_mode = RADIO_BAND_AUTO;
         }
         if (err == ESP_OK && len == sizeof(c) && radio_cfg_valid(&c)) s_radio = c;
         else if (err == ESP_OK || err == ESP_ERR_NVS_INVALID_LENGTH)
@@ -702,8 +736,16 @@ static void radio_load(void)
     radio_log("Radio settings", &s_radio);
 }
 
-esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
+esp_err_t wifi_radio_save(const wifi_radio_cfg_t *in)
 {
+    // v0.9.3: store only band + one shared protocol mask; everything else stays at defaults.
+    wifi_radio_cfg_t n = *in;
+    const wifi_radio_cfg_t *c = &n;
+    n.sta_proto = n.ap_proto = opt_proto_merge(in->sta_proto, in->ap_proto);
+    n.sta_bw = n.ap_bw = RADIO_BW_AUTO;
+    n.tx_power_dbm = 0;
+    n.ap_beacon_interval_tu = 0;
+    n.ap_dtim = 0;
     if (!radio_cfg_valid(c)) return ESP_ERR_INVALID_ARG;
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
@@ -718,27 +760,26 @@ esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
     return err;
 }
 
-// Set the channel width of an interface. "auto" leaves the driver default. If
-// esp_wifi_set_bandwidth() is rejected (2.4+5 GHz auto band mode), fall back to
-// esp_wifi_set_bandwidths() (2.4 GHz is capped at 40 MHz).
+// Set the channel width of an interface. HARD RULE: 2.4 GHz is always HT20 (never HT40),
+// whatever the selection, so the per-band esp_wifi_set_bandwidths() is used with ghz_2g =
+// WIFI_BW20; the selection (Optimize bw_5g via opt_bw_5g(): 20/40, "auto" = 40) only applies to 5 GHz.
+// The radio blob's sta_bw/ap_bw fields are ignored (kept for NVS compatibility).
+// If the per-band call is rejected, the single-band call is only used with 20 MHz.
 static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
     if (sel > RADIO_BW_MAX) sel = RADIO_BW_MAX;    // the C5 supports max 40 MHz
-    if (sel == RADIO_BW_AUTO) {
-        ESP_LOGI(TAG, "%s bandwidth: driver default (auto)", name);
-        return;
-    }
-    wifi_bandwidth_t bw = (wifi_bandwidth_t)sel;    // RADIO_BW_20/40/80 == WIFI_BW20/40/80
-    esp_err_t err = esp_wifi_set_bandwidth(ifx, bw);
-    ESP_LOGI(TAG, "esp_wifi_set_bandwidth(%s, %s MHz): %s", name, wifi_radio_bw_name(sel), esp_err_to_name(err));
+    wifi_bandwidth_t bw5 = sel == RADIO_BW_AUTO ? WIFI_BW40 : (wifi_bandwidth_t)sel;  // RADIO_BW_20/40 == WIFI_BW20/40
+    wifi_bandwidths_t b = {.ghz_2g = WIFI_BW20, .ghz_5g = bw5};
+    esp_err_t err = esp_wifi_set_bandwidths(ifx, &b);
+    ESP_LOGI(TAG, "esp_wifi_set_bandwidths(%s, 2.4G 20 MHz (locked) / 5G %d MHz%s): %s", name,
+             bw5 == WIFI_BW40 ? 40 : 20, sel == RADIO_BW_AUTO ? " auto" : "", esp_err_to_name(err));
     if (err != ESP_OK) {
-        wifi_bandwidths_t b = {.ghz_2g = bw > WIFI_BW40 ? WIFI_BW40 : bw, .ghz_5g = bw};
-        err = esp_wifi_set_bandwidths(ifx, &b);
-        ESP_LOGI(TAG, "esp_wifi_set_bandwidths(%s, 2.4G %d / 5G %s MHz): %s", name, b.ghz_2g == WIFI_BW40 ? 40 : 20,
-                 wifi_radio_bw_name(sel), esp_err_to_name(err));
+        // Single-band fallback: only 20 MHz is safe here (the band is not known in advance).
+        err = esp_wifi_set_bandwidth(ifx, WIFI_BW20);
+        ESP_LOGW(TAG, "esp_wifi_set_bandwidth(%s, 20 MHz) fallback: %s", name, esp_err_to_name(err));
     }
-    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s bandwidth - radio keeps its default", name);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s bandwidth", name);
 }
 
 // Set the protocol bitmask of an interface (0 = driver default). The bits are
@@ -747,16 +788,28 @@ static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 static void apply_proto(wifi_interface_t ifx, uint8_t mask)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
-    // 11ax is disabled until a fixed C5 radio firmware is available (ESP-IDF issue
-    // #19238: TX hang with 11ax + TCP upload). "Driver default" would include ax,
-    // so it is replaced by an explicit b/g/n (2.4 GHz) + a/n/ac (5 GHz) set.
-    mask &= ~RADIO_PROTO_AX;
+    // v0.9.3: 11ax can be selected again (known C5 fw issue, ESP-IDF #19238: ~0 upload with ax).
+    // "Driver default" would include ax, so mask 0 stays an explicit b/g/n + a/n/ac set.
+    mask &= RADIO_PROTO_ALLOWED;
     if (mask == 0) {
-        mask = RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N | RADIO_PROTO_A | RADIO_PROTO_AC;
+        mask = RADIO_PROTO_DEFAULT;
         ESP_LOGI(TAG, "%s protocols: default without 11ax", name);
+    } else if (mask & RADIO_PROTO_AX) {
+        ESP_LOGW(TAG, "%s protocols include 11ax - known C5 firmware issue (upload may stall)", name);
     }
     uint16_t p2 = mask & (RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N | RADIO_PROTO_AX);
     uint16_t p5 = mask & (RADIO_PROTO_A | RADIO_PROTO_N | RADIO_PROTO_AC | RADIO_PROTO_AX);
+    // Never leave a band without protocols (e.g. only "a" ticked): use the default set for it.
+    if (p2 == 0) p2 = RADIO_PROTO_DEFAULT & (RADIO_PROTO_B | RADIO_PROTO_G | RADIO_PROTO_N);
+    if (p5 == 0) p5 = RADIO_PROTO_DEFAULT & (RADIO_PROTO_A | RADIO_PROTO_N | RADIO_PROTO_AC);
+    // v0.9.6: the C5 only does 40 MHz in 11an mode; with 11ac/11ax enabled on 5 GHz the driver
+    // silently stays at 20 MHz (ESP-IDF esp_wifi_set_bandwidths(): "When the interface supports
+    // 11AX/11AC, it only supports setting WIFI_BW20"). So HT40 on 5 GHz means a/n only there.
+    // 2.4 GHz protocols are untouched (2.4 GHz is HT20 anyway).
+    if (opt_bw_5g() == RADIO_BW_40 && (p5 & (RADIO_PROTO_AC | RADIO_PROTO_AX))) {
+        p5 = (p5 & ~(RADIO_PROTO_AC | RADIO_PROTO_AX)) | RADIO_PROTO_A | RADIO_PROTO_N;
+        ESP_LOGI(TAG, "%s 5 GHz HT40 selected: 11ac/11ax disabled on 5 GHz (C5 does 40 MHz only in 11an)", name);
+    }
     wifi_protocols_t p = {.ghz_2g = p2, .ghz_5g = p5};
     esp_err_t err = esp_wifi_set_protocols(ifx, &p);
     ESP_LOGI(TAG, "esp_wifi_set_protocols(%s, 2.4G 0x%02x / 5G 0x%02x): %s", name, p2, p5, esp_err_to_name(err));
@@ -784,6 +837,65 @@ static void apply_tx_power(uint8_t dbm)
     esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(dbm * 4));
     ESP_LOGI(TAG, "esp_wifi_set_max_tx_power(%d dBm): %s", dbm, esp_err_to_name(err));
     if (err != ESP_OK) ESP_LOGW(TAG, "Could not set TX power - radio keeps its default");
+}
+
+/** Optimize TX power (0 = driver default); the old radio-blob TX field is ignored since v0.9.3. */
+static uint8_t effective_tx_dbm(void)
+{
+    return opt_tx_power_dbm();
+}
+
+void wifi_apply_tx_power(void)
+{
+    if (!s_cp.wifi_init_ok || rescue_active()) return;  // applied at Wi-Fi start otherwise
+    uint8_t dbm = effective_tx_dbm();
+    if (dbm == 0) {
+        ESP_LOGI(TAG, "TX power: driver default (takes effect after reboot if a cap was set)");
+        return;
+    }
+    if (!lock()) return;
+    apply_tx_power(dbm);
+    unlock();
+}
+
+// STA power save (Optimize, runtime). Off is recommended in AP+STA mode (lowest latency/jitter).
+static void apply_ps(uint8_t mode)
+{
+    static const wifi_ps_type_t map[] = {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM};
+    esp_err_t err = esp_wifi_set_ps(map[mode <= 2 ? mode : 0]);
+    ESP_LOGI(TAG, "esp_wifi_set_ps(%s): %s", mode == 1 ? "min modem" : mode == 2 ? "max modem" : "none",
+             esp_err_to_name(err));
+}
+
+void wifi_apply_ps(void)
+{
+    if (!s_cp.wifi_init_ok || rescue_active()) return;  // applied at Wi-Fi start otherwise
+    if (!lock()) return;
+    apply_ps(opt_ps_mode());
+    unlock();
+}
+
+// Regulatory domain (Optimize, boot only). Must run before esp_wifi_start(). The 5 GHz channel
+// mask (if the slave supports 5 GHz) stays 0 = allowed according to the local regulatory rules.
+static void apply_country(void)
+{
+    const opt_country_t *k = opt_country();
+    wifi_country_t c = {.schan = k->schan, .nchan = k->nchan, .max_tx_power = k->max_tx_power,
+                        .policy = WIFI_COUNTRY_POLICY_MANUAL};
+    memcpy(c.cc, k->cc, 2);
+    c.cc[2] = 0;
+    esp_err_t err = esp_wifi_set_country(&c);
+    ESP_LOGI(TAG, "esp_wifi_set_country(%s, ch %d-%d, %d dBm, manual): %s", k->cc, k->schan, k->schan + k->nchan - 1,
+             k->max_tx_power, esp_err_to_name(err));
+}
+
+void wifi_apply_napt(void)
+{
+    if (!s_ap || !s_ap_running || rescue_active()) return;
+    bool on = s_ap_cur.nat && opt_napt_enabled();
+    esp_err_t err = net_napt(s_ap, on);
+    ESP_LOGI(TAG, "AP NAT %s (profile %s, Optimize master %s): %s", on ? "on" : "off", s_ap_cur.nat ? "on" : "off",
+             opt_napt_enabled() ? "on" : "off", esp_err_to_name(err));
 }
 
 static void proto_str(uint16_t p, char *out, size_t n)
@@ -862,16 +974,19 @@ static inline const char *band_of(int ch) { return ch > 14 ? "5 GHz" : "2.4 GHz"
 
 // Read the channel the AP actually uses from the co-processor. The C5 has one
 // radio: in APSTA the AP always runs on the STA's channel.
+// v0.9.3: esp_wifi_get_channel() returns the radio's operating channel (the stored AP config
+// keeps the channel it was configured with, not the one it follows).
 static void refresh_ap_channel(void)
 {
     if (!s_ap_running) return;
-    wifi_config_t c = {0};
-    if (esp_wifi_get_config(WIFI_IF_AP, &c) == ESP_OK && c.ap.channel) {
-        if (c.ap.channel != s_ap_channel) {
-            ESP_LOGI(TAG, "AP channel %d (%s), STA channel %d (%s)", c.ap.channel, band_of(c.ap.channel),
+    uint8_t pri = 0;
+    wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&pri, &sec) == ESP_OK && pri) {
+        if (pri != s_ap_channel) {
+            ESP_LOGI(TAG, "AP channel %d (%s), STA channel %d (%s)", pri, band_of(pri),
                      s_sta_channel, s_sta_channel ? band_of(s_sta_channel) : "-");
         }
-        s_ap_channel = c.ap.channel;
+        s_ap_channel = pri;
     }
 }
 
@@ -974,9 +1089,33 @@ static void wifi_task(void *arg)
         esp_timer_start_once(init_timer, (uint64_t)C5_INIT_TIMEOUT_S * 1000000);
     }
 
+    // v0.9.0: ESP-Hosted is initialized here (CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n)
+    // so the SDIO clock can come from the Optimize settings (40 MHz, or 50 MHz as a trial that
+    // falls back to 40 MHz on any C5 failure - see opt_sdio_fallback_to_40() / rescue_request()).
+    struct esp_hosted_sdio_config sdio_cfg = INIT_DEFAULT_HOST_SDIO_CONFIG();
+    sdio_cfg.clock_freq_khz = opt_sdio_begin();
+    int hr = esp_hosted_sdio_set_config(&sdio_cfg);
+    ESP_LOGI(TAG, "ESP-Hosted SDIO clock %lu kHz%s (set_config %d)", (unsigned long)sdio_cfg.clock_freq_khz,
+             opt_sdio_fell_back() ? " (fell back from 50 MHz)" : "", hr);
+    esp_err_t init_err = ESP_OK;
+    hr = esp_hosted_init();
+    if (hr == 0) hr = esp_hosted_connect_to_slave();
+    if (hr != 0) {
+        ESP_LOGE(TAG, "ESP-Hosted init/connect failed (%d) at %d MHz", hr, opt_sdio_active_mhz());
+        init_err = ESP_FAIL;
+    } else {
+        ESP_LOGI(TAG, "SDIO bus clock: configured %d MHz, actual %d kHz", opt_sdio_active_mhz(), sdio_clk_real_khz());
+    }
+
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t init_err = esp_wifi_init(&cfg);
+    if (init_err == ESP_OK) init_err = esp_wifi_init(&cfg);
+    // Buffer config sent to the C5. The C5 (RPC v2) applies these as-is, except cache_tx:
+    // a C5 without PSRAM replaces it with 0. The TX BA window is not part of wifi_init_config_t.
+    ESP_LOGI(TAG, "Wi-Fi init cfg -> C5: static_rx %d, dynamic_rx %d, dynamic_tx %d, cache_tx %d, "
+             "ampdu rx/tx %d/%d, rx_ba_win %d, amsdu_tx %d",
+             cfg.static_rx_buf_num, cfg.dynamic_rx_buf_num, cfg.dynamic_tx_buf_num, cfg.cache_tx_buf_num,
+             cfg.ampdu_rx_enable, cfg.ampdu_tx_enable, cfg.rx_ba_win, cfg.amsdu_tx_enable);
     if (init_timer) {
         esp_timer_stop(init_timer);
         esp_timer_delete(init_timer);
@@ -984,6 +1123,9 @@ static void wifi_task(void *arg)
     s_cp.wifi_init_ok = init_err == ESP_OK;
     log_hosted_info();      // also on failure: the C5 OTA page (/c5update) uses this info
     TRY(init_err);
+    // C5 is up (transport + Wi-Fi driver): confirm a 50 MHz trial and auto-clear the emergency flag.
+    opt_sdio_confirm();
+    rescue_c5_init_ok();
 
     TRY(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
     TRY(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
@@ -1007,17 +1149,23 @@ static void wifi_task(void *arg)
     }
     // Band, protocols and channel width are set before the radio starts, so the
     // first STA connect (triggered by STA_START) already uses them.
+    apply_country();
     apply_band_mode(s_radio.band_mode);
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
-    if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
-    apply_bw(WIFI_IF_STA, s_radio.sta_bw);
-    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, s_radio.ap_bw);
+    if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.sta_proto);
+    // v0.9.5: 5 GHz width from Optimize (HT40 default / HT20), shared by STA and AP; 2.4 GHz HT20 locked.
+    apply_bw(WIFI_IF_STA, opt_bw_5g());
+    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, opt_bw_5g());
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect
     // TX power needs a started radio; protocols are re-applied in case the
     // driver reset them on start.
-    apply_tx_power(s_radio.tx_power_dbm);
+    apply_tx_power(effective_tx_dbm());     // Optimize override (non-zero) wins over the radio setting
+    apply_ps(opt_ps_mode());
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
-    if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
+    if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.sta_proto);
+    // v0.9.6: a protocol change can reset the width, so re-apply it after the protocols.
+    apply_bw(WIFI_IF_STA, opt_bw_5g());
+    if (s_apsta_ok && want_ap) apply_bw(WIFI_IF_AP, opt_bw_5g());
 
     // Main loop: connect requests, reconnect with exponential back-off, RSSI refresh.
     uint32_t backoff_s = 1;
@@ -1070,10 +1218,17 @@ static void wifi_task(void *arg)
             }
         }
         c5_health_check();
-        // Only re-read the AP channel when the STA channel changed: each read is an
-        // RPC to the C5 (and ESP-Hosted 3.0.9 logs get_config as "set_config").
+        // v0.9.3: persist the last STA channel here (task context), only when it changed.
+        if (s_sta_ch_persist_pending) {
+            s_sta_ch_persist_pending = false;
+            uint8_t ch = s_last_sta_ch;
+            if (ch && opt_sta_last_ch_store(ch) != ESP_OK) ESP_LOGW(TAG, "Could not store last STA channel %d", ch);
+        }
+        // Only re-read the AP channel when the STA channel changed or the STA (re)connected:
+        // each read is an RPC to the C5.
         static uint8_t s_ap_ch_checked_for = 0xFF;
-        if (s_ap_running && s_sta_channel != s_ap_ch_checked_for && lock()) {
+        if (s_ap_running && (s_sta_channel != s_ap_ch_checked_for || s_ap_ch_dirty) && lock()) {
+            s_ap_ch_dirty = false;
             refresh_ap_channel();
             s_ap_ch_checked_for = s_sta_channel;
             unlock();

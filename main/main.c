@@ -24,6 +24,7 @@
 #include "logbuf.h"
 #include "logstore.h"
 #include "nvs_flash.h"
+#include "opt_config.h"
 #include "pintest.h"
 #include "rescue.h"
 #include "wifi.h"
@@ -65,6 +66,7 @@ void app_main(void)
         ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(err));
     }
     diag_debug_load();   // Needs NVS; decides whether the boot-time checks below run
+    opt_config_load();   // Needs NVS; Optimize settings (log level now, SDIO clock/TX/NAPT used by wifi.c)
     logstore_init();     // Needs NVS; mounts the FAT log store in the background (OTA logs, opt-in session logs)
 
     // Wiring check must run before the SPI/I2C drivers claim the module pins.

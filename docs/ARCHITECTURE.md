@@ -164,3 +164,103 @@ cc -std=c11 -Wall -Wextra -Werror -DLV_CONF_PATH='"/tmp/mypi-lv-conf.h"' \
 
 Existing C, JavaScript and logo tests remain applicable; hardware validation is
 still required before release.
+
+
+## RAM/PSRAM strategy (0.9.0)
+
+Rule: time-critical buffers live in internal RAM; large static allocations and
+buffers where the receiver is the bottleneck live in PSRAM. When unsure, choose
+the safe option ("better safe than sorry").
+
+| Buffer | Placement | Reason |
+|---|---|---|
+| ESP-Hosted SDIO DMA buffers | Internal (driver-managed, DMA-capable) | DMA/latency critical |
+| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 32 KB fixed since v0.9.1) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
+| LVGL flush buffers `s_pixels` + `s_kbd_pixels` (2 x 9.6 KB, `ui_lvgl_port.c`) | Internal `.bss` (moved from PSRAM in 0.9.0) | flush path, feeds the display DMA |
+| Display DMA bounce buffers (`display.c`) | Internal DMA heap | DMA requirement |
+| LVGL heap (64 KB), framebuffer-sized buffers | PSRAM | large, not latency critical |
+| Log ring buffer, log store chunks, net log, web log list | PSRAM (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`) | large, consumer (flash/web) is the bottleneck |
+| Pin test report `s_report` (~1.5 KB, `pintest.c`) | PSRAM (`EXT_RAM_BSS_ATTR`, 0.9.0) | static, rarely used |
+| STA profile table `s_sta` (~1.6 KB, `profiles.c`) | PSRAM (`EXT_RAM_BSS_ATTR`, 0.9.0) | static, not time critical |
+
+Always-on build options in `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=y`,
+`CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535`. The Wi-Fi static RX buffer count is
+already 32 (`WIFI_RMT_STATIC_RX_BUFFER_NUM`, higher than the suggested 10) and
+`CONFIG_SPIRAM_SPEED=80` is the applicable P4 symbol (`CONFIG_ESP32P4_SPIRAM_SPEED`
+does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
+(`esp_wifi_set_bandwidths`). 802.11ax is selectable again since v0.9.3 (known C5 upload issue).
+
+## opt_config module (0.9.0)
+
+Files: `main/opt_config_core.h` (pure logic, host-testable via an `opt_store_t`
+mock), `main/opt_config.h`, `main/opt_config.c` (NVS binding and apply hooks).
+
+NVS namespace `mypi_opt` (`u8` unless noted):
+
+| Key | Field | Values | Default | Applied |
+|---|---|---|---|---|
+| `tx_dbm` | `wifi_tx_power_dbm` | 0 (radio default), 8..21 | 0 | runtime |
+| `ps_mode` | `ps_mode` | 0 none / 1 min modem / 2 max modem | 0 | runtime (`esp_wifi_set_ps`); Off recommended in AP+STA |
+| `beacon_ms` (`u16`) | `ap_beacon_ms` | 100 / 200 / 300 | 100 | boot (`wifi_config_t.ap.beacon_interval`) |
+| `country` (string) | `country` | SE / EU / US / JP | SE | boot (`esp_wifi_set_country`, manual policy) |
+| `tcp_wnd_kb` | `tcp_wnd_kb` (v0.9.4) | 32 / 64 / 128 | 32 | boot (`mypi_tcp_wnd`, lwIP `TCP_WND` via `main/lwip_tune.h`) |
+| `lwip_core` | `lwip_core` (v0.9.4) | 0 auto / 1 core 0 / 2 core 1 | 0 | boot (`__wrap_sys_thread_new` pins the tcpip task) |
+| `napt_max` | `napt_max` (v0.9.4) | 5 / 10 / 20 = 512 / 1024 / 2048 entries | 5 | boot (`IP_NAPT_MAX`) |
+| `napt_tcp_to` | `napt_tcp_to` (v0.9.4) | 2 = 2 h / 1 = 1 h / 0 = 30 min | 2 | runtime (`IP_NAPT_TIMEOUT_MS_TCP`) |
+| `sta_last_ch` | internal (v0.9.3) | 1-14, 36-64 / 100-144 / 149-177 (step 4) | - | written on STA connect when changed; AP channel at boot |
+| `bw_5g` | `bw_5g` (v0.9.5) | 40 = HT40 / 20 = HT20 | 40 | boot (`opt_bw_5g()` -> `apply_bw()` for STA and AP; 2.4 GHz always HT20) |
+| `sdio_mhz` | `sdio_mhz` (v0.9.5) | 40 / 50 | 40 | boot (`opt_sdio_begin()` -> `esp_hosted_sdio_set_config`), auto-fallback to 40 |
+| `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
+| `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
+
+Removed (keys erased at boot, fixed values used): `napt` (always on, per AP profile NAT flag) and
+`log_lvl` (Info) since v0.9.3; `tcp_kb` since v0.9.1. `lwip_core`, `napt_max` and `napt_tcp_to`
+were removed in v0.9.3 and are settings again since v0.9.4, together with the new `tcp_wnd_kb`.
+
+TCP window (v0.9.4): lwIP is built with `-include main/lwip_tune.h`, which redefines
+`CONFIG_LWIP_TCP_WND_DEFAULT` (and so lwipopts.h `TCP_WND`) as `mypi_tcp_wnd`. In preprocessor
+`#if` checks the expression evaluates to 131072 (the 128 KB maximum, allowed by `WND_SCALE` /
+`RCV_SCALE=2`); in C code it is the boot value. Only TCP terminated on the P4 uses it.
+
+Radio blob (`mypi` / `radio`, `wifi.c`): since v0.9.3 only `band_mode` and one protocol mask
+shared by STA and AP are used (`sta_proto == ap_proto`; old blobs are merged with
+`opt_proto_merge`: STA value if non-zero, else AP). The blob's `sta_bw` / `ap_bw` are ignored:
+2.4 GHz is always HT20 and the 5 GHz width comes from `bw_5g` (v0.9.5, HT40 default), one value
+for STA and AP since they share the radio. TX power comes from `tx_dbm`, DTIM is the driver default.
+
+AP channel (`opt_ap_channel_pick`): current STA channel > current AP channel > `sta_last_ch`
+if usable for the band mode / country > 1 (36 in 5 GHz-only mode). `ap.csa_count = 3`.
+
+Boot: `main.c` calls `opt_config_load()` (applies log level). `wifi.c` initialises
+ESP-Hosted manually (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN` off) so the
+SDIO clock from `opt_sdio_begin()` can be set before the transport starts.
+
+SDIO clock (v0.9.5): `sdio_mhz` is used again. IDF v6.1's `sdmmc_io_enable_hs_mode()` caps an
+SDIO card at 40 MHz (`SDMMC_FREQ_HIGHSPEED`), so `main/sdio_clk.c` wraps it
+(`-Wl,--wrap=sdmmc_io_enable_hs_mode`) and raises the card limit to the host's configured clock
+(max 50 MHz; the P4 makes exactly 50 MHz from its 200 MHz SDIO PLL). The real bus clock is read
+back with `sdmmc_host_get_real_freq()`, logged at boot and returned as `sdio_real_khz`.
+
+SDIO 50 MHz auto-fallback:
+1. A 50 MHz boot writes `sdio_try=1` before the transport starts.
+2. When the transport is up and `esp_wifi_init` succeeds, `opt_sdio_confirm()`
+   writes `sdio_try=0`.
+3. If the C5 fails at 50 MHz (`rescue_request`), `sdio_mhz=40`, `sdio_try=0` is
+   saved and the device restarts without consuming the rescue restart budget.
+4. If a 50 MHz boot hangs or crashes before confirmation, the next boot sees
+   `sdio_try=1` and falls back to 40 MHz, saving it in NVS.
+
+Emergency flag: set by the rescue task when emergency mode is entered (existing
+second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
+after a successful C5 init, or manually via the web UI.
+
+Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
+true when `ap_beacon_ms`, `country`, `tcp_wnd_kb`, `lwip_core`, `napt_max`, `bw_5g` or `sdio_mhz` changed;
+GET also returns `sdio_active_mhz`, `sdio_fell_back` and `sdio_real_khz`), `GET/POST /api/radio` (`band_mode`, shared `proto`,
+`last_sta_channel`), `POST /api/clear_emergency`,
+`POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
+dropdowns.
+
+v0.9.1: the TCP window option (`tcp_kb`) was removed and the obsolete key is erased at boot
+(v0.9.4 brings the window back as `tcp_wnd_kb`, now applied at runtime). The Wi-Fi
+protocol / band / width controls moved from System to the top of Optimize; 2.4 GHz stays HT20.
