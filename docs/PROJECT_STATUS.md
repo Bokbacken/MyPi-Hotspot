@@ -21,7 +21,9 @@ No follow-up code is imported or newly marked hardware-tested by this checkpoint
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
 
-## v0.8.6 work in progress — 2026-10-18 (builds, not hardware-tested)
+## v0.8.6 — 2026-10-18 (HW-tested, merged to main: PRs #12–#15)
+
+- Hardware result: P4 OTA and C5 OTA both succeeded over the Wi-Fi STA uplink.
 
 - v0.8.5 hardware result: Wi-Fi OTA OK on the first attempt (17.4 s, 0.65 Mbit/s, no SDIO DMA
   allocation failures, min free internal heap 90 KB).

@@ -9,7 +9,7 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
-## Hotspot v0.8.6 validation (pending hardware)
+## Hotspot v0.8.6 validation (done: P4 and C5 OTA over STA OK; emergency-mode path not yet observed)
 
 1. Update via `/update`; confirm normal boot, LCD/touch and web UI (LVGL heap now in PSRAM).
 2. If emergency mode or a "C5 auto restart" row appears, read the `automatic restart` /

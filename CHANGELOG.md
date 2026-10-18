@@ -5,7 +5,7 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
-## 0.8.6 — PSRAM for large buffers, automatic C5 restart before emergency mode (builds, not hardware-tested)
+## 0.8.6 — PSRAM for large buffers, automatic C5 restart before emergency mode (HW-tested: P4 OTA and C5 OTA over Wi-Fi STA OK)
 - **Internal RAM freed (~83 KB):** the LVGL heap (`work_mem_int`, 64 KB), the LVGL draw buffer
   (`s_pixels`, 9.6 KB) and the crash tail are now placed in PSRAM
   (`SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY`, `SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY`,
