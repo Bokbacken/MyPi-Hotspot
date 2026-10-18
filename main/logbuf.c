@@ -17,9 +17,9 @@ static size_t s_head;       // Next write position
 static bool s_wrapped;
 static uint64_t s_total;    // Bytes ever written (monotonic)
 
-// Crash tail: small ring in internal RAM that the startup code does not clear, so it
-// survives esp_restart(), panics and watchdog resets (power loss wipes it).
-#define TAIL_SIZE   8192
+// Crash tail: ring in PSRAM (v0.8.6, was 8 KB internal) that the startup code does not clear,
+// so it survives esp_restart(), panics and watchdog resets (power loss wipes it).
+#define TAIL_SIZE   32768
 #define TAIL_MAGIC  0x4D795054u     // "MyPT"
 typedef struct {
     uint32_t magic;
@@ -29,7 +29,7 @@ typedef struct {
     uint32_t check;                 // ~magic ^ head-independent marker, guards against garbage
     char buf[TAIL_SIZE];
 } tail_t;
-static __NOINIT_ATTR tail_t s_tail;
+static EXT_RAM_NOINIT_ATTR tail_t s_tail;
 static char *s_prev_tail;           // Copy of the previous session's tail (PSRAM)
 static bool s_prev_flag;
 static vprintf_like_t s_orig_vprintf;

@@ -199,6 +199,7 @@ MYPI_BRAND_HEADER
 "row('AP',s.ap.running?esc(s.ap.ssid)+' @ '+s.ap.ip+', '+chText(s.ap)+', '+s.ap.clients+'/'+s.ap.max_clients+' clients, NAT '+(s.ap.nat?'on':'off'):"
 "(s.ap.apsta_supported?'stopped':'unavailable (APSTA rejected)'),s.ap.running?'ok':'')+"
 "(s.eth.rescue&&s.eth.rescue.active?row('EMERGENCY MODE','Ethernet only ('+esc(s.eth.rescue.reason)+'), option '+esc(s.eth.rescue.option)+(s.eth.rescue.error?' - error '+esc(s.eth.rescue.error):'')+'. Wi-Fi AP stopped; reboot to leave.','bad'):'')+"
+"(s.eth.rescue&&s.eth.rescue.auto_restarts>0?row('C5 auto restart',s.eth.rescue.auto_restarts+'x ('+esc(s.eth.rescue.last_auto_reason)+'), log in Saved logs'):'')+"
 "row('Ethernet',s.eth.initialized?(s.eth.mode=='lan'?'LAN (bridged to AP, '+lanNet(s)+', no own IP)'+(s.eth.bridged?'':' - bridge idle (AP off)'):'WAN'+(s.eth.ip&&s.eth.ip!='0.0.0.0'?', IP '+s.eth.ip+', GW '+s.eth.gw:', no IP yet'))+' - link '+(s.eth.link_up?'up '+s.eth.speed_mbps+' Mbit/s':'down'):"
 "'not initialized '+esc(s.eth.error),s.eth.link_up?'ok':'')+"
 "row('ESP-Hosted',s.hosted)+"
@@ -1282,6 +1283,10 @@ static void add_eth_info(cJSON *o)
     cJSON_AddStringToObject(rj, "option", label);
     cJSON_AddBoolToObject(rj, "busy", r.busy);
     cJSON_AddStringToObject(rj, "error", r.err == ESP_OK ? "" : esp_err_to_name(r.err));
+    rescue_reason_t last = RESCUE_REASON_NONE;
+    int n = rescue_auto_restarts(&last);
+    cJSON_AddNumberToObject(rj, "auto_restarts", n);
+    cJSON_AddStringToObject(rj, "last_auto_reason", n > 0 ? rescue_reason_text(last) : "");
 }
 
 static esp_err_t api_eth_get(httpd_req_t *req)

@@ -12,3 +12,9 @@ idf_component_register(
 # Compile DEBUG-level logs into the app so debug mode can enable them at runtime
 # (the global maximum stays INFO, so ESP-IDF components are not affected).
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_DEBUG)
+
+# v0.8.6: LVGL's built-in heap (LV_MEM_SIZE, 64 KB static array) goes to PSRAM instead of internal
+# DRAM. Needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY. LVGL has no Kconfig option for this.
+idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)
+target_compile_definitions(${lvgl_lib} PRIVATE
+    "LV_ATTRIBUTE_LARGE_RAM_ARRAY=__attribute__((section(\".ext_ram.bss.lv_mem\")))")

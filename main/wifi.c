@@ -895,6 +895,7 @@ static void refresh_ap_channel(void)
 #define C5_INIT_TIMEOUT_S       30      // esp_wifi_init() normally returns within a few seconds
 #define C5_HEALTH_PERIOD_S      60      // RPC health check interval once Wi-Fi runs
 #define C5_HEALTH_MAX_FAILS     3       // consecutive failures before emergency mode
+#define C5_STABLE_S             300     // uptime with a healthy C5 before the auto restart is re-armed
 
 static void on_hosted_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -927,6 +928,9 @@ static void c5_health_check(void)
     unlock();
     if (r == ESP_OK) {
         s_fails = 0;
+        // Healthy for a while: re-arm the one automatic C5 restart (avoids a reboot loop
+        // if the C5 keeps failing shortly after every boot).
+        if (now > (int64_t)C5_STABLE_S * 1000000) rescue_c5_ok();
         return;
     }
     s_fails++;
