@@ -1,18 +1,14 @@
 #pragma once
 
-// "Optimize" settings (v0.9.0), NVS-backed (namespace OPT_NVS_NS, see opt_config_core.h):
-//   sdio_freq_mhz     40/50 MHz SDIO clock to the C5 (boot only; 50 MHz falls back to 40 automatically)
-//   wifi_tx_power_dbm max TX power, 0 = keep the radio setting (runtime)
-//   napt              NAT master switch for the AP (runtime)
-//   log_level         0 error .. 3 debug for all tags (runtime)
+// "Optimize" settings, NVS-backed (namespace OPT_NVS_NS, see opt_config_core.h). Since v0.9.3:
+//   wifi_tx_power_dbm max TX power, 0 = driver default, else 8..21 dBm (runtime)
 //   ps_mode           STA power save 0 off / 1 min / 2 max modem, esp_wifi_set_ps() (runtime)
 //   ap_beacon_ms      AP beacon interval 100/200/300 (boot: wifi_config_t.ap.beacon_interval)
 //   country           "SE"/"EU"/"US"/"JP", esp_wifi_set_country() before esp_wifi_start() (boot)
-//   lwip_core         tcpip task pinning 0 auto / 1 core 0 / 2 core 1 (boot: sys_thread_new wrapper)
-//   napt_max          NAPT table 5/10/20 = 512/1024/2048 entries (boot: table allocated on first NAPT enable)
-//   napt_tcp_to       NAPT idle TCP timeout 2 = 2 h / 1 = 1 h / 0 = 30 min (runtime, read by the NAPT GC)
-// The TCP window is no longer a setting (v0.9.1): fixed 32 KB in sdkconfig.defaults.
-// Plus the emergency flag (set when emergency mode was entered after a C5 failure).
+// Band and the shared STA/AP protocol mask live in the radio blob (wifi.c, POST /api/radio).
+// Fixed defaults (no UI, old keys erased at boot): SDIO 40 MHz, NAPT on (per AP profile NAT flag),
+// log level info, tcpip core auto, NAPT table 512 entries, NAPT TCP timeout 2 h, TCP window 32 KB.
+// Plus the emergency flag and the last STA channel (u8 "sta_last_ch", AP channel hint at boot).
 
 #include <stdbool.h>
 
@@ -20,20 +16,20 @@
 #include "esp_log.h"
 #include "opt_config_core.h"
 
-/** Read the settings from NVS (needs nvs_flash_init) and apply the log level. Call once at boot. */
+/** Read the settings from NVS (needs nvs_flash_init), erase obsolete keys, set the log level. Call once at boot. */
 void opt_config_load(void);
 /** Settings in use since boot / settings stored in NVS. */
 void opt_config_get_active(opt_config_t *out);
 void opt_config_get_saved(opt_config_t *out);
 /**
- * Validate, store and apply the runtime fields (TX power, NAPT, log level, STA power save).
+ * Validate, store and apply the runtime fields (TX power, STA power save).
  * *reboot_required = a boot-only field differs from the active value.
  */
 esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required);
 bool opt_config_reboot_pending(void);
-/** NAT master switch (active value). */
+/** NAT master switch: always true since v0.9.3 (the AP profile NAT flag decides). */
 bool opt_napt_enabled(void);
-/** TX power override in dBm (active value), 0 = use the radio setting. */
+/** TX power cap in dBm (active value), 0 = driver default. */
 uint8_t opt_tx_power_dbm(void);
 /** STA power save mode 0..2 (== wifi_ps_type_t), active value. */
 uint8_t opt_ps_mode(void);
@@ -41,11 +37,14 @@ uint8_t opt_ps_mode(void);
 uint16_t opt_ap_beacon_ms(void);
 /** Regulatory domain read at boot (never NULL). */
 const opt_country_t *opt_country(void);
-/** LwIP core / NAPT table size read at boot (codes as stored in NVS). */
-uint8_t opt_lwip_core(void);
-uint8_t opt_napt_max(void);
-/** Global log level mapped to esp_log_level_t (active value). */
+/** Global log level (fixed info since v0.9.3). */
 esp_log_level_t opt_log_esp_level(void);
+
+// --- Last STA channel (v0.9.3) ---
+/** Last channel the STA connected on (from NVS at boot / last store), 0 = none. */
+uint8_t opt_sta_last_ch(void);
+/** Persist ch (validated) if it differs from the stored value. Blocks on NVS: call from a task, not the event loop. */
+esp_err_t opt_sta_last_ch_store(uint8_t ch);
 
 // --- SDIO clock trial / fallback (wifi.c, rescue.c) ---
 /** Clock for this boot in kHz; marks a 50 MHz boot as a trial in NVS. */

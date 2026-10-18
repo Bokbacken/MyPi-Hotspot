@@ -80,17 +80,21 @@ enum { RADIO_BAND_AUTO = 0, RADIO_BAND_2G = 1, RADIO_BAND_5G = 2 };
 #define RADIO_PROTO_AC  0x20
 #define RADIO_PROTO_AX  0x40
 #define RADIO_PROTO_ALL 0x77
-#define RADIO_PROTO_ALLOWED 0x37      // 11ax disabled (ESP-IDF issue #19238)
+#define RADIO_PROTO_ALLOWED 0x77      // v0.9.3: 11ax selectable again (known C5 fw upload issue, ESP-IDF #19238)
+#define RADIO_PROTO_DEFAULT 0x37      // used for mask 0: b/g/n + a/ac (no ax)
 
+// v0.9.3: only band_mode and the shared protocol mask are settings. sta_proto == ap_proto always
+// (one selector, migrated with opt_proto_merge); sta_bw/ap_bw/tx_power_dbm/ap_dtim are ignored
+// (forced to auto/0 at load) and kept only for the NVS blob layout.
 typedef struct {
-    uint8_t sta_bw;                 // RADIO_BW_* (auto = driver default / negotiated)
-    uint8_t ap_bw;                  // RADIO_BW_*
-    uint8_t sta_proto;              // RADIO_PROTO_* bitmask, 0 = driver default
-    uint8_t ap_proto;               // RADIO_PROTO_* bitmask, 0 = driver default
+    uint8_t sta_bw;                 // ignored since v0.9.3 (always auto: 2.4 GHz HT20, 5 GHz HT40)
+    uint8_t ap_bw;                  // ignored since v0.9.3
+    uint8_t sta_proto;              // RADIO_PROTO_* bitmask, 0 = default (RADIO_PROTO_DEFAULT)
+    uint8_t ap_proto;               // == sta_proto since v0.9.3
     uint8_t band_mode;              // RADIO_BAND_*
-    uint8_t tx_power_dbm;           // 0 = driver default, 2..21 dBm
+    uint8_t tx_power_dbm;           // ignored since v0.9.3 (Optimize "tx_dbm" is the only TX setting)
     uint8_t ap_beacon_interval_tu;  // unused since v0.9.1 (Optimize "beacon_ms"); kept for NVS blob layout
-    uint8_t ap_dtim;                // 0 = default (1), else 1..255 (driver caps at 10)
+    uint8_t ap_dtim;                // ignored since v0.9.3 (driver default DTIM)
     uint8_t _pad[8];
 } wifi_radio_cfg_t;
 

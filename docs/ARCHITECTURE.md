@@ -188,7 +188,7 @@ Always-on build options in `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=
 already 32 (`WIFI_RMT_STATIC_RX_BUFFER_NUM`, higher than the suggested 10) and
 `CONFIG_SPIRAM_SPEED=80` is the applicable P4 symbol (`CONFIG_ESP32P4_SPIRAM_SPEED`
 does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
-(`esp_wifi_set_bandwidths`) and 802.11ax stays disabled.
+(`esp_wifi_set_bandwidths`). 802.11ax is selectable again since v0.9.3 (known C5 upload issue).
 
 ## opt_config module (0.9.0)
 
@@ -199,24 +199,32 @@ NVS namespace `mypi_opt` (`u8` unless noted):
 
 | Key | Field | Values | Default | Applied |
 |---|---|---|---|---|
-| `sdio_mhz` | `sdio_freq_mhz` | 40 / 50 | 40 | boot (reboot required) |
 | `tx_dbm` | `wifi_tx_power_dbm` | 0 (radio default), 8..21 | 0 | runtime |
-| `napt` | `napt` | 0 / 1 | 1 | runtime (master switch over the AP profile NAT flag) |
-| `log_lvl` | `log_level` | 0 error .. 3 debug | 2 | runtime |
 | `ps_mode` | `ps_mode` | 0 none / 1 min modem / 2 max modem | 0 | runtime (`esp_wifi_set_ps`); Off recommended in AP+STA |
 | `beacon_ms` (`u16`) | `ap_beacon_ms` | 100 / 200 / 300 | 100 | boot (`wifi_config_t.ap.beacon_interval`) |
 | `country` (string) | `country` | SE / EU / US / JP | SE | boot (`esp_wifi_set_country`, manual policy) |
-| `lwip_core` | `lwip_core` | 0 auto / 1 core 0 / 2 core 1 | 0 | boot (`__wrap_sys_thread_new` pins the `tcpip` task) |
-| `napt_max` | `napt_max` | 5 / 10 / 20 = 512 / 1024 / 2048 entries | 5 | boot (`IP_NAPT_MAX` via `main/lwip_tune.h`) |
-| `napt_tcp_to` | `napt_tcp_to` | 2 = 2 h / 1 = 1 h / 0 = 30 min | 2 | runtime (`IP_NAPT_TIMEOUT_MS_TCP` via `main/lwip_tune.h`) |
+| `sta_last_ch` | internal (v0.9.3) | 1-14, 36-64 / 100-144 / 149-177 (step 4) | - | written on STA connect when changed; AP channel at boot |
+| `sdio_mhz` | none since v0.9.3 | 40 / 50 | 40 | stored value ignored, SDIO always starts at 40 MHz |
 | `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
 | `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
+
+Removed in v0.9.3 (keys erased at boot, fixed values used): `napt` (always on, per AP profile
+NAT flag), `log_lvl` (Info), `lwip_core` (auto, no pinning), `napt_max` (512 entries via
+`main/lwip_tune.h`), `napt_tcp_to` (2 h); `tcp_kb` since v0.9.1.
+
+Radio blob (`mypi` / `radio`, `wifi.c`): since v0.9.3 only `band_mode` and one protocol mask
+shared by STA and AP are used (`sta_proto == ap_proto`; old blobs are merged with
+`opt_proto_merge`: STA value if non-zero, else AP). Width is always auto (2.4 GHz HT20, 5 GHz
+HT40), TX power comes from `tx_dbm`, DTIM is the driver default.
+
+AP channel (`opt_ap_channel_pick`): current STA channel > current AP channel > `sta_last_ch`
+if usable for the band mode / country > 1 (36 in 5 GHz-only mode). `ap.csa_count = 3`.
 
 Boot: `main.c` calls `opt_config_load()` (applies log level). `wifi.c` initialises
 ESP-Hosted manually (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN` off) so the
 SDIO clock from `opt_sdio_begin()` can be set before the transport starts.
 
-SDIO 50 MHz auto-fallback:
+SDIO 50 MHz auto-fallback (mechanism kept; since v0.9.3 the configured clock is always 40 MHz):
 1. A 50 MHz boot writes `sdio_try=1` before the transport starts.
 2. When the transport is up and `esp_wifi_init` succeeds, `opt_sdio_confirm()`
    writes `sdio_try=0`.
@@ -230,7 +238,8 @@ second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
 after a successful C5 init, or manually via the web UI.
 
 Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
-true when `sdio_freq_mhz`, `ap_beacon_ms`, `country`, `lwip_core` or `napt_max` changed), `POST /api/clear_emergency`,
+true when `ap_beacon_ms` or `country` changed), `GET/POST /api/radio` (`band_mode`, shared `proto`,
+`last_sta_channel`), `POST /api/clear_emergency`,
 `POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
 dropdowns.
 

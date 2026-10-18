@@ -5,6 +5,40 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.3 — 2026-10-18 (builds, not hardware-tested)
+
+- Wi-Fi APSTA channel handling (single C5 radio, AP always follows the STA):
+  - The last channel the STA connected on is stored in NVS (`mypi_opt` / `sta_last_ch`, u8,
+    1-14 or a 5 GHz channel 36-177). Written from the Wi-Fi task only when it changes.
+  - `ap_configure()` picks the AP channel as: current STA channel > current AP channel >
+    persisted last STA channel (only if it matches the band mode and the country's 2.4 GHz
+    range) > 1 (36 in 5 GHz-only mode).
+  - `ap.csa_count = 3`, so AP clients get channel switch announcements when the AP follows
+    the STA to a new channel.
+  - `refresh_ap_channel()` reads the live channel with `esp_wifi_get_channel()` and is forced
+    once after every `STA_CONNECTED` (dirty flag).
+  - `connect_now()` passes the last STA channel as scan hint (`wifi_config_t.sta.channel`) when it
+    fits the band mode; no `esp_wifi_set_channel()` and no AP restart. The hint is dropped after a
+    failed attempt so a moved upstream AP is still found by a full scan.
+- Optimize page trimmed back. Kept: Band (both / 2.4 / 5 GHz), one protocol selector shared by
+  STA and AP (checkboxes a / b / g / n / ac / ax), Wi-Fi TX power (default, 8 dBm .. 21 dBm max),
+  STA power save, AP beacon interval, Wi-Fi country. Emergency flag status / Clear moved to Debug.
+- 802.11ax can be selected again (known C5 firmware issue: upload can drop to ~0, ESP-IDF
+  #19238). "None checked" still means b/g/n + a/n/ac without ax. A band left without any checked
+  protocol uses its default set.
+- Removed settings now run on fixed defaults: SDIO 40 MHz (auto-fallback mechanism kept, no UI),
+  LwIP core auto (the `sys_thread_new` wrapper is gone), NAPT 512 sessions / 2 h TCP timeout,
+  NAPT always on (per AP profile NAT flag), log level Info, width auto (2.4 GHz HT20 locked,
+  5 GHz HT40), driver default DTIM, TX power only from Optimize.
+  Old NVS keys `napt`, `log_lvl`, `lwip_core`, `napt_max`, `napt_tcp_to` are erased at boot; a
+  stored `sdio_mhz` is ignored. In the radio blob the width, TX power and DTIM fields are ignored.
+- Protocol migration: the old separate masks are merged once — the STA value wins if non-zero,
+  else the AP value — and the same mask is applied to both interfaces.
+- API: `/api/radio` takes `{band_mode, proto}` (old `sta_proto`/`ap_proto` still accepted and
+  merged) and reports `proto` and `last_sta_channel`; `/api/opt` only has `wifi_tx_power_dbm`,
+  `ps_mode`, `ap_beacon_ms`, `country`.
+- OTA is enough (partition table unchanged).
+
 ## 0.9.2 — 2026-10-18 (builds, not hardware-tested)
 
 - Optimize: new "LwIP / NAT" section below "C5 Radio / APSTA" (dropdowns only, NVS `mypi_opt`):

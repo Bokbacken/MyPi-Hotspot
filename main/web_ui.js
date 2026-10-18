@@ -137,105 +137,133 @@
     return inputs.length;
   }
 
-  // --- Optimize page (v0.9.0, C5 radio fields v0.9.1): GET/POST /api/opt, POST /api/clear_emergency ---
-  // Same field names and defaults as main/opt_config_core.h.
-  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country",
-    "lwip_core", "napt_max", "napt_tcp_to"];
-  const OPT_CORE_NAMES = ["auto (no pin)", "core 0", "core 1"];
-  const OPT_NAPT_MAX_ENTRIES = { 5: 512, 10: 1024, 20: 2048 };
-  const OPT_NAPT_TCP_TO_NAMES = ["30 min", "1 h", "2 h"];
+  // --- Optimize page (v0.9.0, trimmed v0.9.3): GET/POST /api/opt + /api/radio, POST /api/clear_emergency ---
+  // Same field names and defaults as main/opt_config_core.h. Band and the shared STA/AP protocol mask
+  // live in the radio settings (/api/radio); everything else that used to be here now runs on defaults.
+  const OPT_FIELDS = ["wifi_tx_power_dbm", "ps_mode", "ap_beacon_ms", "country"];
   const OPT_PS_NAMES = ["Off", "Min modem", "Max modem"];
-  const OPT_LOG_NAMES = ["Error", "Warning", "Info", "Debug"];
+  const OPT_BAND_NAMES = ["Both (2.4 + 5 GHz)", "2.4 GHz only", "5 GHz only"];
+  // Same bits as RADIO_PROTO_* in main/wifi.h (ax allowed again since v0.9.3, known C5 fw issue).
+  const PROTO_BITS = { a: 16, b: 1, g: 2, n: 4, ac: 32, ax: 64 };
+  const PROTO_ALL = 0x77;
+  const PROTO_2G = 0x47;   // b/g/n/ax
+  const PROTO_5G = 0x74;   // a/n/ac/ax
 
   function optDefaults() {
-    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, napt: true, log_level: 2, ps_mode: 0, ap_beacon_ms: 100, country: "SE",
-      lwip_core: 0, napt_max: 5, napt_tcp_to: 2 };
+    return { wifi_tx_power_dbm: 0, ps_mode: 0, ap_beacon_ms: 100, country: "SE" };
   }
 
-  // SDIO clock, AP beacon interval, country, LwIP core and NAPT table size are only read at boot
-  // (same rule as opt_config_reboot_required()); the NAPT TCP timeout applies at runtime.
+  // AP beacon interval and country are only read at boot (same rule as opt_config_reboot_required()).
   function optRebootRequired(active, saved) {
     return !!active && !!saved &&
-      (Number(active.sdio_freq_mhz) !== Number(saved.sdio_freq_mhz) ||
-       Number(active.ap_beacon_ms) !== Number(saved.ap_beacon_ms) ||
-       String(active.country) !== String(saved.country) ||
-       Number(active.lwip_core) !== Number(saved.lwip_core) ||
-       Number(active.napt_max) !== Number(saved.napt_max));
+      (Number(active.ap_beacon_ms) !== Number(saved.ap_beacon_ms) ||
+       String(active.country) !== String(saved.country));
   }
 
-  function optSetRadio(document, name, value) {
-    for (const r of document.querySelectorAll(`input[name=${name}]`)) r.checked = String(r.value) === String(value);
+  /** Protocol bitmask from the a/b/g/n/ac/ax checkboxes (0 = none checked = default). */
+  function protoMaskFromChecks(document) {
+    let m = 0;
+    for (const [k, bit] of Object.entries(PROTO_BITS)) {
+      const e = document.getElementById("opt-proto-" + k);
+      if (e && e.checked) m |= bit;
+    }
+    return m & PROTO_ALL;
   }
 
-  function optGetRadio(document, name) {
-    for (const r of document.querySelectorAll(`input[name=${name}]`)) if (r.checked) return Number(r.value);
-    return undefined;
+  function protoSetChecks(document, mask) {
+    for (const [k, bit] of Object.entries(PROTO_BITS)) {
+      const e = document.getElementById("opt-proto-" + k);
+      if (e) e.checked = (Number(mask) & bit) !== 0;
+    }
   }
 
-  const OPT_SELECTS = [["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"], ["opt-country", "country"],
-    ["opt-lwip-core", "lwip_core"], ["opt-napt-max", "napt_max"], ["opt-napt-tcp-to", "napt_tcp_to"]];
+  /** The part of a mask that the selected band can use (0 = both bands, 1 = 2.4 GHz, 2 = 5 GHz). */
+  function protoFilterForBand(mask, band) {
+    const m = Number(mask) & PROTO_ALL;
+    return Number(band) === 1 ? m & PROTO_2G : Number(band) === 2 ? m & PROTO_5G : m;
+  }
+
+  function protoLabel(mask) {
+    const m = Number(mask) & PROTO_ALL;
+    if (!m) return "default (b/g/n + a/n/ac)";
+    return Object.entries(PROTO_BITS).filter(([, bit]) => m & bit).map(([k]) => k).join("/");
+  }
+
+  /** Status text for the protocol row; warns about ax and about a band left without protocols. */
+  function protoHint(mask, band) {
+    const m = Number(mask) & PROTO_ALL;
+    const parts = [protoLabel(m)];
+    if (m && Number(band) !== 2 && !(m & PROTO_2G)) parts.push("no 2.4 GHz protocol checked - 2.4 GHz uses default b/g/n");
+    if (m && Number(band) !== 1 && !(m & PROTO_5G)) parts.push("no 5 GHz protocol checked - 5 GHz uses default a/n/ac");
+    if (m & PROTO_BITS.ax) parts.push("ax: known C5 issue, upload may stall");
+    return parts.join("; ");
+  }
+
+  const OPT_SELECTS = [["opt-tx", "wifi_tx_power_dbm"], ["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"],
+    ["opt-country", "country"]];
 
   function optFillForm(document, d) {
-    optSetRadio(document, "opt-sdio", d.sdio_freq_mhz);
-    const tx = document.getElementById("opt-tx");
-    if (tx) tx.value = String(d.wifi_tx_power_dbm);
     for (const [id, k] of OPT_SELECTS) {
       const e = document.getElementById(id);
       if (e && d[k] !== undefined) e.value = String(d[k]);
     }
-    const napt = document.getElementById("opt-napt");
-    if (napt) napt.checked = !!d.napt;
-    const log = document.getElementById("opt-log");
-    if (log) log.value = String(d.log_level);
   }
 
   /** Only the controls that have a value end up in the POST body (missing keys keep the saved value). */
   function optReadForm(document) {
     const body = {};
-    const sdio = optGetRadio(document, "opt-sdio");
-    if (sdio !== undefined) body.sdio_freq_mhz = sdio;
-    const tx = document.getElementById("opt-tx");
-    if (tx && tx.value !== "") body.wifi_tx_power_dbm = Number(tx.value);
-    const napt = document.getElementById("opt-napt");
-    if (napt) body.napt = !!napt.checked;
-    const log = document.getElementById("opt-log");
-    if (log && log.value !== "") body.log_level = Number(log.value);
-    const ps = document.getElementById("opt-ps");
-    if (ps && ps.value !== "") body.ps_mode = Number(ps.value);
-    const bc = document.getElementById("opt-beacon");
-    if (bc && bc.value !== "") body.ap_beacon_ms = Number(bc.value);
-    const cc = document.getElementById("opt-country");
-    if (cc && cc.value !== "") body.country = String(cc.value);
-    for (const [id, k] of OPT_SELECTS.slice(3)) {
+    for (const [id, k] of OPT_SELECTS) {
       const e = document.getElementById(id);
-      if (e && e.value !== "") body[k] = Number(e.value);
+      if (e && e.value !== "") body[k] = k === "country" ? String(e.value) : Number(e.value);
     }
     return body;
   }
 
-  /** Right-hand status text per row, from a GET /api/opt reply. */
-  function optStatus(d) {
+  /** Radio part of the form (band + shared protocol mask) from a GET /api/radio reply. */
+  function radioFillForm(document, r) {
+    const b = document.getElementById("opt-band");
+    if (b && r && r.band_mode !== undefined) b.value = String(r.band_mode);
+    if (r && r.proto !== undefined) protoSetChecks(document, r.proto);
+  }
+
+  /** POST /api/radio body: the band and one protocol mask that STA and AP share. */
+  function radioReadForm(document) {
+    const body = { proto: protoMaskFromChecks(document) };
+    const b = document.getElementById("opt-band");
+    if (b && b.value !== "") body.band_mode = Number(b.value);
+    return body;
+  }
+
+  /** Right-hand status text per row, from a GET /api/opt reply (and optionally GET /api/radio). */
+  function optStatus(d, r) {
     const a = d.active || d;
     const pend = (k) => (a[k] !== d[k] ? " - saved " + d[k] + ", reboot pending" : "");
-    return {
-      "opt-sdio-st": "active " + (d.sdio_active_mhz || a.sdio_freq_mhz) + " MHz" +
-        (d.sdio_fell_back ? " (auto-fallback from 50 MHz)" : "") + pend("sdio_freq_mhz"),
-      "opt-tx-st": a.wifi_tx_power_dbm ? "cap " + a.wifi_tx_power_dbm + " dBm" : "radio setting (Max TX power above)",
+    const st = {
+      "opt-tx-st": a.wifi_tx_power_dbm ? "cap " + a.wifi_tx_power_dbm + " dBm" : "driver default (max)",
       "opt-ps-st": (OPT_PS_NAMES[a.ps_mode] || "?") + " - Recommended: Off in AP+STA mode",
       "opt-beacon-st": "active " + a.ap_beacon_ms + " ms" + pend("ap_beacon_ms"),
       "opt-country-st": "active " + a.country + pend("country"),
-      "opt-lwip-core-st": "active " + (OPT_CORE_NAMES[a.lwip_core] || "?") + pend("lwip_core"),
-      "opt-napt-max-st": "active " + (OPT_NAPT_MAX_ENTRIES[a.napt_max] || "?") + " sessions" + pend("napt_max"),
-      "opt-napt-tcp-to-st": "active " + (OPT_NAPT_TCP_TO_NAMES[a.napt_tcp_to] || "?"),
-      "opt-napt-st": a.napt ? "on (per AP profile NAT flag)" : "off for all AP profiles",
-      "opt-log-st": OPT_LOG_NAMES[a.log_level] || "?",
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +
         (d.emergency_mode_now ? " (emergency mode active now)" : "") + "; auto-clears on successful boot",
     };
+    if (r) {
+      const ra = r.active || r, rs = r.saved || r;
+      st["opt-band-st"] = "active " + (OPT_BAND_NAMES[ra.band_mode] || "?") +
+        (ra.band_mode !== rs.band_mode ? " - saved " + (OPT_BAND_NAMES[rs.band_mode] || "?") + ", reboot pending" : "");
+      st["opt-proto-st"] = "active " + protoHint(ra.proto, ra.band_mode) +
+        (ra.proto !== rs.proto ? " - saved " + protoLabel(rs.proto) + ", reboot pending" : "");
+    }
+    return st;
   }
 
-  function optShow(document, d) {
-    for (const [id, text] of Object.entries(optStatus(d))) {
+  function radioRebootRequired(r) {
+    if (!r) return false;
+    const ra = r.active || r, rs = r.saved || r;
+    return ra.band_mode !== rs.band_mode || ra.proto !== rs.proto;
+  }
+
+  function optShow(document, d, r) {
+    for (const [id, text] of Object.entries(optStatus(d, r))) {
       const el = document.getElementById(id);
       if (el) el.textContent = text;
     }
@@ -243,7 +271,7 @@
     if (st && st.classList) st.classList.toggle("bad", !!d.emergency_active);
     const btn = document.getElementById("opt-emerg-btn");
     if (btn) btn.disabled = !d.emergency_active;
-    optBanner(document, !!d.reboot_required);
+    optBanner(document, !!d.reboot_required || radioRebootRequired(r));
   }
 
   function optBanner(document, on) {
@@ -260,8 +288,11 @@
     const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
     try {
       const d = await (await f("/api/opt")).json();
+      let r = null;
+      try { r = await (await f("/api/radio")).json(); } catch (e) { r = null; }
       optFillForm(doc, d);
-      optShow(doc, d);
+      if (r) radioFillForm(doc, r);
+      optShow(doc, d, r);
       return d;
     } catch (e) {
       optMsg(doc, "Device unreachable");
@@ -277,12 +308,15 @@
   async function optSave(document, fetchFn) {
     const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
     try {
-      const j = await optPost(f, "/api/opt", optReadForm(doc));
-      optMsg(doc, j.ok ? "Saved" + (j.reboot_required ? " - reboot required" : " and applied") : "ERROR " + (j.error || ""));
-      if (j.ok) {
-        optBanner(doc, !!j.reboot_required);
-        await optLoad(doc, f);
+      const jr = doc.getElementById("opt-band") ? await optPost(f, "/api/radio", radioReadForm(doc)) : { ok: true };
+      if (!jr.ok) {
+        optMsg(doc, "ERROR (radio) " + (jr.error || ""));
+        return jr;
       }
+      const j = await optPost(f, "/api/opt", optReadForm(doc));
+      optMsg(doc, j.ok ? "Saved" + (j.reboot_required ? " - reboot required" : " - band/protocol changes apply after reboot")
+        : "ERROR " + (j.error || ""));
+      if (j.ok) await optLoad(doc, f);
       return j;
     } catch (e) {
       optMsg(doc, "Save failed: " + e);
@@ -324,7 +358,9 @@
   }
 
   const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles,
-    OPT_FIELDS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, optLoad, optSave, optClearEmergency };
+    OPT_FIELDS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, optLoad, optSave, optClearEmergency,
+    PROTO_BITS, protoMaskFromChecks, protoSetChecks, protoFilterForBand, protoLabel, protoHint, radioFillForm, radioReadForm,
+    radioRebootRequired };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {

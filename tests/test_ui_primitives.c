@@ -315,21 +315,18 @@ static void test_opt_config(void)
     opt_store_t st = {mock_get, mock_set, mock_get16, mock_set16, mock_getstr, mock_setstr, mock_commit, &m};
     opt_config_t c, d;
 
-    // Load from an empty store = defaults (40 MHz, radio TX power, NAPT on, INFO, PS off, 100 ms, SE).
+    // Load from an empty store = defaults (driver TX power, PS off, 100 ms, SE).
     memset(&c, 0xAA, sizeof(c));
     memset(&d, 0xAA, sizeof(d));
     opt_config_load_from(&st, &c);
-    assert(c.sdio_freq_mhz == 40 && c.wifi_tx_power_dbm == 0 && c.napt && c.log_level == 2);
-    assert(c.ps_mode == 0 && c.ap_beacon_ms == 100 && strcmp(c.country, "SE") == 0);
-    assert(c.lwip_core == 0 && c.napt_max == 5 && c.napt_tcp_to == 2);
+    assert(c.wifi_tx_power_dbm == 0 && c.ps_mode == 0 && c.ap_beacon_ms == 100 && strcmp(c.country, "SE") == 0);
     assert(opt_config_valid(&c));
-
-    // LwIP / NAT code mapping (v0.9.2).
-    assert(opt_napt_max_entries(5) == 512 && opt_napt_max_entries(10) == 1024 && opt_napt_max_entries(20) == 2048);
-    assert(opt_napt_tcp_timeout_s(2) == 7200 && opt_napt_tcp_timeout_s(1) == 3600 && opt_napt_tcp_timeout_s(0) == 1800);
-    assert(opt_lwip_core_id(0) == -1 && opt_lwip_core_id(1) == 0 && opt_lwip_core_id(2) == 1);
     opt_config_load_from(NULL, &d);
     assert(memcmp(&c, &d, sizeof(c)) == 0);
+
+    // Fixed values of the settings removed in v0.9.3.
+    assert(OPT_FIXED_NAPT_ENTRIES == 512 && OPT_FIXED_NAPT_TCP_S == 7200 && OPT_FIXED_LOG_LVL == 2);
+    assert(OPT_DEFAULT_SDIO_MHZ == 40);
 
     // Country table (wifi_country_t values).
     assert(OPT_COUNTRY_COUNT == 4);
@@ -340,84 +337,104 @@ static void test_opt_config(void)
     k = opt_country_find("EU"); assert(k && k->nchan == 13 && k->max_tx_power == 20);
     assert(!opt_country_find("XX") && !opt_country_find(NULL));
 
-    // Save round-trip.
-    c.sdio_freq_mhz = 50; c.wifi_tx_power_dbm = 14; c.napt = false; c.log_level = 3;
-    c.ps_mode = 2; c.ap_beacon_ms = 300; memcpy(c.country, "JP", 3);
-    c.lwip_core = 2; c.napt_max = 20; c.napt_tcp_to = 0;
+    // Save round-trip (only the 4 remaining fields are written).
+    c.wifi_tx_power_dbm = 14; c.ps_mode = 2; c.ap_beacon_ms = 300; memcpy(c.country, "JP", 3);
     assert(opt_config_save_to(&st, &c) == 0 && m.commits == 1);
     opt_config_load_from(&st, &d);
-    assert(d.sdio_freq_mhz == 50 && d.wifi_tx_power_dbm == 14 && !d.napt && d.log_level == 3);
-    assert(d.ps_mode == 2 && d.ap_beacon_ms == 300 && strcmp(d.country, "JP") == 0);
-    assert(d.lwip_core == 2 && d.napt_max == 20 && d.napt_tcp_to == 0);
+    assert(d.wifi_tx_power_dbm == 14 && d.ps_mode == 2 && d.ap_beacon_ms == 300 && strcmp(d.country, "JP") == 0);
     uint8_t raw;
     uint16_t raw16;
     char rawcc[4];
-    assert(mock_get(&m, OPT_KEY_SDIO_MHZ, &raw) == 0 && raw == 50);
-    assert(mock_get(&m, OPT_KEY_NAPT, &raw) == 0 && raw == 0);
+    assert(mock_get(&m, OPT_KEY_TX_DBM, &raw) == 0 && raw == 14);
     assert(mock_get(&m, OPT_KEY_PS_MODE, &raw) == 0 && raw == 2);
     assert(mock_get16(&m, OPT_KEY_BEACON_MS, &raw16) == 0 && raw16 == 300);
     assert(mock_getstr(&m, OPT_KEY_COUNTRY, rawcc, sizeof(rawcc)) == 0 && strcmp(rawcc, "JP") == 0);
-    assert(mock_get(&m, OPT_KEY_NAPT_MAX, &raw) == 0 && raw == 20);
-    assert(mock_get(&m, OPT_KEY_NAPT_TCP_TO, &raw) == 0 && raw == 0);
-    assert(mock_get(&m, OPT_KEY_LWIP_CORE, &raw) == 0 && raw == 2);
-    assert(mock_get(&m, OPT_KEY_TCP_KB_OLD, &raw) != 0);         // TCP window key no longer written
+    assert(mock_get(&m, OPT_KEY_SDIO_MHZ, &raw) != 0);           // removed settings are never written
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) assert(mock_get(&m, OPT_OBSOLETE_KEYS[i], &raw) != 0);
+
+    // Stale values of removed settings in NVS do not change anything.
+    opt_config_t before = d;
+    for (int i = 0; i < OPT_OBSOLETE_KEY_COUNT; i++) mock_set(&m, OPT_OBSOLETE_KEYS[i], 3);
+    mock_set(&m, OPT_KEY_SDIO_MHZ, 50);
+    opt_config_load_from(&st, &d);
+    assert(memcmp(&before, &d, sizeof(d)) == 0);
 
     // Invalid configs are rejected and nothing is written.
     opt_config_t bad = d;
-    bad.sdio_freq_mhz = 45;
+    bad.ps_mode = 3;
     assert(opt_config_save_to(&st, &bad) == -1 && m.commits == 1);
-    bad = d; bad.ps_mode = 3;           assert(!opt_config_valid(&bad));
-    bad = d; bad.lwip_core = 3;         assert(!opt_config_valid(&bad));
-    bad = d; bad.napt_max = 15;         assert(!opt_config_valid(&bad));
-    bad = d; bad.napt_tcp_to = 3;       assert(!opt_config_valid(&bad));
     bad = d; bad.ap_beacon_ms = 150;    assert(!opt_config_valid(&bad));
     bad = d; memcpy(bad.country, "XX", 3); assert(!opt_config_valid(&bad));
     bad = d; memcpy(bad.country, "SEX", 3); assert(!opt_config_valid(&bad));   // not NUL-terminated
     bad = d; bad.wifi_tx_power_dbm = 1; assert(!opt_config_valid(&bad));
     bad = d; bad.wifi_tx_power_dbm = 22; assert(!opt_config_valid(&bad));
-    bad = d; bad.log_level = 4;         assert(!opt_config_valid(&bad));
     m.fail_set = 1;
     assert(opt_config_save_to(&st, &d) == -2);
     m.fail_set = 0;
 
     // Corrupt values in NVS fall back to the default field by field.
-    mock_set(&m, OPT_KEY_SDIO_MHZ, 77);
-    mock_set(&m, OPT_KEY_LOG_LVL, 9);
+    mock_set(&m, OPT_KEY_TX_DBM, 30);
     mock_set(&m, OPT_KEY_PS_MODE, 7);
     mock_set16(&m, OPT_KEY_BEACON_MS, 250);
     mock_setstr(&m, OPT_KEY_COUNTRY, "XX");
-    mock_set(&m, OPT_KEY_NAPT_MAX, 7);
-    mock_set(&m, OPT_KEY_NAPT_TCP_TO, 9);
     opt_config_load_from(&st, &d);
-    assert(d.napt_max == 5 && d.napt_tcp_to == 2 && d.lwip_core == 2);
-    assert(d.sdio_freq_mhz == 40 && d.log_level == 2 && d.wifi_tx_power_dbm == 14);
-    assert(d.ps_mode == 0 && d.ap_beacon_ms == 100 && strcmp(d.country, "SE") == 0);
+    assert(d.wifi_tx_power_dbm == 0 && d.ps_mode == 0 && d.ap_beacon_ms == 100 && strcmp(d.country, "SE") == 0);
     mock_setstr(&m, OPT_KEY_COUNTRY, "SWED");                  // too long for the 3-byte field
     opt_config_load_from(&st, &d);
     assert(strcmp(d.country, "SE") == 0);
 
-    // Reboot required only for the boot-only fields (SDIO clock, beacon interval, country).
+    // Reboot required only for the boot-only fields (beacon interval, country).
     opt_config_t a, s2;
     opt_config_defaults(&a);
-    s2 = a; s2.napt = false; s2.log_level = 0; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1; s2.napt_tcp_to = 0;
+    s2 = a; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1;
     assert(!opt_config_reboot_required(&a, &s2));
-    s2.sdio_freq_mhz = 50;
-    assert(opt_config_reboot_required(&a, &s2));
     s2 = a; s2.ap_beacon_ms = 200;
     assert(opt_config_reboot_required(&a, &s2));
     s2 = a; memcpy(s2.country, "US", 3);
     assert(opt_config_reboot_required(&a, &s2));
-    s2 = a; s2.lwip_core = 1;
-    assert(opt_config_reboot_required(&a, &s2));
-    s2 = a; s2.napt_max = 10;
-    assert(opt_config_reboot_required(&a, &s2));
 
-    // SDIO 50 MHz trial / auto-fallback decision.
+    // SDIO trial / auto-fallback decision (mechanism kept, configured clock is always 40 now).
     bool fb;
     assert(opt_sdio_boot_mhz(40, false, &fb) == 40 && !fb);
     assert(opt_sdio_boot_mhz(40, true, &fb) == 40 && !fb);
-    assert(opt_sdio_boot_mhz(50, false, &fb) == 50 && !fb);     // trial starts
-    assert(opt_sdio_boot_mhz(50, true, &fb) == 40 && fb);       // previous trial never confirmed
+    assert(opt_sdio_boot_mhz(50, false, &fb) == 50 && !fb);
+    assert(opt_sdio_boot_mhz(50, true, &fb) == 40 && fb);
+}
+
+// v0.9.3: last STA channel persistence and AP channel choice.
+static void test_sta_channel(void)
+{
+    const int ok[] = {1, 6, 13, 14, 36, 40, 64, 100, 144, 149, 165, 177};
+    const int no[] = {0, -1, 15, 35, 37, 65, 99, 145, 148, 178, 255};
+    for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) assert(opt_sta_ch_valid(ok[i]));
+    for (unsigned i = 0; i < sizeof(no) / sizeof(no[0]); i++) assert(!opt_sta_ch_valid(no[i]));
+    assert(opt_ch_band(6) == 1 && opt_ch_band(36) == 2 && opt_ch_band(15) == 0);
+
+    // Band mode and country range.
+    assert(opt_ch_usable(6, 0, 13) && opt_ch_usable(6, 1, 13) && !opt_ch_usable(6, 2, 13));
+    assert(opt_ch_usable(44, 0, 13) && opt_ch_usable(44, 2, 13) && !opt_ch_usable(44, 1, 13));
+    assert(!opt_ch_usable(13, 0, 11) && opt_ch_usable(11, 0, 11) && opt_ch_usable(14, 1, 14));
+    assert(!opt_ch_usable(0, 0, 13));
+
+    // Write only valid, changed channels (flash wear).
+    assert(opt_sta_ch_should_store(0, 6) && !opt_sta_ch_should_store(6, 6));
+    assert(opt_sta_ch_should_store(6, 44) && !opt_sta_ch_should_store(6, 0) && !opt_sta_ch_should_store(6, 15));
+
+    // AP channel: STA > AP > persisted (if usable) > 1 / 36.
+    assert(opt_ap_channel_pick(44, 6, 1, 0, 13) == 44);
+    assert(opt_ap_channel_pick(0, 6, 44, 0, 13) == 6);
+    assert(opt_ap_channel_pick(0, 0, 44, 0, 13) == 44);
+    assert(opt_ap_channel_pick(0, 0, 44, 1, 13) == 1);     // 5 GHz channel with 2.4-only band: ignored
+    assert(opt_ap_channel_pick(0, 0, 6, 2, 13) == 36);     // 2.4 GHz channel with 5-only band: ignored
+    assert(opt_ap_channel_pick(0, 0, 13, 0, 11) == 1);     // outside the country range
+    assert(opt_ap_channel_pick(0, 0, 0, 0, 13) == 1);
+
+    // Shared protocol mask migration: STA wins, else AP; ax kept, unknown bits dropped.
+    assert(opt_proto_merge(0x37, 0x07) == 0x37);
+    assert(opt_proto_merge(0, 0x36) == 0x36);
+    assert(opt_proto_merge(0, 0) == 0);
+    assert(opt_proto_merge(0x74, 0) == 0x74);
+    assert(opt_proto_merge(0x88, 0x04) == 0x04);
 }
 
 int main(void)
@@ -430,6 +447,7 @@ int main(void)
     test_kbd_core();
     test_touch_geometry();
     test_opt_config();
+    test_sta_channel();
     puts("UI primitive tests passed");
     return 0;
 }

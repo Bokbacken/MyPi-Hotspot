@@ -15,12 +15,11 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_DEBU
 
 # v0.8.6: LVGL's built-in heap (LV_MEM_SIZE, 64 KB static array) goes to PSRAM instead of internal
 # DRAM. Needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY. LVGL has no Kconfig option for this.
-# v0.9.2 LwIP / NAT tuning (Optimize tab): lwIP reads the NAPT table size and idle TCP timeout
-# from opt_config.c (lwip_tune.h), and sys_thread_new() is wrapped so the tcpip task can be
-# pinned to a core from NVS (CONFIG_LWIP_TCPIP_TASK_AFFINITY is a Kconfig constant).
+# LwIP / NAT tuning: lwIP reads the NAPT table size (512) and idle TCP timeout (2 h) from
+# opt_config.c (lwip_tune.h). Fixed defaults since v0.9.3 (no Optimize UI; the v0.9.2 tcpip
+# core-pinning wrapper is gone, the tcpip task uses CONFIG_LWIP_TCPIP_TASK_AFFINITY).
 idf_component_get_property(lwip_lib lwip COMPONENT_LIB)
 target_compile_options(${lwip_lib} PRIVATE "-include${CMAKE_CURRENT_LIST_DIR}/lwip_tune.h")
-target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=sys_thread_new")
 
 idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)
 target_compile_definitions(${lvgl_lib} PRIVATE

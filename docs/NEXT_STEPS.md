@@ -9,6 +9,19 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.9.3 validation (trimmed Optimize, APSTA channel, not hardware-tested)
+
+1. OTA to 0.9.3 (partition table unchanged). Boot log: `Removed obsolete NVS key ...` once for
+   old settings, `SDIO clock 40000 kHz`, radio settings with one shared protocol mask.
+2. Optimize: Band, protocol checkboxes (STA = AP), TX power, power save, beacon, country only.
+   Check that saved n+ac (old STA value) shows as checked after the update.
+3. Connect the STA on a 5 GHz channel, reboot: the AP should start on the same channel
+   (`sta_last_ch`) before the STA reconnects. Repeat with Band = 2.4 GHz only: the 5 GHz value
+   must be ignored (AP on 1 until the STA connects).
+4. Move the upstream AP to another channel: AP clients should follow (CSA, `csa_count = 3`).
+5. ax: tick ax, reboot, run an upload test — expect the known C5 issue; untick to recover.
+6. Debug page: emergency flag status and Clear button still work.
+
 ## Hotspot v0.9.0 validation (Optimize, not hardware-tested)
 
 1. OTA to 0.9.0; boot log must show `ESP-Hosted SDIO clock 40000 kHz` and Wi-Fi as before
