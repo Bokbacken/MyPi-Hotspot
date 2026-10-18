@@ -5,6 +5,20 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.2 — LVGL foundation build (LVGL variant HW-tested)
+- **HW-tested:** the `sdkconfig.lvgl` variant was flashed via `/update`; the LVGL
+  status viewport renders correctly and normal operation works. This also covers the
+  0.8.1 header/logo changes. The default variant was not separately flashed.
+- First firmware build of PR #9 (LVGL 9.4.0, `mypi_ui/` status model, `ui_lvgl_port`).
+  PR #9 could not be built in the Copilot environment (component registry DNS failure).
+- Default build keeps `CONFIG_MYPI_UI_LVGL=n`: same UI as 0.8.1 (LVGL is fetched but
+  not linked into the image).
+- New `sdkconfig.lvgl` overlay enables the experimental LVGL home status viewport:
+  `idf.py -B build_lvgl -D SDKCONFIG=build_lvgl/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.lvgl" build`.
+- ESP-IDF v6.1: both variants build with 0 warnings. Host tests pass
+  (`test_ui_primitives`, `test_web_ui.js`, `test_header_logo.py`, `test_mypi_ui` with real LVGL 9.4.0).
+- App image: default 1 054 032 B, LVGL variant 1 324 176 B (+264 KiB, Montserrat font + LVGL core).
+
 ## 0.8.1 — Integrate PR #5/#6 into the 0.8.0 UI (builds, not hardware-tested)
 - Resolves the overlapping UI branches (PR #5 LCD wheel/routed web views, PR #6
   header/logo) against 0.8.0. LVGL will replace the local rendering
