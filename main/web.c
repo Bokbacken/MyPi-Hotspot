@@ -106,16 +106,7 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='ethernet'><h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
 "<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
 "<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p></section>"
-"<section class='page' data-page='system'><h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
-"<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
-"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
-"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
-"Band <select id='band-mode'><option value='0'>Auto (2.4+5 GHz)</option><option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select> "
-"Max TX power (dBm, 0=default) <input type=number id='tx-power' min=0 max=21 style='width:5em'><br>"
-"AP beacon interval (&times;100 TU, 0=default=100) <input type=number id='ap-beacon' min=0 max=10 style='width:5em'> "
-"AP DTIM period (0=default=1) <input type=number id='ap-dtim' min=0 max=255 style='width:5em'><br>"
-"<button onclick='saveRadio()'>Save</button> <button onclick='reboot()'>Reboot</button><br>"
-"<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
+"<section class='page' data-page='system'>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
@@ -124,6 +115,28 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='optimize'><h2>Optimize</h2>"
 "<div id='opt-banner' class='opt-banner' hidden><span>Some changes require reboot</span> "
 "<button type='button' onclick='reboot()'>Reboot now</button></div>"
+// v0.9.1: radio (protocols / band / width) moved here from the System page; dropdowns and checkboxes only.
+"<h3>Wi-Fi protocols / band / width</h3><table id='rd'></table>"
+"<p>STA width <select id='rsb' onchange=htWarn()><option value='0'>auto</option><option value='1'>HT20</option><option value='2'>HT40</option></select> AP width <select id='rab' onchange=htWarn()><option value='0'>auto</option><option value='1'>HT20</option><option value='2'>HT40</option></select> "
+"<span id='ht-warn' class='bad' hidden>HT40 on 2.4 GHz is not recommended &mdash; AP+STA share the same channel. Use HT20.</span><br>"
+"STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
+"AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
+"Band <select id='band-mode'><option value='0'>Auto (2.4+5 GHz)</option><option value='1'>2.4 GHz only</option><option value='2'>5 GHz only</option></select> "
+"Max TX power (dBm) <select id='tx-power'><option value='0'>Default</option><option value='8'>8</option><option value='11'>11</option><option value='14'>14</option><option value='17'>17</option><option value='19'>19</option><option value='20'>20</option><option value='21'>21 (max)</option></select> AP DTIM period <select id='ap-dtim'><option value='0'>Default (1)</option><option value='1'>1</option><option value='2'>2</option><option value='3'>3</option><option value='5'>5</option><option value='10'>10</option></select><br>"
+"<button type='button' onclick='saveRadio()'>Save radio</button> <button type='button' onclick='reboot()'>Reboot</button><br>"
+"<small>Width: auto = driver default / negotiated; max 40 MHz (ESP32-C5). The firmware always uses HT20 on 2.4 GHz whatever is selected here; "
+"HT40 only applies on 5 GHz. Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware "
+"is available (TX hang with ax + TCP upload, ESP-IDF #19238). STA and AP share one radio and one channel. Radio changes take effect after a reboot.</small></p>"
+"<h3>C5 Radio / APSTA</h3><div class='opt-grid'>"
+"<span class='opt-l'>STA power save</span><span class='opt-c'><select id='opt-ps'><option value='0'>Off (best throughput)</option>"
+"<option value='1'>Min (balanced)</option><option value='2'>Max (lowest power)</option></select></span>"
+"<span class='opt-s' id='opt-ps-st'></span>"
+"<span class='opt-l'>AP beacon interval</span><span class='opt-c'><select id='opt-beacon'><option value='100'>100 ms (default)</option>"
+"<option value='200'>200 ms</option><option value='300'>300 ms</option></select></span><span class='opt-s' id='opt-beacon-st'></span>"
+"<span class='opt-l'>Wi-Fi country / region</span><span class='opt-c'><select id='opt-country'><option value='SE'>SE (Sweden)</option>"
+"<option value='EU'>EU (Europe)</option><option value='US'>US (United States)</option><option value='JP'>JP (Japan)</option></select></span>"
+"<span class='opt-s' id='opt-country-st'></span></div>"
+"<h3>System tuning</h3>"
 "<div id='opt-form' class='opt-grid'>"
 "<span class='opt-l'>SDIO clock (P4 &harr; C5)</span><span class='opt-c'>"
 "<label><input type='radio' name='opt-sdio' value='40'>40 MHz</label> <label><input type='radio' name='opt-sdio' value='50'>50 MHz</label></span>"
@@ -132,9 +145,6 @@ MYPI_BRAND_HEADER
 "<option value='8'>8 dBm</option><option value='11'>11 dBm</option><option value='14'>14 dBm</option><option value='17'>17 dBm</option>"
 "<option value='19'>19 dBm</option><option value='20'>20 dBm</option><option value='21'>21 dBm (max)</option></select></span>"
 "<span class='opt-s' id='opt-tx-st'></span>"
-"<span class='opt-l'>TCP window</span><span class='opt-c'>"
-"<label><input type='radio' name='opt-tcp' value='32'>32 KB</label> <label><input type='radio' name='opt-tcp' value='64'>64 KB</label> "
-"<label><input type='radio' name='opt-tcp' value='128'>128 KB</label></span><span class='opt-s' id='opt-tcp-st'></span>"
 "<span class='opt-l'>NAPT (AP shares uplink)</span><span class='opt-c'><label><input type='checkbox' id='opt-napt'>enabled</label></span>"
 "<span class='opt-s' id='opt-napt-st'></span>"
 "<span class='opt-l'>Log level</span><span class='opt-c'><select id='opt-log'><option value='0'>Error</option><option value='1'>Warning</option>"
@@ -143,7 +153,8 @@ MYPI_BRAND_HEADER
 "<span class='opt-s' id='opt-emerg-st'></span>"
 "</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
 "<p><small>SDIO 50 MHz is tried on the next boot and falls back to 40 MHz automatically (saved) if the C5 does not come up. "
-"TX power, NAPT and log level apply immediately; SDIO clock and TCP window after a reboot. "
+"TX power, NAPT, log level and STA power save apply immediately; SDIO clock, AP beacon interval and country after a reboot. "
+"The TCP window is fixed at 32 KB (build setting). "
 "2.4 GHz stays locked to HT20; 11ax stays off.</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
@@ -182,7 +193,7 @@ MYPI_BRAND_HEADER
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
 "let r=await (await fetch('/api/radio')).json();$('rsb').value=r.sta_bw;$('rab').value=r.ap_bw;setProtoMask('sta',r.sta_proto);setProtoMask('ap',r.ap_proto);"
 "let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
-"$('band-mode').value=r.band_mode;$('tx-power').value=r.tx_power_dbm;$('ap-beacon').value=r.ap_beacon_tu;$('ap-dtim').value=r.ap_dtim;protoHint();"
+"$('band-mode').value=r.band_mode;selv('tx-power',r.tx_power_dbm);selv('ap-dtim',r.ap_dtim);protoHint();htWarn();"
 "if(FL){FL=0;edS(SP[p.active]?p.active:0);edA(0)}"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value=x.pass||'';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
@@ -204,7 +215,9 @@ MYPI_BRAND_HEADER
 "function setProtoMask(p,m){for(let k in PBITS)$(p+'-proto-'+k).checked=!!(m&PBITS[k])}"
 "function protoHint(){for(let p of ['sta','ap'])$(p+'-proto-def').textContent=buildProtoMask(p)?'':'(default, no ax)'}"
 "async function saveRadio(){await post('/api/radio',{sta_bw:+$('rsb').value,ap_bw:+$('rab').value,sta_proto:buildProtoMask('sta'),ap_proto:buildProtoMask('ap'),"
-"band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_beacon_tu:+$('ap-beacon').value,ap_dtim:+$('ap-dtim').value})}"
+"band_mode:+$('band-mode').value,tx_power_dbm:+$('tx-power').value,ap_dtim:+$('ap-dtim').value})}"
+"function htWarn(){$('ht-warn').hidden=!($('rsb').value=='2'||$('rab').value=='2')}"
+"function selv(id,v){let e=$(id);v=String(v);if(![...e.options].some(o=>o.value==v))e.add(new Option(v,v));e.value=v}"
 "async function saveRot(){await post('/api/display',{rotate:$('lrot').checked?1:0})}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
@@ -1348,7 +1361,6 @@ static void add_radio_cfg(cJSON *o, const wifi_radio_cfg_t *c)
     cJSON_AddNumberToObject(o, "ap_proto", c->ap_proto);
     cJSON_AddNumberToObject(o, "band_mode", c->band_mode);
     cJSON_AddNumberToObject(o, "tx_power_dbm", c->tx_power_dbm);
-    cJSON_AddNumberToObject(o, "ap_beacon_tu", c->ap_beacon_interval_tu);
     cJSON_AddNumberToObject(o, "ap_dtim", c->ap_dtim);
 }
 
@@ -1404,8 +1416,8 @@ static esp_err_t api_display_post(httpd_req_t *req)
     return send_result(req, display_set_rotated(rot == 1), rot ? "rotated 180" : "normal orientation", NULL);
 }
 
-// POST /api/radio {sta_bw,ap_bw (0-3), sta_proto,ap_proto (bitmask), band_mode, tx_power_dbm,
-// ap_beacon_tu, ap_dtim} - missing keys keep the saved value; applied after reboot
+// POST /api/radio {sta_bw,ap_bw (0-2), sta_proto,ap_proto (bitmask), band_mode, tx_power_dbm, ap_dtim}
+// (2.4 GHz always runs HT20; the AP beacon interval is an Optimize setting since v0.9.1) - missing keys keep the saved value; applied after reboot
 static esp_err_t api_radio_post(httpd_req_t *req)
 {
     READ_BODY_OR_400(j);
@@ -1421,12 +1433,11 @@ static esp_err_t api_radio_post(httpd_req_t *req)
     c.ap_proto &= RADIO_PROTO_ALLOWED;
     radio_field(j, "band_mode", RADIO_BAND_AUTO, RADIO_BAND_5G, &c.band_mode, &ok);
     radio_field(j, "tx_power_dbm", 0, 21, &c.tx_power_dbm, &ok);
-    radio_field(j, "ap_beacon_tu", 0, 10, &c.ap_beacon_interval_tu, &ok);
     radio_field(j, "ap_dtim", 0, 255, &c.ap_dtim, &ok);
     cJSON_Delete(j);
     return send_result(req, ok ? wifi_radio_save(&c) : ESP_ERR_INVALID_ARG, "saved - reboot to apply",
                        "*_bw: 0-2 (auto/20/40), *_proto: bitmask b=1 g=2 n=4 a=16 ac=32 (ax=64 is stripped), band_mode: 0-2, "
-                       "tx_power_dbm: 0 or 2-21, ap_beacon_tu: 0-10, ap_dtim: 0-255");
+                       "tx_power_dbm: 0 or 2-21, ap_dtim: 0-255");
 }
 
 // --- Optimize settings (v0.9.0) ---
@@ -1435,9 +1446,11 @@ static void add_opt_cfg(cJSON *o, const opt_config_t *c)
 {
     cJSON_AddNumberToObject(o, "sdio_freq_mhz", c->sdio_freq_mhz);
     cJSON_AddNumberToObject(o, "wifi_tx_power_dbm", c->wifi_tx_power_dbm);
-    cJSON_AddNumberToObject(o, "tcp_window_kb", c->tcp_window_kb);
     cJSON_AddBoolToObject(o, "napt", c->napt);
     cJSON_AddNumberToObject(o, "log_level", c->log_level);
+    cJSON_AddNumberToObject(o, "ps_mode", c->ps_mode);
+    cJSON_AddNumberToObject(o, "ap_beacon_ms", c->ap_beacon_ms);
+    cJSON_AddStringToObject(o, "country", c->country);
 }
 
 // GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
@@ -1455,11 +1468,10 @@ static esp_err_t api_opt_get(httpd_req_t *req)
     cJSON_AddBoolToObject(j, "reboot_required", opt_config_reboot_required(&a, &s));
     cJSON_AddNumberToObject(j, "sdio_active_mhz", opt_sdio_active_mhz());
     cJSON_AddBoolToObject(j, "sdio_fell_back", opt_sdio_fell_back());
-    cJSON_AddNumberToObject(j, "tcp_window_build_kb", CONFIG_LWIP_TCP_WND_DEFAULT / 1024);
     return send_json(req, j);
 }
 
-// POST /api/opt {sdio_freq_mhz, wifi_tx_power_dbm, tcp_window_kb, napt, log_level} - missing keys
+// POST /api/opt {sdio_freq_mhz, wifi_tx_power_dbm, napt, log_level, ps_mode, ap_beacon_ms, country} - missing keys
 // keep the saved value. Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
 static esp_err_t api_opt_post(httpd_req_t *req)
 {
@@ -1469,15 +1481,23 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     bool ok = true;
     radio_field(j, "sdio_freq_mhz", 40, 50, &c.sdio_freq_mhz, &ok);
     radio_field(j, "wifi_tx_power_dbm", 0, 21, &c.wifi_tx_power_dbm, &ok);
-    radio_field(j, "tcp_window_kb", 32, 128, &c.tcp_window_kb, &ok);
     radio_field(j, "log_level", 0, 3, &c.log_level, &ok);
+    radio_field(j, "ps_mode", 0, 2, &c.ps_mode, &ok);
+    if (cJSON_GetObjectItemCaseSensitive(j, "ap_beacon_ms")) {
+        int b = jint(j, "ap_beacon_ms", -1);
+        if (opt_beacon_valid(b)) c.ap_beacon_ms = (uint16_t)b; else ok = false;
+    }
+    if (cJSON_GetObjectItemCaseSensitive(j, "country")) {
+        const char *cc = jstr(j, "country");
+        if (strlen(cc) < sizeof(c.country) && opt_country_find(cc)) strlcpy(c.country, cc, sizeof(c.country)); else ok = false;
+    }
     c.napt = jbool(j, "napt", c.napt);
     cJSON_Delete(j);
     bool reboot = false;
     esp_err_t err = ok && opt_config_valid(&c) ? opt_config_save(&c, &reboot) : ESP_ERR_INVALID_ARG;
     if (err != ESP_OK) {
-        return send_result(req, err, NULL, "sdio_freq_mhz: 40|50, wifi_tx_power_dbm: 0 or 2-21, tcp_window_kb: "
-                           "32|64|128, napt: bool, log_level: 0-3");
+        return send_result(req, err, NULL, "sdio_freq_mhz: 40|50, wifi_tx_power_dbm: 0 or 2-21, napt: bool, log_level: 0-3, "
+                           "ps_mode: 0-2, ap_beacon_ms: 100|200|300, country: SE|EU|US|JP");
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);

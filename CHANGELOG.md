@@ -5,6 +5,26 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.1 — 2026-10-18 (builds, not hardware-tested)
+
+- Web: the Wi-Fi protocol / band / width controls moved from System to the top of Optimize
+  (before the SDIO setting). Selecting HT40 shows "HT40 on 2.4 GHz is not recommended — AP+STA
+  share the same channel. Use HT20." HT40 stays selectable for future 5 GHz use; the firmware
+  still always applies HT20 on 2.4 GHz (`apply_bw`, `.ghz_2g = WIFI_BW20`).
+- Web: Max TX power and AP DTIM in that block are now dropdowns (no text/number inputs on Optimize).
+  The AP beacon field of the radio block is replaced by the Optimize beacon setting below.
+- New "C5 Radio / APSTA" settings (NVS namespace `mypi_opt`):
+  - STA power save `ps_mode` (u8 0/1/2 = WIFI_PS_NONE / MIN_MODEM / MAX_MODEM, default 0),
+    applied immediately via `esp_wifi_set_ps()`; UI tip "Recommended: Off in AP+STA mode".
+  - AP beacon interval `beacon_ms` (u16 100/200/300, default 100; u16 because 200/300 do not fit
+    in u8), set in `wifi_config_t.ap.beacon_interval`; reboot required.
+  - Wi-Fi country `country` (string SE/EU/US/JP, default SE) set with `esp_wifi_set_country()`
+    before Wi-Fi start (manual policy; SE/EU 1-13 @ 20 dBm, US 1-11 @ 30 dBm, JP 1-14 @ 23 dBm);
+    reboot required.
+- Removed the TCP window option (32/64/128 KB): no measurable difference on hardware. The lwIP
+  window is fixed at 32 KB (`CONFIG_LWIP_TCP_WND_DEFAULT=32768`, saves internal RAM) and the
+  obsolete `tcp_kb` NVS key is erased once at boot.
+
 ## 0.9.0 — 2026-10-18 (builds, not hardware-tested)
 
 ### Added

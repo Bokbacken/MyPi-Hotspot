@@ -175,7 +175,7 @@ the safe option ("better safe than sorry").
 | Buffer | Placement | Reason |
 |---|---|---|
 | ESP-Hosted SDIO DMA buffers | Internal (driver-managed, DMA-capable) | DMA/latency critical |
-| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 64 KB) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
+| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 32 KB fixed since v0.9.1) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
 | LVGL flush buffers `s_pixels` + `s_kbd_pixels` (2 x 9.6 KB, `ui_lvgl_port.c`) | Internal `.bss` (moved from PSRAM in 0.9.0) | flush path, feeds the display DMA |
 | Display DMA bounce buffers (`display.c`) | Internal DMA heap | DMA requirement |
 | LVGL heap (64 KB), framebuffer-sized buffers | PSRAM | large, not latency critical |
@@ -195,15 +195,17 @@ does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
 Files: `main/opt_config_core.h` (pure logic, host-testable via an `opt_store_t`
 mock), `main/opt_config.h`, `main/opt_config.c` (NVS binding and apply hooks).
 
-NVS namespace `mypi_opt`, all values `u8`:
+NVS namespace `mypi_opt` (`u8` unless noted):
 
 | Key | Field | Values | Default | Applied |
 |---|---|---|---|---|
 | `sdio_mhz` | `sdio_freq_mhz` | 40 / 50 | 40 | boot (reboot required) |
 | `tx_dbm` | `wifi_tx_power_dbm` | 0 (radio default), 8..21 | 0 | runtime |
-| `tcp_kb` | `tcp_window_kb` | 32 / 64 / 128 | 64 | stored; reboot required (lwIP window is build-time today) |
 | `napt` | `napt` | 0 / 1 | 1 | runtime (master switch over the AP profile NAT flag) |
 | `log_lvl` | `log_level` | 0 error .. 3 debug | 2 | runtime |
+| `ps_mode` | `ps_mode` | 0 none / 1 min modem / 2 max modem | 0 | runtime (`esp_wifi_set_ps`); Off recommended in AP+STA |
+| `beacon_ms` (`u16`) | `ap_beacon_ms` | 100 / 200 / 300 | 100 | boot (`wifi_config_t.ap.beacon_interval`) |
+| `country` (string) | `country` | SE / EU / US / JP | SE | boot (`esp_wifi_set_country`, manual policy) |
 | `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
 | `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
 
@@ -225,6 +227,10 @@ second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
 after a successful C5 init, or manually via the web UI.
 
 Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
-true when `sdio_freq_mhz` or `tcp_window_kb` changed), `POST /api/clear_emergency`,
+true when `sdio_freq_mhz`, `ap_beacon_ms` or `country` changed), `POST /api/clear_emergency`,
 `POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
 dropdowns.
+
+v0.9.1: the TCP window option (`tcp_kb`) was removed; the lwIP window is fixed at 32 KB
+(`CONFIG_LWIP_TCP_WND_DEFAULT=32768`) and the obsolete key is erased at boot. The Wi-Fi
+protocol / band / width controls moved from System to the top of Optimize; 2.4 GHz stays HT20.

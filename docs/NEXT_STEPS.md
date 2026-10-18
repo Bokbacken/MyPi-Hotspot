@@ -24,8 +24,8 @@ describe the transitional UI, not an LVGL implementation.
 
 ## Optimize follow-ups
 
-- TCP window: make `tcp_window_kb` effective (needs a runtime TCP_WND in lwIP or per-build
-  variants); today it is stored and shown only.
+- v0.9.1 on hardware: STA power save Off/Min/Max applies without reboot (check throughput and
+  AP client stability); beacon 200/300 ms and country JP/US take effect after reboot.
 - Watch internal heap after moving the LVGL flush buffers to internal RAM (+19.2 KB DRAM).
 
 ## Hotspot v0.8.7 validation (keyboard module, not hardware-tested)

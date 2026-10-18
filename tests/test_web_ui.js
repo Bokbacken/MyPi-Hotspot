@@ -132,10 +132,12 @@ assert.equal(togglePassword(lone, loneBtn), false);
   const def = (n) => core.match(new RegExp(`#define OPT_DEFAULT_${n}\\s+(\\w+)`))[1];
   // JS defaults == firmware defaults (opt_config_core.h).
   assert.deepEqual(ui.optDefaults(), {
-    sdio_freq_mhz: +def("SDIO_MHZ"), wifi_tx_power_dbm: +def("TX_DBM"), tcp_window_kb: +def("TCP_KB"),
+    sdio_freq_mhz: +def("SDIO_MHZ"), wifi_tx_power_dbm: +def("TX_DBM"),
     napt: def("NAPT") === "true", log_level: +def("LOG_LVL"),
+    ps_mode: +def("PS_MODE"), ap_beacon_ms: +def("BEACON_MS"),
+    country: core.match(/#define OPT_DEFAULT_COUNTRY\s+"(\w+)"/)[1],
   });
-  assert.deepEqual(ui.OPT_FIELDS, ["sdio_freq_mhz", "wifi_tx_power_dbm", "tcp_window_kb", "napt", "log_level"]);
+  assert.deepEqual(ui.OPT_FIELDS, ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country"]);
 
   // web.c: GET /api/opt emits exactly these field names (+ read-only emergency_active), POST replies
   // reboot_required from opt_config_save(), the three endpoints are registered.
@@ -147,12 +149,38 @@ assert.equal(togglePassword(lone, loneBtn), false);
     assert.ok(new RegExp(`\\.uri = "${uri}",\\s*\\.method = ${m}`).test(webC), `${m} ${uri} registered`);
   }
   assert.ok(/opt_emergency_set\(false\)/.test(webC.match(/api_clear_emergency_post[\s\S]*?\n\}/)[0]));
-  // Reboot-required rule mirrors opt_config_reboot_required(): SDIO clock and TCP window only.
-  assert.ok(/active->sdio_freq_mhz != saved->sdio_freq_mhz \|\| active->tcp_window_kb != saved->tcp_window_kb/.test(core));
+  // Reboot-required rule mirrors opt_config_reboot_required(): SDIO clock, beacon interval, country.
+  const rule = core.match(/opt_config_reboot_required\([^)]*\)\s*\{([\s\S]*?)\n\}/)[1];
+  assert.ok(/active->sdio_freq_mhz != saved->sdio_freq_mhz/.test(rule) && /active->ap_beacon_ms != saved->ap_beacon_ms/.test(rule) &&
+    /strncmp\(active->country, saved->country/.test(rule) && !/ps_mode|tcp/.test(rule));
   const d0 = ui.optDefaults();
   assert.equal(ui.optRebootRequired(d0, { ...d0, sdio_freq_mhz: 50 }), true);
-  assert.equal(ui.optRebootRequired(d0, { ...d0, tcp_window_kb: 128 }), true);
-  assert.equal(ui.optRebootRequired(d0, { ...d0, napt: false, log_level: 3, wifi_tx_power_dbm: 14 }), false);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, ap_beacon_ms: 200 }), true);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, country: "US" }), true);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, napt: false, log_level: 3, wifi_tx_power_dbm: 14, ps_mode: 2 }), false);
+
+  // v0.9.1: TCP window option is gone (fixed 32 KB build default); obsolete NVS key erased at boot.
+  for (const src of [webC, fs.readFileSync(path.join(__dirname, "../main/web_ui.js"), "utf8"), core]) {
+    assert.ok(!/tcp_window|opt-tcp|TCP_KB\b/.test(src), "no TCP window option left");
+  }
+  assert.ok(/^CONFIG_LWIP_TCP_WND_DEFAULT=32768$/m.test(fs.readFileSync(path.join(__dirname, "../sdkconfig.defaults"), "utf8")));
+  assert.ok(/nvs_erase_key\(h, OPT_KEY_TCP_KB_OLD\)/.test(fs.readFileSync(path.join(__dirname, "../main/opt_config.c"), "utf8")));
+  // Radio controls moved System -> top of Optimize; HT20 locked on 2.4 GHz in firmware.
+  const sysHtml = webC.match(/data-page='system'[\s\S]*?<\/section>/)[0];
+  assert.ok(!/id='rsb'|id='rab'|id='band-mode'|Save radio/.test(sysHtml), "radio controls removed from System");
+  const optTop = webC.match(/data-page='optimize'[\s\S]*?<\/section>/)[0];
+  const iRsb = optTop.indexOf("id='rsb'"), iWarn = optTop.indexOf("id='ht-warn'"), iC5 = optTop.indexOf("C5 Radio / APSTA"),
+    iSdio = optTop.indexOf("opt-sdio");
+  assert.ok(iRsb > 0 && iWarn > iRsb && iC5 > iWarn && iSdio > iC5, "radio block, HT warning, C5 block, then SDIO");
+  assert.ok(optTop.includes("HT40 on 2.4 GHz is not recommended &mdash; AP+STA share the same channel. Use HT20."));
+  assert.ok(/<option value='40'>HT40/.test(optTop) || /value='40'/.test(optTop), "HT40 still selectable");
+  for (const id of ["opt-ps", "opt-beacon", "opt-country"]) assert.ok(optTop.includes(`<select id='${id}'`), id);
+  assert.ok(/Off \(best throughput\)[\s\S]*Min \(balanced\)[\s\S]*Max \(lowest power\)/.test(optTop));
+  assert.ok(/100 ms \(default\)[\s\S]*200 ms[\s\S]*300 ms/.test(optTop));
+  assert.ok(/SE \(Sweden\)[\s\S]*EU \(Europe\)[\s\S]*US \(United States\)[\s\S]*JP \(Japan\)/.test(optTop));
+  const wifiC = fs.readFileSync(path.join(__dirname, "../main/wifi.c"), "utf8");
+  assert.ok(/esp_wifi_set_ps\(/.test(wifiC) && /esp_wifi_set_country\(/.test(wifiC) && /\.ghz_2g = WIFI_BW20/.test(wifiC));
+  assert.ok(/beacon_interval = opt_ap_beacon_ms\(\)/.test(wifiC));
 
   // Optimize section: checkboxes, radio buttons, dropdowns and buttons only - no text input.
   const optHtml = webC.match(/data-page='optimize'[\s\S]*?<\/section>/)[0];
@@ -175,7 +203,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
       const b = JSON.parse(opt.body);
       for (const k of Object.keys(b)) assert.ok(ui.OPT_FIELDS.includes(k), `unknown field ${k}`);
       dev.saved = { ...dev.saved, ...b };
-      for (const k of ["wifi_tx_power_dbm", "napt", "log_level"]) dev.active[k] = dev.saved[k];   // runtime fields
+      for (const k of ["wifi_tx_power_dbm", "napt", "log_level", "ps_mode"]) dev.active[k] = dev.saved[k];   // runtime fields
       return reply({ ok: true, reboot_required: ui.optRebootRequired(dev.active, dev.saved) });
     }
     if (url === "/api/clear_emergency") { dev.emergency = false; return reply({ ok: true, emergency_active: false }); }
@@ -183,11 +211,11 @@ assert.equal(togglePassword(lone, loneBtn), false);
   };
   const el = (extra) => ({ value: "", checked: false, textContent: "", hidden: false, disabled: false,
     classList: { set: new Set(), toggle(n, on) { if (on) this.set.add(n); else this.set.delete(n); } }, ...extra });
-  const radios = { "opt-sdio": [el({ value: "40" }), el({ value: "50" })],
-    "opt-tcp": [el({ value: "32" }), el({ value: "64" }), el({ value: "128" })] };
+  const radios = { "opt-sdio": [el({ value: "40" }), el({ value: "50" })] };
   const ids = {};
-  for (const id of ["opt-tx", "opt-napt", "opt-log", "opt-banner", "opt-msg", "opt-emerg-btn", "opt-sdio-st",
-    "opt-tx-st", "opt-tcp-st", "opt-napt-st", "opt-log-st", "opt-emerg-st", "opt-form"]) ids[id] = el();
+  for (const id of ["opt-tx", "opt-napt", "opt-log", "opt-ps", "opt-beacon", "opt-country", "opt-banner", "opt-msg",
+    "opt-emerg-btn", "opt-sdio-st", "opt-tx-st", "opt-ps-st", "opt-beacon-st", "opt-country-st", "opt-napt-st",
+    "opt-log-st", "opt-emerg-st", "opt-form"]) ids[id] = el();
   ids["opt-banner"].hidden = true;
   const doc = { getElementById: (id) => ids[id] || null,
     querySelectorAll: (sel) => radios[sel.match(/name=([\w-]+)/)[1]] || [] };
@@ -197,7 +225,10 @@ assert.equal(togglePassword(lone, loneBtn), false);
   for (const k of ui.OPT_FIELDS) assert.ok(k in g, `GET /api/opt has ${k}`);
   assert.equal(g.emergency_active, false);
   assert.equal(radios["opt-sdio"][0].checked, true);
-  assert.equal(radios["opt-tcp"][1].checked, true);
+  assert.equal(ids["opt-ps"].value, "0");
+  assert.equal(ids["opt-beacon"].value, "100");
+  assert.equal(ids["opt-country"].value, "SE");
+  assert.match(ids["opt-ps-st"].textContent, /Recommended: Off in AP\+STA mode/);
   assert.equal(ids["opt-tx"].value, "0");
   assert.equal(ids["opt-napt"].checked, true);
   assert.equal(ids["opt-log"].value, "2");
@@ -218,6 +249,15 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.deepEqual(p2, { ok: true, reboot_required: false });
   assert.equal(ids["opt-banner"].hidden, true);
   assert.equal(dev.active.log_level, 3);
+  // STA power save applies at runtime; country change needs a reboot.
+  ids["opt-ps"].value = "1";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: false });
+  assert.equal(dev.active.ps_mode, 1);
+  ids["opt-country"].value = "JP";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: true });
+  assert.match(ids["opt-country-st"].textContent, /reboot pending|JP/);
+  ids["opt-country"].value = "SE";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: false });
 
   // Emergency flag: shown as SET with an enabled Clear button; Clear posts /api/clear_emergency.
   dev.emergency = true;

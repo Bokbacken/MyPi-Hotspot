@@ -110,9 +110,11 @@ CONFIG_LWIP_TCP_RCV_SCALE=2
 # so a full 128 KB window pinned ~150 KB of internal RAM (free heap 218 KB -> 50 KB) and the SDIO
 # driver could no longer allocate its 14 KB DMA read buffer ("dma_alloc failed; dropping read").
 # Only TCP terminated on the P4 (web UI, OTA, iperf) is affected; NAT forwarding is not.
-CONFIG_LWIP_TCP_WND_DEFAULT=65535
+# v0.9.1: fixed at 32 KB (the runtime TCP window option was removed). 32/64/128 KB showed no
+# measurable throughput difference on hardware, and 32 KB pins less internal RAM.
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
-# Must be >= TCP_WND_DEFAULT/MSS + 2 (65535/1436 + 2 = 48), otherwise lwIP drops segments
+# Must be >= TCP_WND_DEFAULT/MSS + 2 (32768/1436 + 2 = 25), otherwise lwIP drops segments
 # while the app is busy (e.g. flash writes during OTA) and large uploads stall. Kept generous.
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=96
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=32

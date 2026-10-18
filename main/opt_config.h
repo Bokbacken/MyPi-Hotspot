@@ -3,9 +3,12 @@
 // "Optimize" settings (v0.9.0), NVS-backed (namespace OPT_NVS_NS, see opt_config_core.h):
 //   sdio_freq_mhz     40/50 MHz SDIO clock to the C5 (boot only; 50 MHz falls back to 40 automatically)
 //   wifi_tx_power_dbm max TX power, 0 = keep the radio setting (runtime)
-//   tcp_window_kb     32/64/128 (stored; lwIP's TCP_WND is a build-time constant, see ARCHITECTURE.md)
 //   napt              NAT master switch for the AP (runtime)
 //   log_level         0 error .. 3 debug for all tags (runtime)
+//   ps_mode           STA power save 0 off / 1 min / 2 max modem, esp_wifi_set_ps() (runtime)
+//   ap_beacon_ms      AP beacon interval 100/200/300 (boot: wifi_config_t.ap.beacon_interval)
+//   country           "SE"/"EU"/"US"/"JP", esp_wifi_set_country() before esp_wifi_start() (boot)
+// The TCP window is no longer a setting (v0.9.1): fixed 32 KB in sdkconfig.defaults.
 // Plus the emergency flag (set when emergency mode was entered after a C5 failure).
 
 #include <stdbool.h>
@@ -20,7 +23,7 @@ void opt_config_load(void);
 void opt_config_get_active(opt_config_t *out);
 void opt_config_get_saved(opt_config_t *out);
 /**
- * Validate, store and apply the runtime fields (TX power, NAPT, log level).
+ * Validate, store and apply the runtime fields (TX power, NAPT, log level, STA power save).
  * *reboot_required = a boot-only field differs from the active value.
  */
 esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required);
@@ -29,6 +32,12 @@ bool opt_config_reboot_pending(void);
 bool opt_napt_enabled(void);
 /** TX power override in dBm (active value), 0 = use the radio setting. */
 uint8_t opt_tx_power_dbm(void);
+/** STA power save mode 0..2 (== wifi_ps_type_t), active value. */
+uint8_t opt_ps_mode(void);
+/** AP beacon interval in ms/TU (100/200/300), value read at boot. */
+uint16_t opt_ap_beacon_ms(void);
+/** Regulatory domain read at boot (never NULL). */
+const opt_country_t *opt_country(void);
 /** Global log level mapped to esp_log_level_t (active value). */
 esp_log_level_t opt_log_esp_level(void);
 

@@ -520,7 +520,7 @@ static esp_err_t ap_configure(int slot)
     c.ap.max_connection = CONFIG_MYPI_AP_MAX_CONN;
     c.ap.channel = s_sta_channel ? s_sta_channel : (s_ap_channel ? s_ap_channel : 1);
     c.ap.pmf_cfg.required = false;
-    if (s_radio.ap_beacon_interval_tu > 0) c.ap.beacon_interval = s_radio.ap_beacon_interval_tu * 100;
+    c.ap.beacon_interval = opt_ap_beacon_ms();     // v0.9.1 Optimize setting (boot value), 100/200/300 TU
     if (s_radio.ap_dtim > 0) c.ap.dtim_period = s_radio.ap_dtim > 10 ? 10 : s_radio.ap_dtim;   // driver range 1..10
     s_ap_cur = p;   // read by the AP_START handler (NAT)
     esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &c);
@@ -676,9 +676,9 @@ static bool radio_cfg_valid(const wifi_radio_cfg_t *c)
 
 static void radio_log(const char *what, const wifi_radio_cfg_t *c)
 {
-    ESP_LOGI(TAG, "%s: STA bw %s proto 0x%02x, AP bw %s proto 0x%02x, band %d, tx %d dBm, beacon %d, dtim %d", what,
+    ESP_LOGI(TAG, "%s: STA bw %s proto 0x%02x, AP bw %s proto 0x%02x, band %d, tx %d dBm, dtim %d", what,
              wifi_radio_bw_name(c->sta_bw), c->sta_proto, wifi_radio_bw_name(c->ap_bw), c->ap_proto, c->band_mode,
-             c->tx_power_dbm, c->ap_beacon_interval_tu, c->ap_dtim);
+             c->tx_power_dbm, c->ap_dtim);
 }
 
 static void radio_load(void)
@@ -804,6 +804,37 @@ void wifi_apply_tx_power(void)
     if (!lock()) return;
     apply_tx_power(dbm);
     unlock();
+}
+
+// STA power save (Optimize, runtime). Off is recommended in AP+STA mode (lowest latency/jitter).
+static void apply_ps(uint8_t mode)
+{
+    static const wifi_ps_type_t map[] = {WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM};
+    esp_err_t err = esp_wifi_set_ps(map[mode <= 2 ? mode : 0]);
+    ESP_LOGI(TAG, "esp_wifi_set_ps(%s): %s", mode == 1 ? "min modem" : mode == 2 ? "max modem" : "none",
+             esp_err_to_name(err));
+}
+
+void wifi_apply_ps(void)
+{
+    if (!s_cp.wifi_init_ok || rescue_active()) return;  // applied at Wi-Fi start otherwise
+    if (!lock()) return;
+    apply_ps(opt_ps_mode());
+    unlock();
+}
+
+// Regulatory domain (Optimize, boot only). Must run before esp_wifi_start(). The 5 GHz channel
+// mask (if the slave supports 5 GHz) stays 0 = allowed according to the local regulatory rules.
+static void apply_country(void)
+{
+    const opt_country_t *k = opt_country();
+    wifi_country_t c = {.schan = k->schan, .nchan = k->nchan, .max_tx_power = k->max_tx_power,
+                        .policy = WIFI_COUNTRY_POLICY_MANUAL};
+    memcpy(c.cc, k->cc, 2);
+    c.cc[2] = 0;
+    esp_err_t err = esp_wifi_set_country(&c);
+    ESP_LOGI(TAG, "esp_wifi_set_country(%s, ch %d-%d, %d dBm, manual): %s", k->cc, k->schan, k->schan + k->nchan - 1,
+             k->max_tx_power, esp_err_to_name(err));
 }
 
 void wifi_apply_napt(void)
@@ -1055,6 +1086,7 @@ static void wifi_task(void *arg)
     }
     // Band, protocols and channel width are set before the radio starts, so the
     // first STA connect (triggered by STA_START) already uses them.
+    apply_country();
     apply_band_mode(s_radio.band_mode);
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
@@ -1064,6 +1096,7 @@ static void wifi_task(void *arg)
     // TX power needs a started radio; protocols are re-applied in case the
     // driver reset them on start.
     apply_tx_power(effective_tx_dbm());     // Optimize override (non-zero) wins over the radio setting
+    apply_ps(opt_ps_mode());
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
 

@@ -137,20 +137,22 @@
     return inputs.length;
   }
 
-  // --- Optimize page (v0.9.0): GET/POST /api/opt, POST /api/clear_emergency ---
+  // --- Optimize page (v0.9.0, C5 radio fields v0.9.1): GET/POST /api/opt, POST /api/clear_emergency ---
   // Same field names and defaults as main/opt_config_core.h.
-  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "tcp_window_kb", "napt", "log_level"];
+  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country"];
+  const OPT_PS_NAMES = ["Off", "Min modem", "Max modem"];
   const OPT_LOG_NAMES = ["Error", "Warning", "Info", "Debug"];
 
   function optDefaults() {
-    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, tcp_window_kb: 64, napt: true, log_level: 2 };
+    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, napt: true, log_level: 2, ps_mode: 0, ap_beacon_ms: 100, country: "SE" };
   }
 
-  // SDIO clock and TCP window are only read at boot (same rule as opt_config_reboot_required()).
+  // SDIO clock, AP beacon interval and country are only read at boot (same rule as opt_config_reboot_required()).
   function optRebootRequired(active, saved) {
     return !!active && !!saved &&
       (Number(active.sdio_freq_mhz) !== Number(saved.sdio_freq_mhz) ||
-       Number(active.tcp_window_kb) !== Number(saved.tcp_window_kb));
+       Number(active.ap_beacon_ms) !== Number(saved.ap_beacon_ms) ||
+       String(active.country) !== String(saved.country));
   }
 
   function optSetRadio(document, name, value) {
@@ -164,9 +166,12 @@
 
   function optFillForm(document, d) {
     optSetRadio(document, "opt-sdio", d.sdio_freq_mhz);
-    optSetRadio(document, "opt-tcp", d.tcp_window_kb);
     const tx = document.getElementById("opt-tx");
     if (tx) tx.value = String(d.wifi_tx_power_dbm);
+    for (const [id, k] of [["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"], ["opt-country", "country"]]) {
+      const e = document.getElementById(id);
+      if (e && d[k] !== undefined) e.value = String(d[k]);
+    }
     const napt = document.getElementById("opt-napt");
     if (napt) napt.checked = !!d.napt;
     const log = document.getElementById("opt-log");
@@ -180,12 +185,16 @@
     if (sdio !== undefined) body.sdio_freq_mhz = sdio;
     const tx = document.getElementById("opt-tx");
     if (tx && tx.value !== "") body.wifi_tx_power_dbm = Number(tx.value);
-    const tcp = optGetRadio(document, "opt-tcp");
-    if (tcp !== undefined) body.tcp_window_kb = tcp;
     const napt = document.getElementById("opt-napt");
     if (napt) body.napt = !!napt.checked;
     const log = document.getElementById("opt-log");
     if (log && log.value !== "") body.log_level = Number(log.value);
+    const ps = document.getElementById("opt-ps");
+    if (ps && ps.value !== "") body.ps_mode = Number(ps.value);
+    const bc = document.getElementById("opt-beacon");
+    if (bc && bc.value !== "") body.ap_beacon_ms = Number(bc.value);
+    const cc = document.getElementById("opt-country");
+    if (cc && cc.value !== "") body.country = String(cc.value);
     return body;
   }
 
@@ -196,8 +205,10 @@
     return {
       "opt-sdio-st": "active " + (d.sdio_active_mhz || a.sdio_freq_mhz) + " MHz" +
         (d.sdio_fell_back ? " (auto-fallback from 50 MHz)" : "") + pend("sdio_freq_mhz"),
-      "opt-tx-st": a.wifi_tx_power_dbm ? "cap " + a.wifi_tx_power_dbm + " dBm" : "radio setting (System page)",
-      "opt-tcp-st": "lwIP window " + (d.tcp_window_build_kb || 64) + " KB (build-time)" + pend("tcp_window_kb"),
+      "opt-tx-st": a.wifi_tx_power_dbm ? "cap " + a.wifi_tx_power_dbm + " dBm" : "radio setting (Max TX power above)",
+      "opt-ps-st": (OPT_PS_NAMES[a.ps_mode] || "?") + " - Recommended: Off in AP+STA mode",
+      "opt-beacon-st": "active " + a.ap_beacon_ms + " ms" + pend("ap_beacon_ms"),
+      "opt-country-st": "active " + a.country + pend("country"),
       "opt-napt-st": a.napt ? "on (per AP profile NAT flag)" : "off for all AP profiles",
       "opt-log-st": OPT_LOG_NAMES[a.log_level] || "?",
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +

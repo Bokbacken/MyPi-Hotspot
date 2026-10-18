@@ -89,7 +89,7 @@ typedef struct {
     uint8_t ap_proto;               // RADIO_PROTO_* bitmask, 0 = driver default
     uint8_t band_mode;              // RADIO_BAND_*
     uint8_t tx_power_dbm;           // 0 = driver default, 2..21 dBm
-    uint8_t ap_beacon_interval_tu;  // 0 = default (100 TU), else N x 100 TU (1..10)
+    uint8_t ap_beacon_interval_tu;  // unused since v0.9.1 (Optimize "beacon_ms"); kept for NVS blob layout
     uint8_t ap_dtim;                // 0 = default (1), else 1..255 (driver caps at 10)
     uint8_t _pad[8];
 } wifi_radio_cfg_t;
@@ -143,3 +143,5 @@ void wifi_rpc_unlock(void);
 void wifi_apply_tx_power(void);
 /** Optimize tab (v0.9.0): re-apply NAT on the running AP (profile NAT && opt master switch). */
 void wifi_apply_napt(void);
+/** Optimize tab (v0.9.1): re-apply the STA power save mode (esp_wifi_set_ps) now. */
+void wifi_apply_ps(void);

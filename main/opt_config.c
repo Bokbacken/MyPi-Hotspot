@@ -28,6 +28,29 @@ static int nvs_set_cb(void *ctx, const char *key, uint8_t v)
     return nvs_set_u8(*(nvs_handle_t *)ctx, key, v) == ESP_OK ? 0 : -1;
 }
 
+static int nvs_get16_cb(void *ctx, const char *key, uint16_t *out)
+{
+    return nvs_get_u16(*(nvs_handle_t *)ctx, key, out) == ESP_OK ? 0 : -1;
+}
+
+static int nvs_set16_cb(void *ctx, const char *key, uint16_t v)
+{
+    return nvs_set_u16(*(nvs_handle_t *)ctx, key, v) == ESP_OK ? 0 : -1;
+}
+
+static int nvs_getstr_cb(void *ctx, const char *key, char *out, unsigned len)
+{
+    size_t n = len;
+    return nvs_get_str(*(nvs_handle_t *)ctx, key, out, &n) == ESP_OK ? 0 : -1;
+}
+
+static int nvs_setstr_cb(void *ctx, const char *key, const char *v)
+{
+    return nvs_set_str(*(nvs_handle_t *)ctx, key, v) == ESP_OK ? 0 : -1;
+}
+
+#define NVS_STORE(h) {nvs_get_cb, nvs_set_cb, nvs_get16_cb, nvs_set16_cb, nvs_getstr_cb, nvs_setstr_cb, nvs_commit_cb, &(h)}
+
 static int nvs_commit_cb(void *ctx)
 {
     return nvs_commit(*(nvs_handle_t *)ctx) == ESP_OK ? 0 : -1;
@@ -63,7 +86,7 @@ void opt_config_load(void)
     uint8_t trial = 0, emerg = 0;
     nvs_handle_t h;
     if (nvs_open(OPT_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        opt_store_t st = {nvs_get_cb, nvs_set_cb, nvs_commit_cb, &h};
+        opt_store_t st = NVS_STORE(h);
         opt_config_load_from(&st, &c);
         nvs_get_u8(h, OPT_KEY_SDIO_TRIAL, &trial);
         nvs_get_u8(h, OPT_KEY_EMERGENCY, &emerg);
@@ -81,14 +104,22 @@ void opt_config_load(void)
         set_flag(OPT_KEY_SDIO_TRIAL, 0);
         s_sdio_fell_back = true;
     }
+    // v0.9.1: the TCP window setting is gone (32 KB build-time); drop the stale key once.
+    if (nvs_open(OPT_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_erase_key(h, OPT_KEY_TCP_KB_OLD) == ESP_OK) {
+            nvs_commit(h);
+            ESP_LOGI(TAG, "Removed obsolete NVS key \"%s\"", OPT_KEY_TCP_KB_OLD);
+        }
+        nvs_close(h);
+    }
     s_sdio_mhz = mhz;
     s_active = s_saved = c;
     s_emergency = emerg != 0;
     s_loaded = true;
     apply_log_level();
-    ESP_LOGI(TAG, "Optimize: SDIO %d MHz, TX %s%d dBm, TCP window %d KB, NAPT %s, log level %d, emergency flag %s",
-             c.sdio_freq_mhz, c.wifi_tx_power_dbm ? "" : "radio setting/", c.wifi_tx_power_dbm, c.tcp_window_kb,
-             c.napt ? "on" : "off", c.log_level, s_emergency ? "SET" : "clear");
+    ESP_LOGI(TAG, "Optimize: SDIO %d MHz, TX %s%d dBm, NAPT %s, log level %d, PS %d, beacon %d ms, country %s, "
+             "emergency flag %s", c.sdio_freq_mhz, c.wifi_tx_power_dbm ? "" : "radio setting/", c.wifi_tx_power_dbm,
+             c.napt ? "on" : "off", c.log_level, c.ps_mode, c.ap_beacon_ms, c.country, s_emergency ? "SET" : "clear");
 }
 
 void opt_config_get_active(opt_config_t *out)
@@ -119,7 +150,7 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     nvs_handle_t h;
     esp_err_t err = nvs_open(OPT_NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
-    opt_store_t st = {nvs_get_cb, nvs_set_cb, nvs_commit_cb, &h};
+    opt_store_t st = NVS_STORE(h);
     int r = opt_config_save_to(&st, c);
     if (r == 0 && c->sdio_freq_mhz != 50) nvs_set_u8(h, OPT_KEY_SDIO_TRIAL, 0);   // no pending 50 MHz trial
     if (r == 0) nvs_commit(h);
@@ -130,20 +161,22 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     portENTER_CRITICAL(&s_mux);
     old = s_active;
     s_saved = *c;
-    // Runtime fields take effect now; SDIO clock and TCP window stay until the next boot.
+    // Runtime fields take effect now; SDIO clock, beacon interval and country stay until the next boot.
     s_active.wifi_tx_power_dbm = c->wifi_tx_power_dbm;
     s_active.napt = c->napt;
     s_active.log_level = c->log_level;
+    s_active.ps_mode = c->ps_mode;
     portEXIT_CRITICAL(&s_mux);
 
     if (old.log_level != c->log_level) apply_log_level();
     if (old.napt != c->napt) wifi_apply_napt();
     if (old.wifi_tx_power_dbm != c->wifi_tx_power_dbm) wifi_apply_tx_power();
+    if (old.ps_mode != c->ps_mode) wifi_apply_ps();
     bool rb = opt_config_reboot_pending();
     if (reboot_required) *reboot_required = rb;
-    ESP_LOGI(TAG, "Optimize settings saved: SDIO %d MHz, TX %d dBm, TCP %d KB, NAPT %s, log %d%s", c->sdio_freq_mhz,
-             c->wifi_tx_power_dbm, c->tcp_window_kb, c->napt ? "on" : "off", c->log_level,
-             rb ? " (reboot required)" : "");
+    ESP_LOGI(TAG, "Optimize settings saved: SDIO %d MHz, TX %d dBm, NAPT %s, log %d, PS %d, beacon %d ms, country %s%s",
+             c->sdio_freq_mhz, c->wifi_tx_power_dbm, c->napt ? "on" : "off", c->log_level, c->ps_mode, c->ap_beacon_ms,
+             c->country, rb ? " (reboot required)" : "");
     return ESP_OK;
 }
 
@@ -155,6 +188,22 @@ bool opt_napt_enabled(void)
 uint8_t opt_tx_power_dbm(void)
 {
     return s_loaded ? s_active.wifi_tx_power_dbm : OPT_DEFAULT_TX_DBM;
+}
+
+uint8_t opt_ps_mode(void)
+{
+    return s_loaded ? s_active.ps_mode : OPT_DEFAULT_PS_MODE;
+}
+
+uint16_t opt_ap_beacon_ms(void)
+{
+    return s_loaded ? s_active.ap_beacon_ms : OPT_DEFAULT_BEACON_MS;
+}
+
+const opt_country_t *opt_country(void)
+{
+    const opt_country_t *c = s_loaded ? opt_country_find(s_active.country) : NULL;
+    return c ? c : opt_country_find(OPT_DEFAULT_COUNTRY);
 }
 
 // --- SDIO clock trial / fallback ---
