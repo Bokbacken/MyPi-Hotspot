@@ -5,6 +5,32 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.7 — 2026-10-18 (builds, not hardware-tested)
+
+C5 buffer / upload throughput tuning. Upload path: client -> C5 Wi-Fi RX -> SDIO C5->P4 -> Ethernet.
+
+- **What reaches the C5:** at `esp_wifi_init()` the P4 sends a `wifi_init_config_t` built from
+  `WIFI_RMT_*`. The C5 slave (esp_hosted 3.0.9, RPC v2) applies static/dynamic RX (32/128),
+  dynamic TX (128), AMPDU flags, RX BA window (64) and the AMSDU flag from the host as-is.
+  **Not applied on the C5:** cache TX buffers (the C5 has no PSRAM, so it replaces the host value
+  with 0) and the TX BA window (not a `wifi_init_config_t` field; C5-local Kconfig only).
+- P4 `sdkconfig.defaults`:
+  - `CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM` 32 -> 64 (no effect with the current C5, see above).
+  - `CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE` 64 -> 128 (C5 -> P4, upload direction).
+    `TX_Q_SIZE` stays 64.
+  - `CONFIG_ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS` 4 -> 6 (range 2-8; 8 not used because each
+    slot is up to ~14 KB internal DMA RAM, cf. the v0.8.5 SDIO DMA starvation). Duplicate entry removed.
+  - `WIFI_RMT_IRAM_OPT` / `RX_IRAM_OPT` / `EXTRA_IRAM_OPT` pinned to y (were already y; code
+    placement of the Wi-Fi driver, which runs on the C5, so no effect on the P4 image).
+  - `CONFIG_WIFI_RMT_AMSDU_TX_ENABLED` deliberately left off: the flag is forwarded to the C5,
+    where IDF only allows AMSDU TX with PSRAM cache TX buffers; untested and only helps download.
+- `c5_slave/sdkconfig.defaults.esp32c5` (needs a new C5 build + `/c5update`, still esp_hosted
+  3.0.9 / RPC v2): static RX 16 -> 32, dynamic RX 64 -> 128, dynamic TX 64 -> 128 (fallback
+  values, matching what the P4 already sends), TX BA window 32 -> 64, RX BA window 32 -> 64,
+  slave SDIO TX queue (C5 -> P4) 40 -> 64, RX queue 40 -> 48, `ESP_WIFI_EXTRA_IRAM_OPT=y`.
+  Cache TX / AMSDU TX are not available on the C5 (no PSRAM).
+- `main/wifi.c`: one log line after `esp_wifi_init()` prints the buffer config sent to the C5.
+
 ## 0.9.6 — 2026-10-18 (builds, not hardware-tested)
 
 - Fix: 5 GHz HT40 never came up (link stayed HT20 even against an 80 MHz AP). The ESP32-C5 only

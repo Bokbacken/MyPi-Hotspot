@@ -55,9 +55,7 @@ CONFIG_ESP_HOSTED_HOST_TRANSPORT_BUS_SDIO=y
 CONFIG_ESP_HOSTED_HOST_SDIO_BUS_WIDTH_4=y
 CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
 CONFIG_ESP_HOSTED_HOST_SDIO_CLK_KHZ=40000
-# RX staging slots (default 2): more SDIO RX buffers in flight between the bus
-# reader and the network stack, smooths downlink bursts. Clock stays at 40 MHz.
-CONFIG_ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS=4
+# RX staging slots: see "Throughput tuning" below (v0.9.7: 6). Clock stays at 40 MHz by default.
 CONFIG_ESP_HOSTED_HOST_SDIO_PIN_CLK=18
 CONFIG_ESP_HOSTED_HOST_SDIO_PIN_CMD=19
 CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D0=14
@@ -133,9 +131,35 @@ CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=128
 CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=128
 CONFIG_WIFI_RMT_TX_BA_WIN=64
 CONFIG_WIFI_RMT_RX_BA_WIN=64
-# Host-side ESP-Hosted SDIO queues (default 20): more room for uplink bursts.
+# v0.9.7 (C5 buffers): the P4 runs no Wi-Fi driver. At esp_wifi_init() the host sends a
+# wifi_init_config_t built from the WIFI_RMT_* values over RPC, and the C5 slave (esp_hosted 3.0.9,
+# RPC v2, get_merged_init_config) applies static/dynamic RX, dynamic TX, AMPDU flags, RX BA window
+# and AMSDU flag from the host as-is. Not forwarded / not applied on the C5:
+#  - TX BA window: not a wifi_init_config_t field (no code reads WIFI_RMT_TX_BA_WIN in IDF v6.1).
+#  - cache TX buffers: the C5 has no PSRAM, so its feature caps lack CACHE_TX and it replaces the
+#    host value with its own 0. Raised anyway (harmless, no RAM cost on the P4) so the value is
+#    ready for a co-processor with PSRAM.
+CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=64
+# AMSDU TX is deliberately left OFF: the flag would be forwarded as-is, but on the C5 the IDF
+# requires cache TX buffers (>= 2, PSRAM only) for AMSDU TX, so enabling it there is an untested
+# combination that could break Wi-Fi. AMSDU TX also only affects C5 -> client (download), not upload.
+# CONFIG_WIFI_RMT_AMSDU_TX_ENABLED is not set
+# IRAM speed optimizations (already the defaults; pinned explicitly). They only change code
+# placement in the Wi-Fi driver, which runs on the C5, so they have no effect on the P4 image.
+CONFIG_WIFI_RMT_IRAM_OPT=y
+CONFIG_WIFI_RMT_RX_IRAM_OPT=y
+CONFIG_WIFI_RMT_EXTRA_IRAM_OPT=y
+# Host-side ESP-Hosted SDIO queues (default 20). Kconfig has no range. They are FreeRTOS queues of
+# packet descriptors; every queued RX packet keeps one internal-RAM SDIO buffer, so they are not free.
+# v0.9.7: RX (C5 -> P4 = client upload path) 64 -> 128. TX (P4 -> C5, download) stays 64 so the
+# extra internal RAM is spent only on the upload direction.
 CONFIG_ESP_HOSTED_HOST_SDIO_TX_Q_SIZE=64
-CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE=64
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_Q_SIZE=128
+# DMA staging slots between the SDIO read task and the de-aggregation task (range 2-8, effective
+# depth = slots - 1). Each staged slot holds one SDIO read aggregate in internal DMA RAM (up to
+# ~14 KB in streaming mode). v0.9.7: 4 -> 6 (+2 slots, ~28 KB worst case) instead of 8: the 64 KB
+# internal reserve (SPIRAM_MALLOC_RESERVE_INTERNAL) must keep room for the SDIO read buffer (v0.8.5).
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS=6
 # LVGL is the standard UI path (status viewport + pointer indev); UTF-8 labels required.
 CONFIG_LV_TXT_ENC_UTF8=y
 CONFIG_LV_USE_LABEL=y

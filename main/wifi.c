@@ -1110,6 +1110,12 @@ static void wifi_task(void *arg)
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     if (init_err == ESP_OK) init_err = esp_wifi_init(&cfg);
+    // v0.9.7: buffer config sent to the C5. The C5 (RPC v2) applies these as-is, except cache_tx:
+    // a C5 without PSRAM replaces it with 0. The TX BA window is not part of wifi_init_config_t.
+    ESP_LOGI(TAG, "Wi-Fi init cfg -> C5: static_rx %d, dynamic_rx %d, dynamic_tx %d, cache_tx %d, "
+             "ampdu rx/tx %d/%d, rx_ba_win %d, amsdu_tx %d",
+             cfg.static_rx_buf_num, cfg.dynamic_rx_buf_num, cfg.dynamic_tx_buf_num, cfg.cache_tx_buf_num,
+             cfg.ampdu_rx_enable, cfg.ampdu_tx_enable, cfg.rx_ba_win, cfg.amsdu_tx_enable);
     if (init_timer) {
         esp_timer_stop(init_timer);
         esp_timer_delete(init_timer);
