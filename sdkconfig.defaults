@@ -114,7 +114,11 @@ CONFIG_LWIP_TCP_RCV_SCALE=2
 # measurable throughput difference on hardware, and 32 KB pins less internal RAM.
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
-# Must be >= TCP_WND_DEFAULT/MSS + 2 (32768/1436 + 2 = 25), otherwise lwIP drops segments
+# v0.9.2: full Ethernet-MTU segments (IPv4 1500 - 40). IDF default is 1440; Kconfig max is 1460.
+CONFIG_LWIP_TCP_MSS=1460
+# v0.9.2 review: the requested SND_BUF 8192 / TCP_RECVMBOX 12 / TCPIP_RECVMBOX 64 would LOWER the
+# values below (65535 / 96 / 128) and TCP_RECVMBOX 12 would break the rule on the next line; kept.
+# Must be >= TCP_WND_DEFAULT/MSS + 2 (32768/1460 + 2 = 25), otherwise lwIP drops segments
 # while the app is busy (e.g. flash writes during OTA) and large uploads stall. Kept generous.
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=96
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=32

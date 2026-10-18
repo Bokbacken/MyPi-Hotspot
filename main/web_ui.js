@@ -139,20 +139,28 @@
 
   // --- Optimize page (v0.9.0, C5 radio fields v0.9.1): GET/POST /api/opt, POST /api/clear_emergency ---
   // Same field names and defaults as main/opt_config_core.h.
-  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country"];
+  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country",
+    "lwip_core", "napt_max", "napt_tcp_to"];
+  const OPT_CORE_NAMES = ["auto (no pin)", "core 0", "core 1"];
+  const OPT_NAPT_MAX_ENTRIES = { 5: 512, 10: 1024, 20: 2048 };
+  const OPT_NAPT_TCP_TO_NAMES = ["30 min", "1 h", "2 h"];
   const OPT_PS_NAMES = ["Off", "Min modem", "Max modem"];
   const OPT_LOG_NAMES = ["Error", "Warning", "Info", "Debug"];
 
   function optDefaults() {
-    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, napt: true, log_level: 2, ps_mode: 0, ap_beacon_ms: 100, country: "SE" };
+    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, napt: true, log_level: 2, ps_mode: 0, ap_beacon_ms: 100, country: "SE",
+      lwip_core: 0, napt_max: 5, napt_tcp_to: 2 };
   }
 
-  // SDIO clock, AP beacon interval and country are only read at boot (same rule as opt_config_reboot_required()).
+  // SDIO clock, AP beacon interval, country, LwIP core and NAPT table size are only read at boot
+  // (same rule as opt_config_reboot_required()); the NAPT TCP timeout applies at runtime.
   function optRebootRequired(active, saved) {
     return !!active && !!saved &&
       (Number(active.sdio_freq_mhz) !== Number(saved.sdio_freq_mhz) ||
        Number(active.ap_beacon_ms) !== Number(saved.ap_beacon_ms) ||
-       String(active.country) !== String(saved.country));
+       String(active.country) !== String(saved.country) ||
+       Number(active.lwip_core) !== Number(saved.lwip_core) ||
+       Number(active.napt_max) !== Number(saved.napt_max));
   }
 
   function optSetRadio(document, name, value) {
@@ -164,11 +172,14 @@
     return undefined;
   }
 
+  const OPT_SELECTS = [["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"], ["opt-country", "country"],
+    ["opt-lwip-core", "lwip_core"], ["opt-napt-max", "napt_max"], ["opt-napt-tcp-to", "napt_tcp_to"]];
+
   function optFillForm(document, d) {
     optSetRadio(document, "opt-sdio", d.sdio_freq_mhz);
     const tx = document.getElementById("opt-tx");
     if (tx) tx.value = String(d.wifi_tx_power_dbm);
-    for (const [id, k] of [["opt-ps", "ps_mode"], ["opt-beacon", "ap_beacon_ms"], ["opt-country", "country"]]) {
+    for (const [id, k] of OPT_SELECTS) {
       const e = document.getElementById(id);
       if (e && d[k] !== undefined) e.value = String(d[k]);
     }
@@ -195,6 +206,10 @@
     if (bc && bc.value !== "") body.ap_beacon_ms = Number(bc.value);
     const cc = document.getElementById("opt-country");
     if (cc && cc.value !== "") body.country = String(cc.value);
+    for (const [id, k] of OPT_SELECTS.slice(3)) {
+      const e = document.getElementById(id);
+      if (e && e.value !== "") body[k] = Number(e.value);
+    }
     return body;
   }
 
@@ -209,6 +224,9 @@
       "opt-ps-st": (OPT_PS_NAMES[a.ps_mode] || "?") + " - Recommended: Off in AP+STA mode",
       "opt-beacon-st": "active " + a.ap_beacon_ms + " ms" + pend("ap_beacon_ms"),
       "opt-country-st": "active " + a.country + pend("country"),
+      "opt-lwip-core-st": "active " + (OPT_CORE_NAMES[a.lwip_core] || "?") + pend("lwip_core"),
+      "opt-napt-max-st": "active " + (OPT_NAPT_MAX_ENTRIES[a.napt_max] || "?") + " sessions" + pend("napt_max"),
+      "opt-napt-tcp-to-st": "active " + (OPT_NAPT_TCP_TO_NAMES[a.napt_tcp_to] || "?"),
       "opt-napt-st": a.napt ? "on (per AP profile NAT flag)" : "off for all AP profiles",
       "opt-log-st": OPT_LOG_NAMES[a.log_level] || "?",
       "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +

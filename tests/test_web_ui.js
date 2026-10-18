@@ -136,8 +136,10 @@ assert.equal(togglePassword(lone, loneBtn), false);
     napt: def("NAPT") === "true", log_level: +def("LOG_LVL"),
     ps_mode: +def("PS_MODE"), ap_beacon_ms: +def("BEACON_MS"),
     country: core.match(/#define OPT_DEFAULT_COUNTRY\s+"(\w+)"/)[1],
+    lwip_core: +def("LWIP_CORE"), napt_max: +def("NAPT_MAX"), napt_tcp_to: +def("NAPT_TCP_TO"),
   });
-  assert.deepEqual(ui.OPT_FIELDS, ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country"]);
+  assert.deepEqual(ui.OPT_FIELDS, ["sdio_freq_mhz", "wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "ap_beacon_ms", "country",
+    "lwip_core", "napt_max", "napt_tcp_to"]);
 
   // web.c: GET /api/opt emits exactly these field names (+ read-only emergency_active), POST replies
   // reboot_required from opt_config_save(), the three endpoints are registered.
@@ -152,12 +154,31 @@ assert.equal(togglePassword(lone, loneBtn), false);
   // Reboot-required rule mirrors opt_config_reboot_required(): SDIO clock, beacon interval, country.
   const rule = core.match(/opt_config_reboot_required\([^)]*\)\s*\{([\s\S]*?)\n\}/)[1];
   assert.ok(/active->sdio_freq_mhz != saved->sdio_freq_mhz/.test(rule) && /active->ap_beacon_ms != saved->ap_beacon_ms/.test(rule) &&
-    /strncmp\(active->country, saved->country/.test(rule) && !/ps_mode|tcp/.test(rule));
+    /strncmp\(active->country, saved->country/.test(rule) && /active->lwip_core != saved->lwip_core/.test(rule) &&
+    /active->napt_max != saved->napt_max/.test(rule) && !/ps_mode|tcp/.test(rule));
   const d0 = ui.optDefaults();
   assert.equal(ui.optRebootRequired(d0, { ...d0, sdio_freq_mhz: 50 }), true);
   assert.equal(ui.optRebootRequired(d0, { ...d0, ap_beacon_ms: 200 }), true);
   assert.equal(ui.optRebootRequired(d0, { ...d0, country: "US" }), true);
-  assert.equal(ui.optRebootRequired(d0, { ...d0, napt: false, log_level: 3, wifi_tx_power_dbm: 14, ps_mode: 2 }), false);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, lwip_core: 2 }), true);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, napt_max: 20 }), true);
+  assert.equal(ui.optRebootRequired(d0, { ...d0, napt: false, log_level: 3, wifi_tx_power_dbm: 14, ps_mode: 2, napt_tcp_to: 0 }), false);
+
+  // v0.9.2 LwIP / NAT: section after "C5 Radio / APSTA", dropdowns only, wired into lwIP.
+  const optSec = webC.match(/data-page='optimize'[\s\S]*?<\/section>/)[0];
+  const iLw = optSec.indexOf("<h3>LwIP / NAT</h3>");
+  assert.ok(iLw > optSec.indexOf("C5 Radio / APSTA") && iLw < optSec.indexOf("<h3>System tuning</h3>"));
+  assert.ok(/<select id='opt-lwip-core'><option value='0'>Auto \(no pin\)<\/option>"\s*"<option value='1'>Core 0<\/option><option value='2'>Core 1/.test(optSec));
+  assert.ok(/<select id='opt-napt-max'><option value='5'>512 \(default\)<\/option>"\s*"<option value='10'>1024<\/option><option value='20'>2048/.test(optSec));
+  assert.ok(/<select id='opt-napt-tcp-to'><option value='2'>2 h \/ 7200 s \(default\)<\/option>"\s*"<option value='1'>1 h \/ 3600 s<\/option><option value='0'>30 min \/ 1800 s/.test(optSec));
+  for (const t of ["Reduces cache misses on dual-core P4", "Higher = more clients, more RAM", "Shorter = faster recycling"]) assert.ok(optSec.includes(t), t);
+  const tune = fs.readFileSync(path.join(__dirname, "../main/lwip_tune.h"), "utf8");
+  assert.ok(/#define IP_NAPT_MAX\s+\(mypi_napt_max_entries\)/.test(tune) && /#define IP_NAPT_TIMEOUT_MS_TCP\s+\(mypi_napt_tcp_timeout_ms\)/.test(tune));
+  const mainCm = fs.readFileSync(path.join(__dirname, "../main/CMakeLists.txt"), "utf8");
+  assert.ok(/-include\$\{CMAKE_CURRENT_LIST_DIR\}\/lwip_tune\.h/.test(mainCm) && /-Wl,--wrap=sys_thread_new/.test(mainCm));
+  assert.ok(/__wrap_sys_thread_new[\s\S]*xTaskCreatePinnedToCore/.test(fs.readFileSync(path.join(__dirname, "../main/opt_config.c"), "utf8")));
+  const sdk = fs.readFileSync(path.join(__dirname, "../sdkconfig.defaults"), "utf8");
+  assert.ok(/^CONFIG_LWIP_TCP_MSS=1460$/m.test(sdk));
 
   // v0.9.1: TCP window option is gone (fixed 32 KB build default); obsolete NVS key erased at boot.
   for (const src of [webC, fs.readFileSync(path.join(__dirname, "../main/web_ui.js"), "utf8"), core]) {
@@ -203,7 +224,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
       const b = JSON.parse(opt.body);
       for (const k of Object.keys(b)) assert.ok(ui.OPT_FIELDS.includes(k), `unknown field ${k}`);
       dev.saved = { ...dev.saved, ...b };
-      for (const k of ["wifi_tx_power_dbm", "napt", "log_level", "ps_mode"]) dev.active[k] = dev.saved[k];   // runtime fields
+      for (const k of ["wifi_tx_power_dbm", "napt", "log_level", "ps_mode", "napt_tcp_to"]) dev.active[k] = dev.saved[k];   // runtime fields
       return reply({ ok: true, reboot_required: ui.optRebootRequired(dev.active, dev.saved) });
     }
     if (url === "/api/clear_emergency") { dev.emergency = false; return reply({ ok: true, emergency_active: false }); }
@@ -215,7 +236,8 @@ assert.equal(togglePassword(lone, loneBtn), false);
   const ids = {};
   for (const id of ["opt-tx", "opt-napt", "opt-log", "opt-ps", "opt-beacon", "opt-country", "opt-banner", "opt-msg",
     "opt-emerg-btn", "opt-sdio-st", "opt-tx-st", "opt-ps-st", "opt-beacon-st", "opt-country-st", "opt-napt-st",
-    "opt-log-st", "opt-emerg-st", "opt-form"]) ids[id] = el();
+    "opt-log-st", "opt-emerg-st", "opt-form", "opt-lwip-core", "opt-napt-max", "opt-napt-tcp-to", "opt-lwip-core-st",
+    "opt-napt-max-st", "opt-napt-tcp-to-st"]) ids[id] = el();
   ids["opt-banner"].hidden = true;
   const doc = { getElementById: (id) => ids[id] || null,
     querySelectorAll: (sel) => radios[sel.match(/name=([\w-]+)/)[1]] || [] };
@@ -229,6 +251,10 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ids["opt-beacon"].value, "100");
   assert.equal(ids["opt-country"].value, "SE");
   assert.match(ids["opt-ps-st"].textContent, /Recommended: Off in AP\+STA mode/);
+  assert.equal(ids["opt-lwip-core"].value, "0");
+  assert.equal(ids["opt-napt-max"].value, "5");
+  assert.equal(ids["opt-napt-tcp-to"].value, "2");
+  assert.match(ids["opt-napt-max-st"].textContent, /512 sessions/);
   assert.equal(ids["opt-tx"].value, "0");
   assert.equal(ids["opt-napt"].checked, true);
   assert.equal(ids["opt-log"].value, "2");
@@ -257,6 +283,15 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: true });
   assert.match(ids["opt-country-st"].textContent, /reboot pending|JP/);
   ids["opt-country"].value = "SE";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: false });
+  // NAPT TCP timeout is runtime; NAPT max sessions needs a reboot.
+  ids["opt-napt-tcp-to"].value = "0";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: false });
+  assert.equal(dev.active.napt_tcp_to, 0);
+  ids["opt-napt-max"].value = "20";
+  assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: true });
+  assert.equal(JSON.parse(dev.calls.filter((c) => c[1] === "POST").pop()[2]).napt_max, 20);
+  ids["opt-napt-max"].value = "5";
   assert.deepEqual(await ui.optSave(doc, fetchFn), { ok: true, reboot_required: false });
 
   // Emergency flag: shown as SET with an enabled Clear button; Clear posts /api/clear_emergency.

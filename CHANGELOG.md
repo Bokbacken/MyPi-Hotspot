@@ -5,6 +5,25 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.2 — 2026-10-18 (builds, not hardware-tested)
+
+- Optimize: new "LwIP / NAT" section below "C5 Radio / APSTA" (dropdowns only, NVS `mypi_opt`):
+  - LwIP task core affinity `lwip_core` (u8 0 auto / 1 core 0 / 2 core 1, default 0); reboot
+    required. `CONFIG_LWIP_TCPIP_TASK_AFFINITY` is a Kconfig constant in IDF v6.1, so the
+    firmware wraps `sys_thread_new()` (`-Wl,--wrap=sys_thread_new`) and creates the `tcpip`
+    task pinned to the selected core when `esp_netif_init()` starts it.
+  - NAPT max sessions `napt_max` (u8 5/10/20 = 512/1024/2048 entries, default 5); reboot
+    required. lwIP's `IP_NAPT_MAX` is redirected to a variable set at boot (`main/lwip_tune.h`,
+    force-included into the lwip component); the table is allocated (PSRAM preferred) on the
+    first NAPT enable.
+  - NAPT TCP timeout `napt_tcp_to` (u8 2/1/0 = 2 h / 1 h / 30 min, default 2); applies
+    immediately (`IP_NAPT_TIMEOUT_MS_TCP` is read by every NAPT GC pass). Note: the lwIP
+    default was 30 min; the new default is 2 h as requested.
+- sdkconfig.defaults: `CONFIG_LWIP_TCP_MSS=1460` (was the IDF default 1440).
+  The requested `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=8192`, `CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64` and
+  `CONFIG_LWIP_TCP_RECVMBOX_SIZE=12` were not applied: the project already uses 65535 / 128 / 96,
+  so they would be reductions, and 12 is below the required TCP_WND/MSS + 2 = 25.
+
 ## 0.9.1 — 2026-10-18 (builds, not hardware-tested)
 
 - Web: the Wi-Fi protocol / band / width controls moved from System to the top of Optimize

@@ -8,6 +8,9 @@
 //   ps_mode           STA power save 0 off / 1 min / 2 max modem, esp_wifi_set_ps() (runtime)
 //   ap_beacon_ms      AP beacon interval 100/200/300 (boot: wifi_config_t.ap.beacon_interval)
 //   country           "SE"/"EU"/"US"/"JP", esp_wifi_set_country() before esp_wifi_start() (boot)
+//   lwip_core         tcpip task pinning 0 auto / 1 core 0 / 2 core 1 (boot: sys_thread_new wrapper)
+//   napt_max          NAPT table 5/10/20 = 512/1024/2048 entries (boot: table allocated on first NAPT enable)
+//   napt_tcp_to       NAPT idle TCP timeout 2 = 2 h / 1 = 1 h / 0 = 30 min (runtime, read by the NAPT GC)
 // The TCP window is no longer a setting (v0.9.1): fixed 32 KB in sdkconfig.defaults.
 // Plus the emergency flag (set when emergency mode was entered after a C5 failure).
 
@@ -38,6 +41,9 @@ uint8_t opt_ps_mode(void);
 uint16_t opt_ap_beacon_ms(void);
 /** Regulatory domain read at boot (never NULL). */
 const opt_country_t *opt_country(void);
+/** LwIP core / NAPT table size read at boot (codes as stored in NVS). */
+uint8_t opt_lwip_core(void);
+uint8_t opt_napt_max(void);
 /** Global log level mapped to esp_log_level_t (active value). */
 esp_log_level_t opt_log_esp_level(void);
 

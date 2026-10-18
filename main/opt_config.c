@@ -1,8 +1,13 @@
 #include "opt_config.h"
 
+#include <string.h>
+
 #include "diag.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/sys.h"
+#include "lwip_tune.h"
 #include "nvs.h"
 #include "wifi.h"
 
@@ -16,6 +21,39 @@ static bool s_sdio_fell_back;
 static bool s_sdio_trial;
 static bool s_emergency;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// --- LwIP / NAT tuning (v0.9.2), see lwip_tune.h ---
+// Read by lwIP's ip4_napt.c through IP_NAPT_MAX / IP_NAPT_TIMEOUT_MS_TCP (force-included header).
+uint16_t mypi_napt_max_entries = 512;
+volatile uint32_t mypi_napt_tcp_timeout_ms = 7200u * 1000u;
+static int s_lwip_core_id = -1;     // -1 = no pinning
+
+static void apply_lwip_tune(const opt_config_t *c, bool boot)
+{
+    if (boot) {
+        mypi_napt_max_entries = opt_napt_max_entries(c->napt_max);  // table allocated on the first NAPT enable
+        s_lwip_core_id = opt_lwip_core_id(c->lwip_core);            // used when esp_netif_init() creates tcpip
+    }
+    mypi_napt_tcp_timeout_ms = opt_napt_tcp_timeout_s(c->napt_tcp_to) * 1000u;
+}
+
+// The tcpip task affinity is a Kconfig constant (CONFIG_LWIP_TCPIP_TASK_AFFINITY) inside
+// sys_thread_new(); the linker wraps that call (-Wl,--wrap=sys_thread_new, main/CMakeLists.txt) so
+// the NVS setting can pin the task when esp_netif_init() creates it. Other lwIP threads are unchanged.
+sys_thread_t __real_sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize, int prio);
+sys_thread_t __wrap_sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize, int prio);
+
+sys_thread_t __wrap_sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize, int prio)
+{
+    if (s_lwip_core_id < 0 || s_lwip_core_id >= CONFIG_FREERTOS_NUMBER_OF_CORES || !name ||
+        strcmp(name, TCPIP_THREAD_NAME) != 0) {
+        return __real_sys_thread_new(name, thread, arg, stacksize, prio);
+    }
+    TaskHandle_t t = NULL;
+    if (xTaskCreatePinnedToCore(thread, name, stacksize, arg, prio, &t, s_lwip_core_id) != pdPASS) return NULL;
+    ESP_LOGI("opt", "LwIP tcpip task pinned to core %d", s_lwip_core_id);
+    return (sys_thread_t)t;
+}
 
 // --- NVS binding of opt_store_t ---
 static int nvs_get_cb(void *ctx, const char *key, uint8_t *out)
@@ -113,6 +151,7 @@ void opt_config_load(void)
         nvs_close(h);
     }
     s_sdio_mhz = mhz;
+    apply_lwip_tune(&c, true);
     s_active = s_saved = c;
     s_emergency = emerg != 0;
     s_loaded = true;
@@ -120,6 +159,9 @@ void opt_config_load(void)
     ESP_LOGI(TAG, "Optimize: SDIO %d MHz, TX %s%d dBm, NAPT %s, log level %d, PS %d, beacon %d ms, country %s, "
              "emergency flag %s", c.sdio_freq_mhz, c.wifi_tx_power_dbm ? "" : "radio setting/", c.wifi_tx_power_dbm,
              c.napt ? "on" : "off", c.log_level, c.ps_mode, c.ap_beacon_ms, c.country, s_emergency ? "SET" : "clear");
+    ESP_LOGI(TAG, "LwIP/NAT: tcpip core %s, NAPT table %u entries, NAPT TCP timeout %lu s",
+             c.lwip_core == 0 ? "auto" : c.lwip_core == 1 ? "0" : "1", (unsigned)mypi_napt_max_entries,
+             (unsigned long)(mypi_napt_tcp_timeout_ms / 1000u));
 }
 
 void opt_config_get_active(opt_config_t *out)
@@ -166,7 +208,9 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     s_active.napt = c->napt;
     s_active.log_level = c->log_level;
     s_active.ps_mode = c->ps_mode;
+    s_active.napt_tcp_to = c->napt_tcp_to;
     portEXIT_CRITICAL(&s_mux);
+    apply_lwip_tune(c, false);     // NAPT TCP timeout only; core and table size stay until reboot
 
     if (old.log_level != c->log_level) apply_log_level();
     if (old.napt != c->napt) wifi_apply_napt();
@@ -174,9 +218,10 @@ esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
     if (old.ps_mode != c->ps_mode) wifi_apply_ps();
     bool rb = opt_config_reboot_pending();
     if (reboot_required) *reboot_required = rb;
-    ESP_LOGI(TAG, "Optimize settings saved: SDIO %d MHz, TX %d dBm, NAPT %s, log %d, PS %d, beacon %d ms, country %s%s",
-             c->sdio_freq_mhz, c->wifi_tx_power_dbm, c->napt ? "on" : "off", c->log_level, c->ps_mode, c->ap_beacon_ms,
-             c->country, rb ? " (reboot required)" : "");
+    ESP_LOGI(TAG, "Optimize settings saved: SDIO %d MHz, TX %d dBm, NAPT %s, log %d, PS %d, beacon %d ms, country %s, "
+             "lwip core %d, napt max %d, napt tcp to %d%s", c->sdio_freq_mhz, c->wifi_tx_power_dbm, c->napt ? "on" : "off",
+             c->log_level, c->ps_mode, c->ap_beacon_ms, c->country, c->lwip_core, c->napt_max, c->napt_tcp_to,
+             rb ? " (reboot required)" : "");
     return ESP_OK;
 }
 
@@ -198,6 +243,16 @@ uint8_t opt_ps_mode(void)
 uint16_t opt_ap_beacon_ms(void)
 {
     return s_loaded ? s_active.ap_beacon_ms : OPT_DEFAULT_BEACON_MS;
+}
+
+uint8_t opt_lwip_core(void)
+{
+    return s_loaded ? s_active.lwip_core : OPT_DEFAULT_LWIP_CORE;
+}
+
+uint8_t opt_napt_max(void)
+{
+    return s_loaded ? s_active.napt_max : OPT_DEFAULT_NAPT_MAX;
 }
 
 const opt_country_t *opt_country(void)

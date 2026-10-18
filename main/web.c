@@ -136,6 +136,17 @@ MYPI_BRAND_HEADER
 "<span class='opt-l'>Wi-Fi country / region</span><span class='opt-c'><select id='opt-country'><option value='SE'>SE (Sweden)</option>"
 "<option value='EU'>EU (Europe)</option><option value='US'>US (United States)</option><option value='JP'>JP (Japan)</option></select></span>"
 "<span class='opt-s' id='opt-country-st'></span></div>"
+"<h3>LwIP / NAT</h3><div class='opt-grid'>"
+"<span class='opt-l'>LwIP task core affinity</span><span class='opt-c'><select id='opt-lwip-core'><option value='0'>Auto (no pin)</option>"
+"<option value='1'>Core 0</option><option value='2'>Core 1</option></select></span><span class='opt-s' id='opt-lwip-core-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Pin the LwIP task to a CPU core. Reduces cache misses on dual-core P4. Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT max sessions</span><span class='opt-c'><select id='opt-napt-max'><option value='5'>512 (default)</option>"
+"<option value='10'>1024</option><option value='20'>2048</option></select></span><span class='opt-s' id='opt-napt-max-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Maximum simultaneous NAT sessions. Higher = more clients, more RAM (PSRAM). Reboot required.</small></span><span class='opt-s'></span>"
+"<span class='opt-l'>NAPT TCP timeout</span><span class='opt-c'><select id='opt-napt-tcp-to'><option value='2'>2 h / 7200 s (default)</option>"
+"<option value='1'>1 h / 3600 s</option><option value='0'>30 min / 1800 s</option></select></span><span class='opt-s' id='opt-napt-tcp-to-st'></span>"
+"<span class='opt-l'></span><span class='opt-c'><small>Idle TCP session lifetime in NAPT table. Shorter = faster recycling. Applies immediately.</small></span><span class='opt-s'></span>"
+"</div>"
 "<h3>System tuning</h3>"
 "<div id='opt-form' class='opt-grid'>"
 "<span class='opt-l'>SDIO clock (P4 &harr; C5)</span><span class='opt-c'>"
@@ -153,7 +164,7 @@ MYPI_BRAND_HEADER
 "<span class='opt-s' id='opt-emerg-st'></span>"
 "</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
 "<p><small>SDIO 50 MHz is tried on the next boot and falls back to 40 MHz automatically (saved) if the C5 does not come up. "
-"TX power, NAPT, log level and STA power save apply immediately; SDIO clock, AP beacon interval and country after a reboot. "
+"TX power, NAPT, log level and STA power save apply immediately; SDIO clock, AP beacon interval, country, LwIP core and NAPT max sessions after a reboot; NAPT TCP timeout applies immediately. "
 "The TCP window is fixed at 32 KB (build setting). "
 "2.4 GHz stays locked to HT20; 11ax stays off.</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
@@ -1451,6 +1462,9 @@ static void add_opt_cfg(cJSON *o, const opt_config_t *c)
     cJSON_AddNumberToObject(o, "ps_mode", c->ps_mode);
     cJSON_AddNumberToObject(o, "ap_beacon_ms", c->ap_beacon_ms);
     cJSON_AddStringToObject(o, "country", c->country);
+    cJSON_AddNumberToObject(o, "lwip_core", c->lwip_core);
+    cJSON_AddNumberToObject(o, "napt_max", c->napt_max);
+    cJSON_AddNumberToObject(o, "napt_tcp_to", c->napt_tcp_to);
 }
 
 // GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
@@ -1471,7 +1485,8 @@ static esp_err_t api_opt_get(httpd_req_t *req)
     return send_json(req, j);
 }
 
-// POST /api/opt {sdio_freq_mhz, wifi_tx_power_dbm, napt, log_level, ps_mode, ap_beacon_ms, country} - missing keys
+// POST /api/opt {sdio_freq_mhz, wifi_tx_power_dbm, napt, log_level, ps_mode, ap_beacon_ms, country, lwip_core,
+// napt_max, napt_tcp_to} - missing keys
 // keep the saved value. Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
 static esp_err_t api_opt_post(httpd_req_t *req)
 {
@@ -1483,6 +1498,9 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     radio_field(j, "wifi_tx_power_dbm", 0, 21, &c.wifi_tx_power_dbm, &ok);
     radio_field(j, "log_level", 0, 3, &c.log_level, &ok);
     radio_field(j, "ps_mode", 0, 2, &c.ps_mode, &ok);
+    radio_field(j, "lwip_core", 0, 2, &c.lwip_core, &ok);
+    radio_field(j, "napt_max", 5, 20, &c.napt_max, &ok);         // 5|10|20, checked by opt_config_valid()
+    radio_field(j, "napt_tcp_to", 0, 2, &c.napt_tcp_to, &ok);
     if (cJSON_GetObjectItemCaseSensitive(j, "ap_beacon_ms")) {
         int b = jint(j, "ap_beacon_ms", -1);
         if (opt_beacon_valid(b)) c.ap_beacon_ms = (uint16_t)b; else ok = false;
@@ -1497,7 +1515,8 @@ static esp_err_t api_opt_post(httpd_req_t *req)
     esp_err_t err = ok && opt_config_valid(&c) ? opt_config_save(&c, &reboot) : ESP_ERR_INVALID_ARG;
     if (err != ESP_OK) {
         return send_result(req, err, NULL, "sdio_freq_mhz: 40|50, wifi_tx_power_dbm: 0 or 2-21, napt: bool, log_level: 0-3, "
-                           "ps_mode: 0-2, ap_beacon_ms: 100|200|300, country: SE|EU|US|JP");
+                           "ps_mode: 0-2, ap_beacon_ms: 100|200|300, country: SE|EU|US|JP, lwip_core: 0-2, "
+                           "napt_max: 5|10|20, napt_tcp_to: 0-2");
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);

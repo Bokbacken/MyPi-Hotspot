@@ -321,7 +321,13 @@ static void test_opt_config(void)
     opt_config_load_from(&st, &c);
     assert(c.sdio_freq_mhz == 40 && c.wifi_tx_power_dbm == 0 && c.napt && c.log_level == 2);
     assert(c.ps_mode == 0 && c.ap_beacon_ms == 100 && strcmp(c.country, "SE") == 0);
+    assert(c.lwip_core == 0 && c.napt_max == 5 && c.napt_tcp_to == 2);
     assert(opt_config_valid(&c));
+
+    // LwIP / NAT code mapping (v0.9.2).
+    assert(opt_napt_max_entries(5) == 512 && opt_napt_max_entries(10) == 1024 && opt_napt_max_entries(20) == 2048);
+    assert(opt_napt_tcp_timeout_s(2) == 7200 && opt_napt_tcp_timeout_s(1) == 3600 && opt_napt_tcp_timeout_s(0) == 1800);
+    assert(opt_lwip_core_id(0) == -1 && opt_lwip_core_id(1) == 0 && opt_lwip_core_id(2) == 1);
     opt_config_load_from(NULL, &d);
     assert(memcmp(&c, &d, sizeof(c)) == 0);
 
@@ -337,10 +343,12 @@ static void test_opt_config(void)
     // Save round-trip.
     c.sdio_freq_mhz = 50; c.wifi_tx_power_dbm = 14; c.napt = false; c.log_level = 3;
     c.ps_mode = 2; c.ap_beacon_ms = 300; memcpy(c.country, "JP", 3);
+    c.lwip_core = 2; c.napt_max = 20; c.napt_tcp_to = 0;
     assert(opt_config_save_to(&st, &c) == 0 && m.commits == 1);
     opt_config_load_from(&st, &d);
     assert(d.sdio_freq_mhz == 50 && d.wifi_tx_power_dbm == 14 && !d.napt && d.log_level == 3);
     assert(d.ps_mode == 2 && d.ap_beacon_ms == 300 && strcmp(d.country, "JP") == 0);
+    assert(d.lwip_core == 2 && d.napt_max == 20 && d.napt_tcp_to == 0);
     uint8_t raw;
     uint16_t raw16;
     char rawcc[4];
@@ -349,6 +357,9 @@ static void test_opt_config(void)
     assert(mock_get(&m, OPT_KEY_PS_MODE, &raw) == 0 && raw == 2);
     assert(mock_get16(&m, OPT_KEY_BEACON_MS, &raw16) == 0 && raw16 == 300);
     assert(mock_getstr(&m, OPT_KEY_COUNTRY, rawcc, sizeof(rawcc)) == 0 && strcmp(rawcc, "JP") == 0);
+    assert(mock_get(&m, OPT_KEY_NAPT_MAX, &raw) == 0 && raw == 20);
+    assert(mock_get(&m, OPT_KEY_NAPT_TCP_TO, &raw) == 0 && raw == 0);
+    assert(mock_get(&m, OPT_KEY_LWIP_CORE, &raw) == 0 && raw == 2);
     assert(mock_get(&m, OPT_KEY_TCP_KB_OLD, &raw) != 0);         // TCP window key no longer written
 
     // Invalid configs are rejected and nothing is written.
@@ -356,6 +367,9 @@ static void test_opt_config(void)
     bad.sdio_freq_mhz = 45;
     assert(opt_config_save_to(&st, &bad) == -1 && m.commits == 1);
     bad = d; bad.ps_mode = 3;           assert(!opt_config_valid(&bad));
+    bad = d; bad.lwip_core = 3;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_max = 15;         assert(!opt_config_valid(&bad));
+    bad = d; bad.napt_tcp_to = 3;       assert(!opt_config_valid(&bad));
     bad = d; bad.ap_beacon_ms = 150;    assert(!opt_config_valid(&bad));
     bad = d; memcpy(bad.country, "XX", 3); assert(!opt_config_valid(&bad));
     bad = d; memcpy(bad.country, "SEX", 3); assert(!opt_config_valid(&bad));   // not NUL-terminated
@@ -372,7 +386,10 @@ static void test_opt_config(void)
     mock_set(&m, OPT_KEY_PS_MODE, 7);
     mock_set16(&m, OPT_KEY_BEACON_MS, 250);
     mock_setstr(&m, OPT_KEY_COUNTRY, "XX");
+    mock_set(&m, OPT_KEY_NAPT_MAX, 7);
+    mock_set(&m, OPT_KEY_NAPT_TCP_TO, 9);
     opt_config_load_from(&st, &d);
+    assert(d.napt_max == 5 && d.napt_tcp_to == 2 && d.lwip_core == 2);
     assert(d.sdio_freq_mhz == 40 && d.log_level == 2 && d.wifi_tx_power_dbm == 14);
     assert(d.ps_mode == 0 && d.ap_beacon_ms == 100 && strcmp(d.country, "SE") == 0);
     mock_setstr(&m, OPT_KEY_COUNTRY, "SWED");                  // too long for the 3-byte field
@@ -382,13 +399,17 @@ static void test_opt_config(void)
     // Reboot required only for the boot-only fields (SDIO clock, beacon interval, country).
     opt_config_t a, s2;
     opt_config_defaults(&a);
-    s2 = a; s2.napt = false; s2.log_level = 0; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1;
+    s2 = a; s2.napt = false; s2.log_level = 0; s2.wifi_tx_power_dbm = 8; s2.ps_mode = 1; s2.napt_tcp_to = 0;
     assert(!opt_config_reboot_required(&a, &s2));
     s2.sdio_freq_mhz = 50;
     assert(opt_config_reboot_required(&a, &s2));
     s2 = a; s2.ap_beacon_ms = 200;
     assert(opt_config_reboot_required(&a, &s2));
     s2 = a; memcpy(s2.country, "US", 3);
+    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.lwip_core = 1;
+    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.napt_max = 10;
     assert(opt_config_reboot_required(&a, &s2));
 
     // SDIO 50 MHz trial / auto-fallback decision.
