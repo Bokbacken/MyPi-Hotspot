@@ -74,9 +74,26 @@ static void test_view(int width, int height)
     lv_display_delete(display);
 }
 
+LV_FONT_DECLARE(mypi_font_14);
+
+// The committed MyPi status font must cover Swedish letters and the μ/π identity glyphs.
+static void test_font_coverage(void)
+{
+    static const uint32_t required[] = {'A', 'z', '0', '/', 0xB5, 0xC5, 0xC4, 0xD6, 0xE5, 0xE4, 0xF6,
+                                        0x3BC, 0x3C0};
+    lv_font_glyph_dsc_t dsc;
+    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
+        assert(lv_font_get_glyph_dsc(&mypi_font_14, &dsc, required[i], 0));
+        assert(dsc.adv_w > 0);
+    }
+    assert(!lv_font_get_glyph_dsc(&mypi_font_14, &dsc, 0x4E2D, 0));   // CJK not in the subset
+    assert(lv_font_get_line_height(&mypi_font_14) <= 200 / 10);       // 10 status rows fit
+}
+
 int main(void)
 {
     lv_init();
+    test_font_coverage();
     test_view(240, 200);
     test_view(480, 320);
     lv_deinit();

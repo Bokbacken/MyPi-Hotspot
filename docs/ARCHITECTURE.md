@@ -117,7 +117,7 @@ options, P4/C5 OTA progress/failure, Swedish/μπ glyphs, RSSI icon color, full-
 divider, unchanged web/API behavior.
 
 `tests/test_mypi_ui.c` exercises the shared view using real LVGL at two viewport
-sizes, including UTF-8 byte preservation, copied snapshot lifetime, row clearing,
+sizes and the MyPi font glyph coverage (å ä ö Å Ä Ö µ μ π), including UTF-8 byte preservation, copied snapshot lifetime, row clearing,
 invalid state rejection and partial rendering. It follows the existing host C
 assert-test approach. With the pinned LVGL source extracted outside the repository,
 the host commands are (run the final two commands from the repository root):
@@ -130,7 +130,7 @@ cmake -S <lvgl-source> -B /tmp/mypi-lvgl-host \
   -DCONFIG_LV_USE_THORVG_INTERNAL=OFF
 cmake --build /tmp/mypi-lvgl-host -j4
 cc -std=c11 -Wall -Wextra -Werror -DLV_CONF_PATH='"/tmp/mypi-lv-conf.h"' \
-  -Imain -I<lvgl-source> tests/test_mypi_ui.c main/mypi_ui/lvgl_view.c \
+  -Imain -I<lvgl-source> tests/test_mypi_ui.c main/mypi_ui/lvgl_view.c main/mypi_font_14.c \
   /tmp/mypi-lvgl-host/lib/liblvgl.a -lm -o /tmp/test_mypi_ui
 /tmp/test_mypi_ui
 ```
