@@ -45,8 +45,8 @@
   }
 
   // Dashboard pages: one HTML shell, sections selected by location.hash (no extra URI handlers).
-  const PAGES = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "debug"];
-  const PAGE_ALIASES = { diagnostics: "debug", status: "overview", clients: "access-point" };
+  const PAGES = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "optimize", "debug"];
+  const PAGE_ALIASES = { diagnostics: "debug", status: "overview", clients: "access-point", opt: "optimize" };
 
   function pageFromHash(hash) {
     const key = String(hash || "").replace(/^#/, "").toLowerCase();
@@ -137,15 +137,155 @@
     return inputs.length;
   }
 
+  // --- Optimize page (v0.9.0): GET/POST /api/opt, POST /api/clear_emergency ---
+  // Same field names and defaults as main/opt_config_core.h.
+  const OPT_FIELDS = ["sdio_freq_mhz", "wifi_tx_power_dbm", "tcp_window_kb", "napt", "log_level"];
+  const OPT_LOG_NAMES = ["Error", "Warning", "Info", "Debug"];
+
+  function optDefaults() {
+    return { sdio_freq_mhz: 40, wifi_tx_power_dbm: 0, tcp_window_kb: 64, napt: true, log_level: 2 };
+  }
+
+  // SDIO clock and TCP window are only read at boot (same rule as opt_config_reboot_required()).
+  function optRebootRequired(active, saved) {
+    return !!active && !!saved &&
+      (Number(active.sdio_freq_mhz) !== Number(saved.sdio_freq_mhz) ||
+       Number(active.tcp_window_kb) !== Number(saved.tcp_window_kb));
+  }
+
+  function optSetRadio(document, name, value) {
+    for (const r of document.querySelectorAll(`input[name=${name}]`)) r.checked = String(r.value) === String(value);
+  }
+
+  function optGetRadio(document, name) {
+    for (const r of document.querySelectorAll(`input[name=${name}]`)) if (r.checked) return Number(r.value);
+    return undefined;
+  }
+
+  function optFillForm(document, d) {
+    optSetRadio(document, "opt-sdio", d.sdio_freq_mhz);
+    optSetRadio(document, "opt-tcp", d.tcp_window_kb);
+    const tx = document.getElementById("opt-tx");
+    if (tx) tx.value = String(d.wifi_tx_power_dbm);
+    const napt = document.getElementById("opt-napt");
+    if (napt) napt.checked = !!d.napt;
+    const log = document.getElementById("opt-log");
+    if (log) log.value = String(d.log_level);
+  }
+
+  /** Only the controls that have a value end up in the POST body (missing keys keep the saved value). */
+  function optReadForm(document) {
+    const body = {};
+    const sdio = optGetRadio(document, "opt-sdio");
+    if (sdio !== undefined) body.sdio_freq_mhz = sdio;
+    const tx = document.getElementById("opt-tx");
+    if (tx && tx.value !== "") body.wifi_tx_power_dbm = Number(tx.value);
+    const tcp = optGetRadio(document, "opt-tcp");
+    if (tcp !== undefined) body.tcp_window_kb = tcp;
+    const napt = document.getElementById("opt-napt");
+    if (napt) body.napt = !!napt.checked;
+    const log = document.getElementById("opt-log");
+    if (log && log.value !== "") body.log_level = Number(log.value);
+    return body;
+  }
+
+  /** Right-hand status text per row, from a GET /api/opt reply. */
+  function optStatus(d) {
+    const a = d.active || d;
+    const pend = (k) => (a[k] !== d[k] ? " - saved " + d[k] + ", reboot pending" : "");
+    return {
+      "opt-sdio-st": "active " + (d.sdio_active_mhz || a.sdio_freq_mhz) + " MHz" +
+        (d.sdio_fell_back ? " (auto-fallback from 50 MHz)" : "") + pend("sdio_freq_mhz"),
+      "opt-tx-st": a.wifi_tx_power_dbm ? "cap " + a.wifi_tx_power_dbm + " dBm" : "radio setting (System page)",
+      "opt-tcp-st": "lwIP window " + (d.tcp_window_build_kb || 64) + " KB (build-time)" + pend("tcp_window_kb"),
+      "opt-napt-st": a.napt ? "on (per AP profile NAT flag)" : "off for all AP profiles",
+      "opt-log-st": OPT_LOG_NAMES[a.log_level] || "?",
+      "opt-emerg-st": (d.emergency_active ? "SET - emergency mode was entered after a C5 failure" : "clear") +
+        (d.emergency_mode_now ? " (emergency mode active now)" : "") + "; auto-clears on successful boot",
+    };
+  }
+
+  function optShow(document, d) {
+    for (const [id, text] of Object.entries(optStatus(d))) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    }
+    const st = document.getElementById("opt-emerg-st");
+    if (st && st.classList) st.classList.toggle("bad", !!d.emergency_active);
+    const btn = document.getElementById("opt-emerg-btn");
+    if (btn) btn.disabled = !d.emergency_active;
+    optBanner(document, !!d.reboot_required);
+  }
+
+  function optBanner(document, on) {
+    const b = document.getElementById("opt-banner");
+    if (b) b.hidden = !on;
+  }
+
+  function optMsg(document, text) {
+    const m = document.getElementById("opt-msg");
+    if (m) m.textContent = text;
+  }
+
+  async function optLoad(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    try {
+      const d = await (await f("/api/opt")).json();
+      optFillForm(doc, d);
+      optShow(doc, d);
+      return d;
+    } catch (e) {
+      optMsg(doc, "Device unreachable");
+      return null;
+    }
+  }
+
+  async function optPost(f, url, body) {
+    const r = await f(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    return r.json();
+  }
+
+  async function optSave(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    try {
+      const j = await optPost(f, "/api/opt", optReadForm(doc));
+      optMsg(doc, j.ok ? "Saved" + (j.reboot_required ? " - reboot required" : " and applied") : "ERROR " + (j.error || ""));
+      if (j.ok) {
+        optBanner(doc, !!j.reboot_required);
+        await optLoad(doc, f);
+      }
+      return j;
+    } catch (e) {
+      optMsg(doc, "Save failed: " + e);
+      return null;
+    }
+  }
+
+  async function optClearEmergency(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    try {
+      const j = await optPost(f, "/api/clear_emergency");
+      optMsg(doc, j.ok ? "Emergency flag cleared" : "ERROR " + (j.error || ""));
+      if (j.ok) await optLoad(doc, f);
+      return j;
+    } catch (e) {
+      optMsg(doc, "Clear failed: " + e);
+      return null;
+    }
+  }
+
   function start(document) {
     drawDividers(document);
     addPasswordToggles(document);
     const isShell = !!showPage(document, root.location && root.location.hash);
     if (isShell) {
-      root.addEventListener("hashchange", () => showPage(document, root.location.hash));
+      root.addEventListener("hashchange", () => {
+        if (showPage(document, root.location.hash) === "optimize" && typeof root.fetch === "function") optLoad(document);
+      });
     }
     if (typeof root.fetch === "function") {
       updateWifi(document, root.fetch.bind(root));
+      if (document.getElementById && document.getElementById("opt-form")) optLoad(document);
       if (isShell) {
         root.setInterval(() => {
           if (shouldPollStatus(isShell, document.hidden)) updateWifi(document, root.fetch.bind(root));
@@ -154,7 +294,8 @@
     }
   }
 
-  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles };
+  const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles,
+    OPT_FIELDS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, optLoad, optSave, optClearEmergency };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {

@@ -1,0 +1,204 @@
+#include "opt_config.h"
+
+#include "diag.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "nvs.h"
+#include "wifi.h"
+
+static const char *TAG = "opt";
+
+static opt_config_t s_active;       // in use since boot (boot-only fields never change at runtime)
+static opt_config_t s_saved;        // stored in NVS
+static bool s_loaded;
+static uint8_t s_sdio_mhz = OPT_DEFAULT_SDIO_MHZ;
+static bool s_sdio_fell_back;
+static bool s_sdio_trial;
+static bool s_emergency;
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// --- NVS binding of opt_store_t ---
+static int nvs_get_cb(void *ctx, const char *key, uint8_t *out)
+{
+    return nvs_get_u8(*(nvs_handle_t *)ctx, key, out) == ESP_OK ? 0 : -1;
+}
+
+static int nvs_set_cb(void *ctx, const char *key, uint8_t v)
+{
+    return nvs_set_u8(*(nvs_handle_t *)ctx, key, v) == ESP_OK ? 0 : -1;
+}
+
+static int nvs_commit_cb(void *ctx)
+{
+    return nvs_commit(*(nvs_handle_t *)ctx) == ESP_OK ? 0 : -1;
+}
+
+static esp_err_t set_flag(const char *key, uint8_t v)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(OPT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, key, v);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+esp_log_level_t opt_log_esp_level(void)
+{
+    static const esp_log_level_t map[] = {ESP_LOG_ERROR, ESP_LOG_WARN, ESP_LOG_INFO, ESP_LOG_DEBUG};
+    uint8_t l = s_loaded ? s_active.log_level : OPT_DEFAULT_LOG_LVL;
+    return map[l <= 3 ? l : OPT_DEFAULT_LOG_LVL];
+}
+
+static void apply_log_level(void)
+{
+    esp_log_level_set("*", opt_log_esp_level());
+    diag_log_levels_refresh();      // app tags: debug mode wins, else this level
+}
+
+void opt_config_load(void)
+{
+    opt_config_t c;
+    uint8_t trial = 0, emerg = 0;
+    nvs_handle_t h;
+    if (nvs_open(OPT_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        opt_store_t st = {nvs_get_cb, nvs_set_cb, nvs_commit_cb, &h};
+        opt_config_load_from(&st, &c);
+        nvs_get_u8(h, OPT_KEY_SDIO_TRIAL, &trial);
+        nvs_get_u8(h, OPT_KEY_EMERGENCY, &emerg);
+        nvs_close(h);
+    } else {
+        opt_config_defaults(&c);    // namespace not created yet = all defaults
+    }
+    bool fallback;
+    uint8_t mhz = opt_sdio_boot_mhz(c.sdio_freq_mhz, trial != 0, &fallback);
+    if (fallback) {
+        // The previous 50 MHz boot never confirmed the C5 (hang, crash or power loss during init).
+        ESP_LOGW(TAG, "SDIO 50 MHz was not confirmed on the last boot - falling back to 40 MHz");
+        c.sdio_freq_mhz = 40;
+        set_flag(OPT_KEY_SDIO_MHZ, 40);
+        set_flag(OPT_KEY_SDIO_TRIAL, 0);
+        s_sdio_fell_back = true;
+    }
+    s_sdio_mhz = mhz;
+    s_active = s_saved = c;
+    s_emergency = emerg != 0;
+    s_loaded = true;
+    apply_log_level();
+    ESP_LOGI(TAG, "Optimize: SDIO %d MHz, TX %s%d dBm, TCP window %d KB, NAPT %s, log level %d, emergency flag %s",
+             c.sdio_freq_mhz, c.wifi_tx_power_dbm ? "" : "radio setting/", c.wifi_tx_power_dbm, c.tcp_window_kb,
+             c.napt ? "on" : "off", c.log_level, s_emergency ? "SET" : "clear");
+}
+
+void opt_config_get_active(opt_config_t *out)
+{
+    portENTER_CRITICAL(&s_mux);
+    if (s_loaded) *out = s_active; else opt_config_defaults(out);
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void opt_config_get_saved(opt_config_t *out)
+{
+    portENTER_CRITICAL(&s_mux);
+    if (s_loaded) *out = s_saved; else opt_config_defaults(out);
+    portEXIT_CRITICAL(&s_mux);
+}
+
+bool opt_config_reboot_pending(void)
+{
+    opt_config_t a, s;
+    opt_config_get_active(&a);
+    opt_config_get_saved(&s);
+    return opt_config_reboot_required(&a, &s);
+}
+
+esp_err_t opt_config_save(const opt_config_t *c, bool *reboot_required)
+{
+    if (!opt_config_valid(c)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(OPT_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    opt_store_t st = {nvs_get_cb, nvs_set_cb, nvs_commit_cb, &h};
+    int r = opt_config_save_to(&st, c);
+    if (r == 0 && c->sdio_freq_mhz != 50) nvs_set_u8(h, OPT_KEY_SDIO_TRIAL, 0);   // no pending 50 MHz trial
+    if (r == 0) nvs_commit(h);
+    nvs_close(h);
+    if (r != 0) return ESP_FAIL;
+
+    opt_config_t old;
+    portENTER_CRITICAL(&s_mux);
+    old = s_active;
+    s_saved = *c;
+    // Runtime fields take effect now; SDIO clock and TCP window stay until the next boot.
+    s_active.wifi_tx_power_dbm = c->wifi_tx_power_dbm;
+    s_active.napt = c->napt;
+    s_active.log_level = c->log_level;
+    portEXIT_CRITICAL(&s_mux);
+
+    if (old.log_level != c->log_level) apply_log_level();
+    if (old.napt != c->napt) wifi_apply_napt();
+    if (old.wifi_tx_power_dbm != c->wifi_tx_power_dbm) wifi_apply_tx_power();
+    bool rb = opt_config_reboot_pending();
+    if (reboot_required) *reboot_required = rb;
+    ESP_LOGI(TAG, "Optimize settings saved: SDIO %d MHz, TX %d dBm, TCP %d KB, NAPT %s, log %d%s", c->sdio_freq_mhz,
+             c->wifi_tx_power_dbm, c->tcp_window_kb, c->napt ? "on" : "off", c->log_level,
+             rb ? " (reboot required)" : "");
+    return ESP_OK;
+}
+
+bool opt_napt_enabled(void)
+{
+    return s_loaded ? s_active.napt : OPT_DEFAULT_NAPT;
+}
+
+uint8_t opt_tx_power_dbm(void)
+{
+    return s_loaded ? s_active.wifi_tx_power_dbm : OPT_DEFAULT_TX_DBM;
+}
+
+// --- SDIO clock trial / fallback ---
+uint32_t opt_sdio_begin(void)
+{
+    if (s_sdio_mhz == 50) {
+        // Marked before the transport starts: if this boot hangs or crashes the next one uses 40 MHz.
+        s_sdio_trial = set_flag(OPT_KEY_SDIO_TRIAL, 1) == ESP_OK;
+        ESP_LOGI(TAG, "SDIO clock 50 MHz (trial until the C5 is up)");
+    }
+    return (uint32_t)s_sdio_mhz * 1000;
+}
+
+int opt_sdio_active_mhz(void) { return s_sdio_mhz; }
+bool opt_sdio_fell_back(void) { return s_sdio_fell_back; }
+
+void opt_sdio_confirm(void)
+{
+    if (!s_sdio_trial) return;
+    s_sdio_trial = false;
+    set_flag(OPT_KEY_SDIO_TRIAL, 0);
+    ESP_LOGI(TAG, "SDIO 50 MHz confirmed (C5 up)");
+}
+
+bool opt_sdio_fallback_to_40(void)
+{
+    if (s_sdio_mhz != 50) return false;
+    ESP_LOGW(TAG, "C5 failure at SDIO 50 MHz - storing 40 MHz (auto-fallback)");
+    set_flag(OPT_KEY_SDIO_MHZ, 40);
+    set_flag(OPT_KEY_SDIO_TRIAL, 0);
+    portENTER_CRITICAL(&s_mux);
+    s_saved.sdio_freq_mhz = 40;
+    portEXIT_CRITICAL(&s_mux);
+    s_sdio_trial = false;
+    s_sdio_fell_back = true;
+    return true;
+}
+
+// --- Emergency flag ---
+bool opt_emergency_flag(void) { return s_emergency; }
+
+esp_err_t opt_emergency_set(bool on)
+{
+    esp_err_t err = set_flag(OPT_KEY_EMERGENCY, on ? 1 : 0);
+    if (err == ESP_OK) s_emergency = on;
+    return err;
+}

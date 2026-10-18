@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "mypi_kbd_core.h"
+#include "opt_config_core.h"
 #include "ui_input.h"
 #include "ui_layout.h"
 #include "ui_serial.h"
@@ -223,6 +224,96 @@ static void test_touch_geometry(void)
     assert(mypi_ui_button_hit(239 - 8, 319 - 268, 8, 319 - 315, 231, 319 - 268));
 }
 
+// --- opt_config (v0.9.0): mock NVS key/value store ---
+typedef struct {
+    char key[8][16];
+    uint8_t val[8];
+    int n, commits, fail_set;
+} mock_nvs_t;
+
+static int mock_get(void *ctx, const char *key, uint8_t *out)
+{
+    mock_nvs_t *m = ctx;
+    for (int i = 0; i < m->n; i++) {
+        if (strcmp(m->key[i], key) == 0) { *out = m->val[i]; return 0; }
+    }
+    return -1;      // ESP_ERR_NVS_NOT_FOUND
+}
+
+static int mock_set(void *ctx, const char *key, uint8_t v)
+{
+    mock_nvs_t *m = ctx;
+    if (m->fail_set) return -2;
+    for (int i = 0; i < m->n; i++) {
+        if (strcmp(m->key[i], key) == 0) { m->val[i] = v; return 0; }
+    }
+    assert(m->n < 8 && strlen(key) < 16);
+    strcpy(m->key[m->n], key);
+    m->val[m->n++] = v;
+    return 0;
+}
+
+static int mock_commit(void *ctx) { ((mock_nvs_t *)ctx)->commits++; return 0; }
+
+static void test_opt_config(void)
+{
+    mock_nvs_t m = {0};
+    opt_store_t st = {mock_get, mock_set, mock_commit, &m};
+    opt_config_t c, d;
+
+    // Load from an empty store = defaults (40 MHz, radio TX power, 64 KB, NAPT on, INFO).
+    memset(&c, 0xAA, sizeof(c));
+    opt_config_load_from(&st, &c);
+    assert(c.sdio_freq_mhz == 40 && c.wifi_tx_power_dbm == 0 && c.tcp_window_kb == 64 && c.napt && c.log_level == 2);
+    assert(opt_config_valid(&c));
+    opt_config_load_from(NULL, &d);
+    assert(memcmp(&c, &d, sizeof(c)) == 0);
+
+    // Save round-trip.
+    c.sdio_freq_mhz = 50; c.wifi_tx_power_dbm = 14; c.tcp_window_kb = 128; c.napt = false; c.log_level = 3;
+    assert(opt_config_save_to(&st, &c) == 0 && m.commits == 1);
+    opt_config_load_from(&st, &d);
+    assert(d.sdio_freq_mhz == 50 && d.wifi_tx_power_dbm == 14 && d.tcp_window_kb == 128 && !d.napt && d.log_level == 3);
+    uint8_t raw;
+    assert(mock_get(&m, OPT_KEY_SDIO_MHZ, &raw) == 0 && raw == 50);
+    assert(mock_get(&m, OPT_KEY_NAPT, &raw) == 0 && raw == 0);
+
+    // Invalid configs are rejected and nothing is written.
+    opt_config_t bad = d;
+    bad.sdio_freq_mhz = 45;
+    assert(opt_config_save_to(&st, &bad) == -1 && m.commits == 1);
+    bad = d; bad.tcp_window_kb = 96;   assert(!opt_config_valid(&bad));
+    bad = d; bad.wifi_tx_power_dbm = 1; assert(!opt_config_valid(&bad));
+    bad = d; bad.wifi_tx_power_dbm = 22; assert(!opt_config_valid(&bad));
+    bad = d; bad.log_level = 4;         assert(!opt_config_valid(&bad));
+    m.fail_set = 1;
+    assert(opt_config_save_to(&st, &d) == -2);
+    m.fail_set = 0;
+
+    // Corrupt values in NVS fall back to the default field by field.
+    mock_set(&m, OPT_KEY_SDIO_MHZ, 77);
+    mock_set(&m, OPT_KEY_LOG_LVL, 9);
+    opt_config_load_from(&st, &d);
+    assert(d.sdio_freq_mhz == 40 && d.log_level == 2 && d.tcp_window_kb == 128 && d.wifi_tx_power_dbm == 14);
+
+    // Reboot required only for the boot-only fields (SDIO clock, TCP window).
+    opt_config_t a, s2;
+    opt_config_defaults(&a);
+    s2 = a; s2.napt = false; s2.log_level = 0; s2.wifi_tx_power_dbm = 8;
+    assert(!opt_config_reboot_required(&a, &s2));
+    s2.sdio_freq_mhz = 50;
+    assert(opt_config_reboot_required(&a, &s2));
+    s2 = a; s2.tcp_window_kb = 32;
+    assert(opt_config_reboot_required(&a, &s2));
+
+    // SDIO 50 MHz trial / auto-fallback decision.
+    bool fb;
+    assert(opt_sdio_boot_mhz(40, false, &fb) == 40 && !fb);
+    assert(opt_sdio_boot_mhz(40, true, &fb) == 40 && !fb);
+    assert(opt_sdio_boot_mhz(50, false, &fb) == 50 && !fb);     // trial starts
+    assert(opt_sdio_boot_mhz(50, true, &fb) == 40 && fb);       // previous trial never confirmed
+}
+
 int main(void)
 {
     test_serial();
@@ -232,6 +323,7 @@ int main(void)
     test_password_utf8_and_length();
     test_kbd_core();
     test_touch_geometry();
+    test_opt_config();
     puts("UI primitive tests passed");
     return 0;
 }

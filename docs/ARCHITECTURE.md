@@ -164,3 +164,67 @@ cc -std=c11 -Wall -Wextra -Werror -DLV_CONF_PATH='"/tmp/mypi-lv-conf.h"' \
 
 Existing C, JavaScript and logo tests remain applicable; hardware validation is
 still required before release.
+
+
+## RAM/PSRAM strategy (0.9.0)
+
+Rule: time-critical buffers live in internal RAM; large static allocations and
+buffers where the receiver is the bottleneck live in PSRAM. When unsure, choose
+the safe option ("better safe than sorry").
+
+| Buffer | Placement | Reason |
+|---|---|---|
+| ESP-Hosted SDIO DMA buffers | Internal (driver-managed, DMA-capable) | DMA/latency critical |
+| lwIP TCP socket rx/tx (`TCP_SND_BUF` 65535, `TCP_WND` 64 KB) | Internal heap | throughput critical; `CONFIG_LWIP_IRAM_OPTIMIZATION=y` puts lwIP hot paths in IRAM |
+| LVGL flush buffers `s_pixels` + `s_kbd_pixels` (2 x 9.6 KB, `ui_lvgl_port.c`) | Internal `.bss` (moved from PSRAM in 0.9.0) | flush path, feeds the display DMA |
+| Display DMA bounce buffers (`display.c`) | Internal DMA heap | DMA requirement |
+| LVGL heap (64 KB), framebuffer-sized buffers | PSRAM | large, not latency critical |
+| Log ring buffer, log store chunks, net log, web log list | PSRAM (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`) | large, consumer (flash/web) is the bottleneck |
+| Pin test report `s_report` (~1.5 KB, `pintest.c`) | PSRAM (`EXT_RAM_BSS_ATTR`, 0.9.0) | static, rarely used |
+| STA profile table `s_sta` (~1.6 KB, `profiles.c`) | PSRAM (`EXT_RAM_BSS_ATTR`, 0.9.0) | static, not time critical |
+
+Always-on build options in `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=y`,
+`CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535`. The Wi-Fi static RX buffer count is
+already 32 (`WIFI_RMT_STATIC_RX_BUFFER_NUM`, higher than the suggested 10) and
+`CONFIG_SPIRAM_SPEED=80` is the applicable P4 symbol (`CONFIG_ESP32P4_SPIRAM_SPEED`
+does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
+(`esp_wifi_set_bandwidths`) and 802.11ax stays disabled.
+
+## opt_config module (0.9.0)
+
+Files: `main/opt_config_core.h` (pure logic, host-testable via an `opt_store_t`
+mock), `main/opt_config.h`, `main/opt_config.c` (NVS binding and apply hooks).
+
+NVS namespace `mypi_opt`, all values `u8`:
+
+| Key | Field | Values | Default | Applied |
+|---|---|---|---|---|
+| `sdio_mhz` | `sdio_freq_mhz` | 40 / 50 | 40 | boot (reboot required) |
+| `tx_dbm` | `wifi_tx_power_dbm` | 0 (radio default), 8..21 | 0 | runtime |
+| `tcp_kb` | `tcp_window_kb` | 32 / 64 / 128 | 64 | stored; reboot required (lwIP window is build-time today) |
+| `napt` | `napt` | 0 / 1 | 1 | runtime (master switch over the AP profile NAT flag) |
+| `log_lvl` | `log_level` | 0 error .. 3 debug | 2 | runtime |
+| `sdio_try` | internal | 1 = 50 MHz boot not yet confirmed | 0 | boot |
+| `emerg` | `emergency_active` | 1 = emergency mode entered | 0 | read-only in API |
+
+Boot: `main.c` calls `opt_config_load()` (applies log level). `wifi.c` initialises
+ESP-Hosted manually (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN` off) so the
+SDIO clock from `opt_sdio_begin()` can be set before the transport starts.
+
+SDIO 50 MHz auto-fallback:
+1. A 50 MHz boot writes `sdio_try=1` before the transport starts.
+2. When the transport is up and `esp_wifi_init` succeeds, `opt_sdio_confirm()`
+   writes `sdio_try=0`.
+3. If the C5 fails at 50 MHz (`rescue_request`), `sdio_mhz=40`, `sdio_try=0` is
+   saved and the device restarts without consuming the rescue restart budget.
+4. If a 50 MHz boot hangs or crashes before confirmation, the next boot sees
+   `sdio_try=1` and falls back to 40 MHz, saving it in NVS.
+
+Emergency flag: set by the rescue task when emergency mode is entered (existing
+second-failure logic unchanged); cleared automatically by `rescue_c5_init_ok()`
+after a successful C5 init, or manually via the web UI.
+
+Web API: `GET /api/opt`, `POST /api/opt` (returns `{"reboot_required": bool}`,
+true when `sdio_freq_mhz` or `tcp_window_kb` changed), `POST /api/clear_emergency`,
+`POST /api/reboot`. The Optimize tab uses only radio buttons, checkboxes and
+dropdowns.

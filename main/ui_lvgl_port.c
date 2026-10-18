@@ -17,8 +17,10 @@ static lv_display_t *s_display;
 static lv_indev_t *s_indev;
 static mypi_ui_lvgl_view_t s_view;
 static bool s_render_active;
-// Partial draw buffer in PSRAM (v0.8.6): LVGL renders here, flush() copies into the PSRAM framebuffer.
-_Alignas(LV_DRAW_BUF_ALIGN) EXT_RAM_BSS_ATTR static uint16_t s_pixels[LCD_H_RES * 20];
+// Partial draw buffer (LVGL flush buffer) in INTERNAL RAM (v0.9.0, RAM strategy: time-critical): LVGL
+// renders here, flush() copies into the PSRAM framebuffer, which display.c pushes over SPI via
+// internal DMA bounce buffers. 9.6 KB.
+_Alignas(LV_DRAW_BUF_ALIGN) static uint16_t s_pixels[LCD_H_RES * 20];
 
 // Full-screen keyboard host (v0.8.7): a second LVGL display covering the whole panel, created on
 // first use. Keeping it separate leaves the status viewport (and its y offset) untouched.
@@ -29,7 +31,8 @@ static bool s_kbd_close_req;
 static bool s_kbd_drawing;
 static bool s_kbd_dirty;
 static bool s_in_kbd_tick;
-_Alignas(LV_DRAW_BUF_ALIGN) EXT_RAM_BSS_ATTR static uint16_t s_kbd_pixels[LCD_H_RES * 20];
+// Keyboard flush buffer: internal RAM as well (v0.9.0), 9.6 KB.
+_Alignas(LV_DRAW_BUF_ALIGN) static uint16_t s_kbd_pixels[LCD_H_RES * 20];
 
 // Pointer mapping of the display the indev is attached to (UI task only).
 static int s_indev_y0 = MYPI_LVGL_STATUS_Y;

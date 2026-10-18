@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -16,7 +17,7 @@ const uint8_t AP_SUBNET_BASE[AP_SUBNET_COUNT][3] = {
     {192, 168, 4}, {192, 168, 42}, {10, 11, 0}, {172, 16, 4},
 };
 
-static sta_profile_t s_sta[STA_PROFILE_MAX];
+EXT_RAM_BSS_ATTR static sta_profile_t s_sta[STA_PROFILE_MAX];   // v0.9.0: 1.6 KB, not time-critical -> PSRAM
 static ap_profile_t s_ap[AP_PROFILE_MAX];
 static SemaphoreHandle_t s_lock;
 

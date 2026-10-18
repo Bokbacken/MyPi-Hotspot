@@ -5,6 +5,47 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.9.0 — 2026-10-18 (builds, not hardware-tested)
+
+### Added
+- **Optimize settings** (`main/opt_config.c/.h`, pure logic in `main/opt_config_core.h`),
+  NVS namespace `mypi_opt` (all `u8`): `sdio_mhz` (40|50), `tx_dbm` (0 = radio setting, 2–21),
+  `tcp_kb` (32|64|128), `napt` (0|1), `log_lvl` (0 error .. 3 debug), plus the internal flags
+  `sdio_try` (50 MHz trial not yet confirmed) and `emerg` (emergency flag). Loaded in `app_main()`
+  right after NVS init; log level, TX power and NAPT apply at runtime, SDIO clock and TCP window at boot.
+- **SDIO 50 MHz with auto-fallback**: ESP-Hosted is no longer initialized by its constructor
+  (`CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n`); `wifi_task()` sets the SDIO clock from
+  NVS (`esp_hosted_sdio_set_config()`) before `esp_hosted_init()` + `esp_hosted_connect_to_slave()`.
+  A 50 MHz boot is a trial (`sdio_try=1` before the transport starts). Confirmed when the transport
+  and `esp_wifi_init()` succeed. On any C5 failure at 50 MHz (`rescue_request()`: init failure/timeout,
+  transport failure, no response) 40 MHz is stored and the P4 restarts — without consuming the
+  automatic-restart budget. If a 50 MHz boot hangs/crashes before confirming, the next boot sees
+  `sdio_try=1` and falls back to 40 MHz as well.
+- **Emergency auto-clear**: emergency mode (entered on the second failed C5 init, logic unchanged)
+  now also sets `emerg=1`. After a successful C5 init (`rescue_c5_init_ok()`) a set flag is cleared
+  and `Emergency flag cleared after successful C5 init` is logged.
+- **Web "Optimize" tab** (radio buttons, dropdowns, checkbox only — no text input): SDIO clock,
+  TX power, TCP window, NAPT, log level, emergency status with **Clear**, **Apply & Save** and a
+  yellow "Some changes require reboot" banner with **Reboot now**.
+- API: `GET /api/opt`, `POST /api/opt` (→ `{"ok":true,"reboot_required":bool}`),
+  `POST /api/clear_emergency`. JSON fields: `sdio_freq_mhz`, `wifi_tx_power_dbm`, `tcp_window_kb`,
+  `napt`, `log_level`, `emergency_active` (read-only).
+
+### Changed
+- 2.4 GHz is hard-locked to HT20: `apply_bw()` always uses `esp_wifi_set_bandwidths()` with
+  `ghz_2g = WIFI_BW20`; the width selection only applies to 5 GHz. 11ax stays off.
+- `sdkconfig.defaults`: `CONFIG_LWIP_IRAM_OPTIMIZATION=y`, `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535`.
+  `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10` was not added: the P4 uses `esp_wifi_remote`
+  (`CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=32`, kept; 10 would lower it). `CONFIG_ESP32P4_SPIRAM_SPEED`
+  does not exist; PSRAM already runs at 80 MHz (`CONFIG_SPIRAM_SPEED_80M`).
+- RAM/PSRAM: LVGL flush buffers (status + keyboard, 2 × 9.6 KB) moved to internal RAM
+  (time-critical); pin-test report (1.5 KB) and STA profiles (1.6 KB) moved to PSRAM.
+- Optimize log level is the base level for the app tags; debug mode still wins.
+
+### Known limitations
+- `tcp_window_kb` is stored and reported, but lwIP's `TCP_WND` is a build-time constant
+  (`CONFIG_LWIP_TCP_WND_DEFAULT`, 64 KB); the selection does not change the window yet.
+
 ## 0.8.9 — 2026-10-18 (bugfix, builds, not hardware-tested)
 
 - Fix: password reveal now works — server populates value attribute (`/api/profiles` and `/api/approfiles` return the stored password; the STA/AP edit forms are filled on page load, on Edit and on slot change; fields stay `type="password"` until Show is clicked).

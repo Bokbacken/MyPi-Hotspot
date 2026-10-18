@@ -27,6 +27,7 @@
 #include "logstore.h"
 #include "lwip/sockets.h"
 #include "net.h"
+#include "opt_config.h"
 #include "pintest.h"
 #include "profiles.h"
 #include "rescue.h"
@@ -61,7 +62,7 @@ extern const char _binary_web_ui_js_end[];
     "<div class='mypi-divider'><svg data-text='Hotspot'></svg></div>" \
     "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/#overview'>Overview</a><a href='/#wifi'>Wi-Fi</a>" \
     "<a href='/#access-point'>Access point</a><a href='/#traffic'>Traffic</a><a href='/#ethernet'>Ethernet</a>" \
-    "<a href='/#system'>System</a><a href='/#debug'>Debug</a></nav></header>"
+    "<a href='/#system'>System</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -119,6 +120,31 @@ MYPI_BRAND_HEADER
 "<small>(applied immediately, saved across reboots)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
+// v0.9.0 Optimize page: checkboxes, radio buttons and dropdowns only (no text input). Logic in web_ui.js.
+"<section class='page' data-page='optimize'><h2>Optimize</h2>"
+"<div id='opt-banner' class='opt-banner' hidden><span>Some changes require reboot</span> "
+"<button type='button' onclick='reboot()'>Reboot now</button></div>"
+"<div id='opt-form' class='opt-grid'>"
+"<span class='opt-l'>SDIO clock (P4 &harr; C5)</span><span class='opt-c'>"
+"<label><input type='radio' name='opt-sdio' value='40'>40 MHz</label> <label><input type='radio' name='opt-sdio' value='50'>50 MHz</label></span>"
+"<span class='opt-s' id='opt-sdio-st'></span>"
+"<span class='opt-l'>Wi-Fi TX power</span><span class='opt-c'><select id='opt-tx'><option value='0'>Radio setting</option>"
+"<option value='8'>8 dBm</option><option value='11'>11 dBm</option><option value='14'>14 dBm</option><option value='17'>17 dBm</option>"
+"<option value='19'>19 dBm</option><option value='20'>20 dBm</option><option value='21'>21 dBm (max)</option></select></span>"
+"<span class='opt-s' id='opt-tx-st'></span>"
+"<span class='opt-l'>TCP window</span><span class='opt-c'>"
+"<label><input type='radio' name='opt-tcp' value='32'>32 KB</label> <label><input type='radio' name='opt-tcp' value='64'>64 KB</label> "
+"<label><input type='radio' name='opt-tcp' value='128'>128 KB</label></span><span class='opt-s' id='opt-tcp-st'></span>"
+"<span class='opt-l'>NAPT (AP shares uplink)</span><span class='opt-c'><label><input type='checkbox' id='opt-napt'>enabled</label></span>"
+"<span class='opt-s' id='opt-napt-st'></span>"
+"<span class='opt-l'>Log level</span><span class='opt-c'><select id='opt-log'><option value='0'>Error</option><option value='1'>Warning</option>"
+"<option value='2'>Info</option><option value='3'>Debug</option></select></span><span class='opt-s' id='opt-log-st'></span>"
+"<span class='opt-l'>Emergency flag</span><span class='opt-c'><button type='button' id='opt-emerg-btn' onclick='MyPiSerial.optClearEmergency()'>Clear</button></span>"
+"<span class='opt-s' id='opt-emerg-st'></span>"
+"</div><p><button type='button' onclick='MyPiSerial.optSave()'>Apply &amp; Save</button> <span id='opt-msg'></span></p>"
+"<p><small>SDIO 50 MHz is tried on the next boot and falls back to 40 MHz automatically (saved) if the C5 does not come up. "
+"TX power, NAPT and log level apply immediately; SDIO clock and TCP window after a reboot. "
+"2.4 GHz stays locked to HT20; 11ax stays off.</small></p></section>"
 "<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
 "<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
 "<h2>Saved logs (flash)</h2><p><label><input type='checkbox' id='lcap' style='width:auto' onchange=lsCfg()>Capture every session</label> "
@@ -1403,6 +1429,76 @@ static esp_err_t api_radio_post(httpd_req_t *req)
                        "tx_power_dbm: 0 or 2-21, ap_beacon_tu: 0-10, ap_dtim: 0-255");
 }
 
+// --- Optimize settings (v0.9.0) ---
+
+static void add_opt_cfg(cJSON *o, const opt_config_t *c)
+{
+    cJSON_AddNumberToObject(o, "sdio_freq_mhz", c->sdio_freq_mhz);
+    cJSON_AddNumberToObject(o, "wifi_tx_power_dbm", c->wifi_tx_power_dbm);
+    cJSON_AddNumberToObject(o, "tcp_window_kb", c->tcp_window_kb);
+    cJSON_AddBoolToObject(o, "napt", c->napt);
+    cJSON_AddNumberToObject(o, "log_level", c->log_level);
+}
+
+// GET /api/opt - saved settings (top level), the values in use since boot (active), whether a
+// reboot is pending and the emergency flag (read-only here, cleared via /api/clear_emergency).
+static esp_err_t api_opt_get(httpd_req_t *req)
+{
+    opt_config_t a, s;
+    opt_config_get_active(&a);
+    opt_config_get_saved(&s);
+    cJSON *j = cJSON_CreateObject();
+    add_opt_cfg(j, &s);
+    cJSON_AddBoolToObject(j, "emergency_active", opt_emergency_flag());
+    cJSON_AddBoolToObject(j, "emergency_mode_now", rescue_active());
+    add_opt_cfg(cJSON_AddObjectToObject(j, "active"), &a);
+    cJSON_AddBoolToObject(j, "reboot_required", opt_config_reboot_required(&a, &s));
+    cJSON_AddNumberToObject(j, "sdio_active_mhz", opt_sdio_active_mhz());
+    cJSON_AddBoolToObject(j, "sdio_fell_back", opt_sdio_fell_back());
+    cJSON_AddNumberToObject(j, "tcp_window_build_kb", CONFIG_LWIP_TCP_WND_DEFAULT / 1024);
+    return send_json(req, j);
+}
+
+// POST /api/opt {sdio_freq_mhz, wifi_tx_power_dbm, tcp_window_kb, napt, log_level} - missing keys
+// keep the saved value. Runtime fields apply now; replies {"ok":true,"reboot_required":bool}.
+static esp_err_t api_opt_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    opt_config_t c;
+    opt_config_get_saved(&c);
+    bool ok = true;
+    radio_field(j, "sdio_freq_mhz", 40, 50, &c.sdio_freq_mhz, &ok);
+    radio_field(j, "wifi_tx_power_dbm", 0, 21, &c.wifi_tx_power_dbm, &ok);
+    radio_field(j, "tcp_window_kb", 32, 128, &c.tcp_window_kb, &ok);
+    radio_field(j, "log_level", 0, 3, &c.log_level, &ok);
+    c.napt = jbool(j, "napt", c.napt);
+    cJSON_Delete(j);
+    bool reboot = false;
+    esp_err_t err = ok && opt_config_valid(&c) ? opt_config_save(&c, &reboot) : ESP_ERR_INVALID_ARG;
+    if (err != ESP_OK) {
+        return send_result(req, err, NULL, "sdio_freq_mhz: 40|50, wifi_tx_power_dbm: 0 or 2-21, tcp_window_kb: "
+                           "32|64|128, napt: bool, log_level: 0-3");
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", true);
+    cJSON_AddBoolToObject(r, "reboot_required", reboot);
+    cJSON_AddStringToObject(r, "msg", reboot ? "saved - some changes require reboot" : "saved and applied");
+    return send_json(req, r);
+}
+
+// POST /api/clear_emergency - clear the emergency NVS flag (OPT_KEY_EMERGENCY).
+static esp_err_t api_clear_emergency_post(httpd_req_t *req)
+{
+    esp_err_t err = opt_emergency_set(false);
+    if (err == ESP_OK) ESP_LOGI(TAG, "Emergency flag cleared from the web UI");
+    if (err != ESP_OK) return send_result(req, err, NULL, "could not write NVS");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", true);
+    cJSON_AddBoolToObject(r, "emergency_active", false);
+    cJSON_AddStringToObject(r, "msg", "emergency flag cleared");
+    return send_json(req, r);
+}
+
 // --- Traffic stats ---
 
 /** Round to 2 decimals so cJSON prints e.g. 8.37 instead of 8.3699998855590820. */
@@ -1680,6 +1776,9 @@ esp_err_t web_start(void)
         { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
         { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
         { .uri = "/api/display",        .method = HTTP_POST, .handler = api_display_post },
+        { .uri = "/api/opt",            .method = HTTP_GET,  .handler = api_opt_get },
+        { .uri = "/api/opt",            .method = HTTP_POST, .handler = api_opt_post },
+        { .uri = "/api/clear_emergency", .method = HTTP_POST, .handler = api_clear_emergency_post },
         { .uri = "/api/netstats",       .method = HTTP_GET,  .handler = api_netstats_get },
         { .uri = "/api/netstats/reset", .method = HTTP_POST, .handler = api_netstats_reset },
         { .uri = "/api/netstats/log/start", .method = HTTP_POST, .handler = api_netlog_start },

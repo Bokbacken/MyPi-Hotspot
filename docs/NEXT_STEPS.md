@@ -9,6 +9,25 @@ LVGL for supported local graphical interfaces, UTF-8 text input/output, shared
 identity, and preserved backend/API contracts. The implementation notes below
 describe the transitional UI, not an LVGL implementation.
 
+## Hotspot v0.9.0 validation (Optimize, not hardware-tested)
+
+1. OTA to 0.9.0; boot log must show `ESP-Hosted SDIO clock 40000 kHz` and Wi-Fi as before
+   (ESP-Hosted is now initialized from `wifi_task()`, not by the constructor).
+2. Optimize tab: defaults 40 MHz / radio setting / 64 KB / NAPT on / Info; emergency "clear".
+3. Change log level and NAPT → applied immediately, no banner. Select 50 MHz → banner, Reboot now.
+4. After reboot: `SDIO clock 50 MHz (trial ...)` then `SDIO 50 MHz confirmed (C5 up)`; run iperf
+   and compare with 40 MHz. If the C5 fails at 50 MHz the log shows `SDIO 50 MHz auto-fallback to
+   40 MHz` and the next boot runs at 40 MHz (Optimize tab shows "auto-fallback").
+5. Emergency: provoke emergency mode (C5 unplugged/held in reset, 2 failed inits) → flag SET;
+   reconnect, reboot → `Emergency flag cleared after successful C5 init`. Also test Clear button.
+6. 5 GHz and 2.4 GHz: confirm in the System tab that 2.4 GHz runs at 20 MHz with width "40/auto".
+
+## Optimize follow-ups
+
+- TCP window: make `tcp_window_kb` effective (needs a runtime TCP_WND in lwIP or per-build
+  variants); today it is stored and shown only.
+- Watch internal heap after moving the LVGL flush buffers to internal RAM (+19.2 KB DRAM).
+
 ## Hotspot v0.8.7 validation (keyboard module, not hardware-tested)
 
 1. Wi-Fi → choose a network without a profile → the keyboard opens full screen.

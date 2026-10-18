@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "pins.h"
@@ -26,7 +27,7 @@ static const pin_t PINS[] = {
 };
 #define NPINS (sizeof(PINS) / sizeof(PINS[0]))
 
-static char s_report[1536];
+EXT_RAM_BSS_ATTR static char s_report[1536];     // v0.9.0: text report, not time-critical -> PSRAM
 static size_t s_report_len;
 
 static void report(const char *fmt, ...)

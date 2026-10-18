@@ -20,7 +20,9 @@
 #include "freertos/task.h"
 #include "mdns.h"
 #include "net.h"
+#include "esp_hosted_transport_config.h"
 #include "nvs.h"
+#include "opt_config.h"
 #include "profiles.h"
 #include "rescue.h"
 #include "sdkconfig.h"
@@ -135,7 +137,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case WIFI_EVENT_AP_START:
             ESP_LOGI(TAG, "AP \"%s\" started", s_ap_cur.ssid);
             s_ap_clients = 0;
-            if (s_ap_cur.nat) net_napt(s_ap, true);
+            if (s_ap_cur.nat && opt_napt_enabled()) net_napt(s_ap, true);
             eth_bridge_start();     // LAN mode: wired clients join the AP subnet
             if (rescue_active()) {
                 ESP_LOGW(TAG, "AP started during emergency mode - stopping it again");
@@ -240,7 +242,7 @@ void wifi_coproc_refresh(void)
     c.sdio_clk = CP_SDIO_CLK; c.sdio_cmd = CP_SDIO_CMD;
     c.sdio_d0 = CP_SDIO_D0; c.sdio_d1 = CP_SDIO_D1; c.sdio_d2 = CP_SDIO_D2; c.sdio_d3 = CP_SDIO_D3;
     c.reset_gpio = CP_RESET_GPIO;
-    c.sdio_freq_khz = CP_SDIO_KHZ;
+    c.sdio_freq_khz = opt_sdio_active_mhz() * 1000;     // v0.9.0: runtime clock from the Optimize settings
 
     esp_hosted_coprocessor_fwver_t ver = {0};
     char target[16] = "?";
@@ -288,7 +290,7 @@ static void log_hosted_info(void)
     ESP_LOGI(TAG, "ESP-Hosted host component v%d.%d.%d, transport SDIO (CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d, "
              "slave reset GPIO%d, %d kHz)", ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1,
              ESP_HOSTED_VERSION_PATCH_1, CP_SDIO_CLK, CP_SDIO_CMD, CP_SDIO_D0, CP_SDIO_D1, CP_SDIO_D2, CP_SDIO_D3,
-             CP_RESET_GPIO, CP_SDIO_KHZ);
+             CP_RESET_GPIO, opt_sdio_active_mhz() * 1000);
     wifi_coproc_refresh();
 }
 
@@ -530,7 +532,7 @@ static esp_err_t ap_configure(int slot)
     s_ap_channel = c.ap.channel;
     s_ap_running = true;
     // If the AP was already up the AP_START event may not fire again.
-    net_napt(s_ap, p.nat);
+    net_napt(s_ap, p.nat && opt_napt_enabled());
     eth_bridge_start();
     ESP_LOGI(TAG, "AP \"%s\" (%s) on %d.%d.%d.1/24, channel %d, NAT %s, max %d clients", p.ssid,
              p.pass[0] ? "WPA2" : "open", sn[0], sn[1], sn[2], c.ap.channel, p.nat ? "on" : "off",
@@ -718,27 +720,25 @@ esp_err_t wifi_radio_save(const wifi_radio_cfg_t *c)
     return err;
 }
 
-// Set the channel width of an interface. "auto" leaves the driver default. If
-// esp_wifi_set_bandwidth() is rejected (2.4+5 GHz auto band mode), fall back to
-// esp_wifi_set_bandwidths() (2.4 GHz is capped at 40 MHz).
+// Set the channel width of an interface. HARD RULE: 2.4 GHz is always HT20 (never HT40),
+// whatever the selection, so the per-band esp_wifi_set_bandwidths() is used with ghz_2g =
+// WIFI_BW20; the selection (20/40, "auto" = 40 where allowed) only applies to 5 GHz.
+// If the per-band call is rejected, the single-band call is only used with 20 MHz.
 static void apply_bw(wifi_interface_t ifx, uint8_t sel)
 {
     const char *name = ifx == WIFI_IF_AP ? "AP" : "STA";
     if (sel > RADIO_BW_MAX) sel = RADIO_BW_MAX;    // the C5 supports max 40 MHz
-    if (sel == RADIO_BW_AUTO) {
-        ESP_LOGI(TAG, "%s bandwidth: driver default (auto)", name);
-        return;
-    }
-    wifi_bandwidth_t bw = (wifi_bandwidth_t)sel;    // RADIO_BW_20/40/80 == WIFI_BW20/40/80
-    esp_err_t err = esp_wifi_set_bandwidth(ifx, bw);
-    ESP_LOGI(TAG, "esp_wifi_set_bandwidth(%s, %s MHz): %s", name, wifi_radio_bw_name(sel), esp_err_to_name(err));
+    wifi_bandwidth_t bw5 = sel == RADIO_BW_AUTO ? WIFI_BW40 : (wifi_bandwidth_t)sel;  // RADIO_BW_20/40 == WIFI_BW20/40
+    wifi_bandwidths_t b = {.ghz_2g = WIFI_BW20, .ghz_5g = bw5};
+    esp_err_t err = esp_wifi_set_bandwidths(ifx, &b);
+    ESP_LOGI(TAG, "esp_wifi_set_bandwidths(%s, 2.4G 20 MHz (locked) / 5G %d MHz%s): %s", name,
+             bw5 == WIFI_BW40 ? 40 : 20, sel == RADIO_BW_AUTO ? " auto" : "", esp_err_to_name(err));
     if (err != ESP_OK) {
-        wifi_bandwidths_t b = {.ghz_2g = bw > WIFI_BW40 ? WIFI_BW40 : bw, .ghz_5g = bw};
-        err = esp_wifi_set_bandwidths(ifx, &b);
-        ESP_LOGI(TAG, "esp_wifi_set_bandwidths(%s, 2.4G %d / 5G %s MHz): %s", name, b.ghz_2g == WIFI_BW40 ? 40 : 20,
-                 wifi_radio_bw_name(sel), esp_err_to_name(err));
+        // Single-band fallback: only 20 MHz is safe here (the band is not known in advance).
+        err = esp_wifi_set_bandwidth(ifx, WIFI_BW20);
+        ESP_LOGW(TAG, "esp_wifi_set_bandwidth(%s, 20 MHz) fallback: %s", name, esp_err_to_name(err));
     }
-    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s bandwidth - radio keeps its default", name);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not set %s bandwidth", name);
 }
 
 // Set the protocol bitmask of an interface (0 = driver default). The bits are
@@ -784,6 +784,35 @@ static void apply_tx_power(uint8_t dbm)
     esp_err_t err = esp_wifi_set_max_tx_power((int8_t)(dbm * 4));
     ESP_LOGI(TAG, "esp_wifi_set_max_tx_power(%d dBm): %s", dbm, esp_err_to_name(err));
     if (err != ESP_OK) ESP_LOGW(TAG, "Could not set TX power - radio keeps its default");
+}
+
+/** Optimize TX power override (non-zero) wins over the radio setting. */
+static uint8_t effective_tx_dbm(void)
+{
+    uint8_t o = opt_tx_power_dbm();
+    return o ? o : s_radio.tx_power_dbm;
+}
+
+void wifi_apply_tx_power(void)
+{
+    if (!s_cp.wifi_init_ok || rescue_active()) return;  // applied at Wi-Fi start otherwise
+    uint8_t dbm = effective_tx_dbm();
+    if (dbm == 0) {
+        ESP_LOGI(TAG, "TX power: driver default (takes effect after reboot if a cap was set)");
+        return;
+    }
+    if (!lock()) return;
+    apply_tx_power(dbm);
+    unlock();
+}
+
+void wifi_apply_napt(void)
+{
+    if (!s_ap || !s_ap_running || rescue_active()) return;
+    bool on = s_ap_cur.nat && opt_napt_enabled();
+    esp_err_t err = net_napt(s_ap, on);
+    ESP_LOGI(TAG, "AP NAT %s (profile %s, Optimize master %s): %s", on ? "on" : "off", s_ap_cur.nat ? "on" : "off",
+             opt_napt_enabled() ? "on" : "off", esp_err_to_name(err));
 }
 
 static void proto_str(uint16_t p, char *out, size_t n)
@@ -974,9 +1003,25 @@ static void wifi_task(void *arg)
         esp_timer_start_once(init_timer, (uint64_t)C5_INIT_TIMEOUT_S * 1000000);
     }
 
+    // v0.9.0: ESP-Hosted is initialized here (CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n)
+    // so the SDIO clock can come from the Optimize settings (40 MHz, or 50 MHz as a trial that
+    // falls back to 40 MHz on any C5 failure - see opt_sdio_fallback_to_40() / rescue_request()).
+    struct esp_hosted_sdio_config sdio_cfg = INIT_DEFAULT_HOST_SDIO_CONFIG();
+    sdio_cfg.clock_freq_khz = opt_sdio_begin();
+    int hr = esp_hosted_sdio_set_config(&sdio_cfg);
+    ESP_LOGI(TAG, "ESP-Hosted SDIO clock %lu kHz%s (set_config %d)", (unsigned long)sdio_cfg.clock_freq_khz,
+             opt_sdio_fell_back() ? " (fell back from 50 MHz)" : "", hr);
+    esp_err_t init_err = ESP_OK;
+    hr = esp_hosted_init();
+    if (hr == 0) hr = esp_hosted_connect_to_slave();
+    if (hr != 0) {
+        ESP_LOGE(TAG, "ESP-Hosted init/connect failed (%d) at %d MHz", hr, opt_sdio_active_mhz());
+        init_err = ESP_FAIL;
+    }
+
     ESP_LOGI(TAG, "Initializing Wi-Fi via ESP-Hosted (ESP32-C5 over SDIO); this may take a few seconds");
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t init_err = esp_wifi_init(&cfg);
+    if (init_err == ESP_OK) init_err = esp_wifi_init(&cfg);
     if (init_timer) {
         esp_timer_stop(init_timer);
         esp_timer_delete(init_timer);
@@ -984,6 +1029,9 @@ static void wifi_task(void *arg)
     s_cp.wifi_init_ok = init_err == ESP_OK;
     log_hosted_info();      // also on failure: the C5 OTA page (/c5update) uses this info
     TRY(init_err);
+    // C5 is up (transport + Wi-Fi driver): confirm a 50 MHz trial and auto-clear the emergency flag.
+    opt_sdio_confirm();
+    rescue_c5_init_ok();
 
     TRY(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
     TRY(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
@@ -1015,7 +1063,7 @@ static void wifi_task(void *arg)
     TRY(esp_wifi_start());   // STA_START triggers the first (profile) connect
     // TX power needs a started radio; protocols are re-applied in case the
     // driver reset them on start.
-    apply_tx_power(s_radio.tx_power_dbm);
+    apply_tx_power(effective_tx_dbm());     // Optimize override (non-zero) wins over the radio setting
     apply_proto(WIFI_IF_STA, s_radio.sta_proto);
     if (s_apsta_ok && want_ap) apply_proto(WIFI_IF_AP, s_radio.ap_proto);
 

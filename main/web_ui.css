@@ -142,6 +142,34 @@ input[type=checkbox] { min-height: auto; accent-color: var(--mypi-orange); }
 button { cursor: pointer; }
 button:hover { border-color: var(--mypi-orange); }
 button.pw-toggle { min-height: 2.5rem; padding: .3rem .5rem; font-size: .85em; color: var(--mypi-muted, inherit); }
+/* Optimize page (v0.9.0): label | control | status per row */
+.opt-grid {
+  display: grid;
+  grid-template-columns: minmax(11rem, max-content) minmax(0, max-content) 1fr;
+  gap: .3rem 1rem;
+  align-items: center;
+  padding: .6rem .8rem;
+  border: 1px solid var(--mypi-line);
+  border-radius: .6rem;
+  background: var(--mypi-panel);
+}
+.opt-grid input { width: auto; }
+.opt-grid input[type=radio] { min-height: auto; accent-color: var(--mypi-orange); }
+.opt-l { color: var(--mypi-muted); }
+.opt-s { color: var(--mypi-muted); font-size: .9em; }
+.opt-banner {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  margin: .6rem 0;
+  padding: .5rem .8rem;
+  border: 1px solid #c9a227;
+  border-radius: .6rem;
+  background: #4a3c0b;
+  color: #ffe08a;
+  font-weight: 600;
+}
+.opt-banner[hidden] { display: none; }
 pre {
   max-width: 100%;
   overflow: auto;
@@ -171,5 +199,7 @@ code { overflow-wrap: anywhere; color: var(--mypi-orange); }
   .mypi-nav { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); }
   table { display: block; overflow-x: auto; white-space: nowrap; }
   fieldset label { display: inline-block; margin: .2rem 0; }
-  input:not([type=checkbox]), select { width: min(100%, 18rem) !important; }
+  input:not([type=checkbox]):not([type=radio]), select { width: min(100%, 18rem) !important; }
+  .opt-grid { grid-template-columns: 1fr; }
+  .opt-s { margin-bottom: .4rem; }
 }

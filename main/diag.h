@@ -95,6 +95,8 @@ void diag_start_heartbeat(void);
  * diag_debug_load() must run after nvs_flash_init().
  */
 void diag_debug_load(void);
+/** Re-apply the app tag log levels (debug mode, else the Optimize log level). */
+void diag_log_levels_refresh(void);
 bool diag_debug_enabled(void);
 esp_err_t diag_set_debug(bool on);
 

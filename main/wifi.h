@@ -138,3 +138,8 @@ void wifi_coproc_refresh(void);
  */
 bool wifi_rpc_lock(uint32_t timeout_ms);
 void wifi_rpc_unlock(void);
+
+/** Optimize tab (v0.9.0): re-apply the TX power cap (opt override, else radio setting) now. */
+void wifi_apply_tx_power(void);
+/** Optimize tab (v0.9.0): re-apply NAT on the running AP (profile NAT && opt master switch). */
+void wifi_apply_napt(void);
