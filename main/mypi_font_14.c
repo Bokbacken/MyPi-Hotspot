@@ -3,7 +3,7 @@
  * Swedish letters (Å Ä Ö å ä ö), Greek mu/pi and em dash.
  * Generated with lv_font_conv 1.5.x from DejaVuSans.ttf as shipped in
  * lvgl/scripts/built_in_font. DejaVu fonts are free software (Bitstream Vera /
- * DejaVu license, https://dejavu-fonts.github.io/License.html).
+ * DejaVu license, see assets/DejaVu-LICENSE.txt).
  * Regenerate: see docs/ARCHITECTURE.md ("Status font").
  */
 /*******************************************************************************
