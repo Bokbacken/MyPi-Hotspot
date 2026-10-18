@@ -26,8 +26,11 @@ describe the transitional UI, not an LVGL implementation.
   retains touch priority, and the existing boot rescue swipe and rescue screen remain
   ahead of normal menu handling.
 - Web pages use local, offline CSS/JavaScript shared by the dashboard, P4/C5 OTA, and
-  pins pages. The dashboard has task links, responsive layout, keyboard focus styling,
-  and a `Hotspot` divider generated from ASCII bytes framed as 8N1 UART data.
+  pins pages. All pages share one header (logo, `Hotspot`, right-aligned STA signal in
+  dBm from `/api/status`), a `Hotspot` divider generated from ASCII bytes framed as 8N1
+  UART data, and page buttons. Since 0.8.3 the dashboard is one HTML shell with
+  hash-routed pages (`/#overview`, `#wifi`, `#access-point`, `#traffic`, `#ethernet`,
+  `#system`, `#debug`; most used first, technical/debug last) — no extra URI handlers.
 
 The first scan result page shows up to eight networks; additional results require a
 future paging/scrolling interaction. If all ten STA profile slots are occupied, use
@@ -47,8 +50,9 @@ network dependency.
 
 UART dividers are data, not decorative bit strings: each ASCII byte is framed by one
 low start bit, eight data bits least-significant-bit first, and one high stop bit.
-The LCD encodes `H` as `0000100101` in left-to-right transmission order; the web
-divider encodes each character of the case-sensitive word `Hotspot` the same way.
+Since 0.8.3 both the LCD and the web divider encode the case-sensitive word `Hotspot`
+(7 bytes = 70 bits; `H` is `0000100101` in left-to-right transmission order). On the
+LCD the 70 bits span the full 240 px width (`mypi_uart_x_span()`, 3–4 px per bit).
 Future MyPi projects should use their own identifying first letter/word and preserve
 this framing rule.
 

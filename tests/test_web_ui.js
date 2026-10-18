@@ -1,7 +1,11 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { frame8n1, waveformPath } = require("../main/web_ui.js");
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  frame8n1, waveformPath, pageFromHash, showPage, rssiStep, rssiColor, staSignal,
+} = require("../main/web_ui.js");
 
 assert.deepEqual(frame8n1("H"), [0, 0, 0, 0, 1, 0, 0, 1, 0, 1]);
 
@@ -21,4 +25,54 @@ assert.equal(waveform.path.startsWith("M0 23"), true);
 assert.equal(waveform.path.endsWith("H70"), true);
 assert.equal((waveform.path.match(/ V/g) || []).length, 5);
 
-console.log("Web UI serial tests passed");
+// Hash routing: unknown/empty hashes fall back to the first (most used) page.
+assert.equal(pageFromHash(""), "overview");
+assert.equal(pageFromHash("#wifi"), "wifi");
+assert.equal(pageFromHash("#DEBUG"), "debug");
+assert.equal(pageFromHash("#diagnostics"), "debug");
+assert.equal(pageFromHash("#nope"), "overview");
+
+function fakeElement(attrs) {
+  const classes = new Set();
+  return {
+    hidden: false,
+    dataset: attrs.dataset || {},
+    attrs: { ...attrs.attrs },
+    getAttribute(name) { return this.attrs[name]; },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    removeAttribute(name) { delete this.attrs[name]; },
+    classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); }, has: (n) => classes.has(n) },
+  };
+}
+const pages = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "debug"];
+const sections = pages.map((page) => fakeElement({ dataset: { page } }));
+const links = pages.map((page) => fakeElement({ attrs: { href: `/#${page}` } }));
+const fakeDoc = {
+  querySelectorAll(selector) { return selector.startsWith("section") ? sections : links; },
+};
+assert.equal(showPage(fakeDoc, "#traffic"), "traffic");
+assert.deepEqual(sections.map((s) => s.hidden), pages.map((p) => p !== "traffic"));
+assert.equal(links[3].classList.has("active"), true);
+assert.equal(links[3].getAttribute("aria-current"), "page");
+assert.equal(links[0].classList.has("active"), false);
+assert.equal(showPage({ querySelectorAll: () => [] }, "#wifi"), null);
+
+// The shell in web.c contains exactly these pages, in this order, plus matching nav buttons.
+const webC = fs.readFileSync(path.join(__dirname, "../main/web.c"), "utf8");
+assert.deepEqual([...webC.matchAll(/data-page='([a-z-]+)'/g)].map((m) => m[1]), pages);
+assert.deepEqual([...webC.matchAll(/<a href='\/#([a-z-]+)'>/g)].map((m) => m[1]), pages);
+
+// RSSI gradient: 20 steps red (<= -80) to green (>= -40), same as the LCD.
+assert.equal(rssiStep(-90), 0);
+assert.equal(rssiStep(-80), 0);
+assert.equal(rssiStep(-40), 19);
+assert.equal(rssiStep(-30), 19);
+assert.equal(new Set(Array.from({ length: 41 }, (_, i) => rssiStep(-80 + i))).size, 20);
+assert.equal(rssiColor(-85), "rgb(255,0,0)");
+assert.equal(rssiColor(-35), "rgb(0,255,0)");
+assert.deepEqual(staSignal({ wifi_state: "connected", rssi: -56 }), { text: "-56 dBm", color: rssiColor(-56) });
+assert.equal(staSignal({ wifi_state: "disconnected", rssi: -56 }).text, "\u2014");
+assert.equal(staSignal({ wifi_state: "connected", rssi: 0 }).text, "\u2014");
+assert.equal(staSignal(null).text, "\u2014");
+
+console.log("Web UI serial, routing and signal tests passed");

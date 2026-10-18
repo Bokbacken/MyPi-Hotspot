@@ -6,13 +6,17 @@ Firmware for a small Wi-Fi hotspot device built on the **Waveshare ESP32-P4-NANO
 Version history: [CHANGELOG.md](CHANGELOG.md) · Project status, decisions and test checklist: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) ·
 [Next steps and UI conventions](docs/NEXT_STEPS.md) · [MyPi platform direction](docs/ARCHITECTURE.md)
 
-**MyPi LVGL migration groundwork:** the default local UI remains unchanged.
-An opt-in LVGL home status viewport starts the shared MyPi platform migration,
-keeping backend/API, touch, OTA and rescue paths intact.
-See [migration boundaries](docs/ARCHITECTURE.md#first-lvgl-migration-increment)
-for the build option, UTF-8/font limitations and validation plan.
+**MyPi LVGL migration:** since 0.8.3 LVGL 9.4.0 is the standard (and only) local UI
+path: the home status viewport is rendered by LVGL with a MyPi font (ASCII, å ä ö,
+μ/π), and touch is fed to an LVGL pointer input device. Backend/API, OTA and rescue
+paths are unchanged. See [migration boundaries](docs/ARCHITECTURE.md#lvgl-migration).
 
-Current firmware release: **0.8.1** — the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
+**0.8.3** (builds, not yet hardware-tested): web dashboard split into pages
+(Overview, Wi-Fi, Access point, Traffic, Ethernet, System, Debug) with a new header
+showing the STA signal in dBm; LCD Wi-Fi icon with a 20-step red→green RSSI gradient
+and a full-width `Hotspot` 8N1 divider.
+
+Current firmware release: **0.8.3** (see above and [CHANGELOG.md](CHANGELOG.md)); 0.8.1 introduced the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an **Ethernet emergency mode** (see [Emergency mode](#emergency-mode-ethernet-rescue-v070)), an interactive **LCD menu** with a Wi-Fi character-wheel flow and OTA progress view, Wi-Fi uplink + own access point
 (APSTA with NAT), Ethernet as WAN or LAN, STA/AP profiles, traffic stats with peak rates, a CSV traffic log, an iperf throughput test,
 a responsive web dashboard and over-the-air (OTA) updates (see [Wi-Fi, AP & Ethernet](#wi-fi-ap--ethernet)). v0.8.1 (logo/header on top of the v0.8.0 UI) builds cleanly but is not yet hardware-tested. Diagnostics
 are quiet by default and can be switched on at any time with **debug mode** (see [Debug mode](#debug-mode)).
@@ -26,16 +30,17 @@ are quiet by default and can be switched on at any time with **debug mode** (see
 | Swipe down during first 10 s | Enter Ethernet emergency mode (>= 60 px, rotation-corrected coordinates) |
 | Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
-| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): dashboard, settings, diagnostics, OTA |
+| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): pages Overview, Wi-Fi, Access point, Traffic, Ethernet, System (radio, display, OTA links), Debug (pins, touch, log) |
 
-The current firmware uses no LVGL — just `esp_lcd` (built into ESP-IDF), raw I2C,
-and ESP-Hosted for Wi-Fi. [LVGL is the chosen future MyPi UI direction](docs/ARCHITECTURE.md),
-not implemented in this firmware.
+The firmware uses LVGL 9.4.0 on top of `esp_lcd` (built into ESP-IDF), raw I2C for
+touch, and ESP-Hosted for Wi-Fi. [LVGL migration status](docs/ARCHITECTURE.md#lvgl-migration):
+the home status area is LVGL; header, menus, OTA and rescue views still use the
+transitional renderer.
 A failing display or touch controller is logged but does **not** stop Wi-Fi/web, so you can always
 read the diagnostics remotely.
 
-The display and web divider use generated 8N1 serial waveforms (`H` on the LCD and
-`Hotspot` on the web). The shared web styles/scripts are local embedded assets; see
+The display and web divider use generated 8N1 serial waveforms of the word `Hotspot`
+(full screen width on the LCD). The shared web styles/scripts are local embedded assets; see
 [local UI navigation, asset maintenance, validation, and future ideas](docs/NEXT_STEPS.md).
 The exact merged μ/π logo asset is not present in this checkout; the private Companion
 asset could not be accessed for this update, so no substitute logo has been used.

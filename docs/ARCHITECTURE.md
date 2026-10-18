@@ -33,15 +33,13 @@ functionality. Current Hotspot/Companion-style LCD and web presentation code is 
 transitional layer: keep it working now, but allow its rendering and layout to be
 replaced later without discarding product functionality or MyPi identity.
 
-## First LVGL migration increment
+## LVGL migration
 
-LVGL 9.4.0 is now a pinned ESP-IDF managed dependency. The default firmware still
-uses the existing UI. In `idf.py menuconfig`, enable **MyPi-Hotspot → Display →
-Experimental MyPi LVGL home status viewport** (`CONFIG_MYPI_UI_LVGL`) to evaluate
-the first read-only region. Build and flash/OTA using the existing workflow;
-there are no partition, endpoint, networking, profile, or update-format changes.
-This is MyPi platform groundwork, not a replacement Hotspot UI or a
-hardware-validated release.
+LVGL 9.4.0 is a pinned ESP-IDF managed dependency and, since 0.8.3, the standard and
+only local UI path (the `CONFIG_MYPI_UI_LVGL` option and the `sdkconfig.lvgl` overlay
+were removed; `sdkconfig.defaults` requires `CONFIG_LV_TXT_ENC_UTF8` and
+`CONFIG_LV_USE_LABEL`, enforced by an `#error` in `ui_lvgl_port.c`). There are no
+partition, endpoint, networking, profile, or update-format changes.
 
 ### Boundaries
 
@@ -51,45 +49,75 @@ hardware-validated release.
 - `main/mypi_ui/lvgl_view.*` copies that state into LVGL labels. It knows neither
   ESP-IDF nor Hotspot, and sizes itself to its parent so future Arduino or other
   ports can reuse it on different screens.
-- `main/ui_lvgl_port.*` alone connects LVGL to the current display framebuffer
-  and ESP timer. Its partial RGB565 buffer is 9,600 bytes. The existing display
-  driver retains rotation, locking, SPI/DMA completion and wire byte swapping.
+- `main/ui_lvgl_port.*` alone connects LVGL to the current display framebuffer,
+  ESP timer and touch samples. Its partial RGB565 buffer is 9,600 bytes. The existing
+  display driver retains rotation, locking, SPI/DMA completion and wire byte swapping.
   Flush-ready means pixels have been copied into the framebuffer; the existing
-  caller flushes that framebuffer to the panel afterwards.
+  caller flushes that framebuffer to the panel afterwards. Pixels are only written
+  during `ui_lvgl_port_render()`; a refresh started from `lv_timer_handler()` never
+  draws over menus, OTA or rescue views.
 - `main/display_ui.c` adapts existing public backend getters to the shared state.
-  Only the home status area (y=32..231) uses LVGL when enabled. The canonical logo,
-  8N1 serial dividers, status header, menu button, other pages, OTA and rescue
-  continue using the existing paths. Failure to create the LVGL display falls back
-  to the existing home view; this is not a general out-of-memory recovery guarantee.
+  The home status area (y=32..231) uses LVGL. The canonical logo, 8N1 serial dividers,
+  status header, menu button, other pages, OTA and rescue continue using the
+  transitional renderer. If LVGL cannot be initialized, the home view falls back to
+  plain-text status lines; this is not a general out-of-memory recovery guarantee.
 
-The existing `display_ui` task owns **all** LVGL calls, including init/deinit.
-The opt-in build gives it an 8 KiB stack instead of 4 KiB. Rendering is synchronous
-via `lv_refr_now()` at the existing status cadence, with a full viewport invalidation
-on each render because legacy pages may have overwritten it. No new task, timer
-handler, animations, or LVGL input device is introduced yet. Touch remains owned
-by the existing main loop; do not poll the controller a second time from LVGL.
-OTA and rescue retain precedence in that render loop, including the boot rescue
-swipe.
+The `display_ui` task (8 KiB stack) owns **all** LVGL calls: init/deinit, rendering
+via `lv_refr_now()` at the status cadence (full viewport invalidation on each render
+because transitional pages may have overwritten it) and `lv_timer_handler()` every
+UI tick (200 ms) while the normal UI is shown. OTA and rescue keep precedence in that
+loop (OTA view > rescue > normal UI), including the boot rescue swipe.
+
+### Touch input (step 4, 0.8.3)
+
+The main loop remains the single owner of the CST816D: it calls `touch_read()`
+(rotation-corrected coordinates) and publishes each sample through
+`ui_lvgl_port_touch_feed()` into a spinlock-protected latest-sample slot. The LVGL
+pointer indev (`LV_INDEV_TYPE_POINTER`) reads that slot in its `read_cb`, which runs
+inside `lv_timer_handler()` on the UI task — the controller is never polled twice.
+Coordinates are translated into the 240×200 viewport; touches outside it (header,
+menu button) are reported as released. While the OTA view is visible the feed reports
+released. Tap navigation, swipe-to-rescue and rescue option hits stay in the main loop
+(`display_ui_handle_tap()`, `display_ui_rescue_hit()`), so behavior is unchanged until
+pages are migrated to interactive LVGL widgets.
+
+### Status font
+
+`main/mypi_font_14.c` is DejaVu Sans 14 px, 4 bpp (license: `assets/DejaVu-LICENSE.txt`),
+covering ASCII, `°`, `µ`, `Å Ä Ö å ä ö`, Greek `μ π` and `—`. It is set on the status
+view root, so all labels inherit it. Regenerate with
+[lv_font_conv](https://github.com/lvgl/lv_font_conv) 1.5.3:
+
+```sh
+npx lv_font_conv --no-compress --font DejaVuSans.ttf --size 14 --bpp 4 \
+  --range 0x20-0x7E,0xB0,0xB5,0xC4,0xC5,0xD6,0xE4,0xE5,0xF6,0x3BC,0x3C0,0x2014 \
+  --format lvgl --lv-include lvgl.h --lv-font-name mypi_font_14 -o main/mypi_font_14.c
+```
 
 UTF-8 bytes are passed to `lv_label_set_text()` without normalization, transliteration,
-or byte-based abbreviation. Long labels are visually clipped, not rewritten.
-The initial LVGL default font does **not** cover all Unicode glyphs; missing-glyph
-boxes are a known evaluation limitation, not a change to stored/API text.
+or byte-based abbreviation. Long labels are visually clipped, not rewritten. Glyphs
+outside the subset (e.g. other accented letters) render as missing-glyph boxes; stored
+and API text is never changed.
 
-### Next increments and validation
+### Steps and validation
 
-1. Hardware-test both build configurations: home/menu/back, rotation, boot rescue
-   swipe and options, P4/C5 OTA progress/failure, and unchanged web/API behavior.
-2. Choose shared fonts with explicit glyph coverage, then migrate the identity
-   header/dividers and navigation widgets without changing their meaning.
-3. Feed rotation-corrected press/release samples from the existing touch owner
-   through a thin adapter to LVGL, preserving rescue interception. Add regular
-   tick/timer handling on the same UI owner before introducing interactive widgets.
-4. Migrate one functional page at a time; keep backend jobs/commands outside the
-   renderer. Remove legacy rendering only after parity and hardware validation.
+1. Done (0.8.2, HW-tested): read-only LVGL home status viewport.
+2. Done (0.8.3): LVGL is the standard build; shared font with explicit glyph coverage.
+3. Next: migrate the identity header/dividers and navigation widgets without changing
+   their meaning.
+4. Done (0.8.3, not yet HW-tested): rotation-corrected touch samples from the existing
+   touch owner feed an LVGL pointer indev through a thin adapter; rescue/OTA intercept
+   preserved; tick/timer handling on the UI task.
+5. Next: migrate one functional page at a time (menu first); keep backend
+   jobs/commands outside the renderer. Remove the transitional renderer only after
+   parity and hardware validation.
+
+Hardware checklist for 0.8.3: home/menu/back taps, rotation, boot rescue swipe and
+options, P4/C5 OTA progress/failure, Swedish/μπ glyphs, RSSI icon color, full-width
+divider, unchanged web/API behavior.
 
 `tests/test_mypi_ui.c` exercises the shared view using real LVGL at two viewport
-sizes, including UTF-8 byte preservation, copied snapshot lifetime, row clearing,
+sizes and the MyPi font glyph coverage (å ä ö Å Ä Ö µ μ π), including UTF-8 byte preservation, copied snapshot lifetime, row clearing,
 invalid state rejection and partial rendering. It follows the existing host C
 assert-test approach. With the pinned LVGL source extracted outside the repository,
 the host commands are (run the final two commands from the repository root):
@@ -102,7 +130,7 @@ cmake -S <lvgl-source> -B /tmp/mypi-lvgl-host \
   -DCONFIG_LV_USE_THORVG_INTERNAL=OFF
 cmake --build /tmp/mypi-lvgl-host -j4
 cc -std=c11 -Wall -Wextra -Werror -DLV_CONF_PATH='"/tmp/mypi-lv-conf.h"' \
-  -Imain -I<lvgl-source> tests/test_mypi_ui.c main/mypi_ui/lvgl_view.c \
+  -Imain -I<lvgl-source> tests/test_mypi_ui.c main/mypi_ui/lvgl_view.c main/mypi_font_14.c \
   /tmp/mypi-lvgl-host/lib/liblvgl.a -lm -o /tmp/test_mypi_ui
 /tmp/test_mypi_ui
 ```

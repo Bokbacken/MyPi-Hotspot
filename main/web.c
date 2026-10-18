@@ -46,12 +46,20 @@ extern const char _binary_web_ui_js_end[];
 // Approved MyPi logo (white, transparent PNG data URI from tools/render_header_logo.py).
 #include "header_logo.h"
 
+// Shared header: logo + "Hotspot" + right-aligned STA Wi-Fi/dBm (filled by /ui.js from /api/status),
+// the 8N1 "Hotspot" divider, then page buttons. Dashboard pages are hash routes of "/", so the
+// same buttons work from /update, /c5update and /pins too.
 #define MYPI_BRAND_HEADER \
-    "<header class='mypi-brand'><div class='mypi-divider'>" \
+    "<header class='mypi-brand'><div class='mypi-head'>" \
     "<img class='mypi-logo' src='" HEADER_LOGO_URI "' alt='MyPi' width='40' height='32'>" \
-    "<svg data-text='Hotspot'></svg><span class='mypi-project'>Hotspot</span></div>" \
-    "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/'>Dashboard</a>" \
-    "<a href='/update'>P4 OTA</a><a href='/c5update'>C5 OTA</a><a href='/pins'>Pins</a></nav></header>"
+    "<span class='mypi-project'>Hotspot</span>" \
+    "<span class='mypi-wifi' id='mypi-wifi' title='Wi-Fi uplink (STA) signal'>" \
+    "<svg viewBox='0 0 24 18' aria-hidden='true'><path d='M2 7a14 14 0 0 1 20 0M5.5 10.5a9 9 0 0 1 13 0M9 14a4 4 0 0 1 6 0'/>" \
+    "<circle cx='12' cy='16.5' r='1.5'/></svg><span>Wi-Fi</span> <b id='mypi-dbm'>&mdash;</b></span></div>" \
+    "<div class='mypi-divider'><svg data-text='Hotspot'></svg></div>" \
+    "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/#overview'>Overview</a><a href='/#wifi'>Wi-Fi</a>" \
+    "<a href='/#access-point'>Access point</a><a href='/#traffic'>Traffic</a><a href='/#ethernet'>Ethernet</a>" \
+    "<a href='/#system'>System</a><a href='/#debug'>Debug</a></nav></header>"
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -69,30 +77,33 @@ static const char INDEX_HTML[] =
 "fieldset{border:1px solid #444;margin:.5em 0}#msg{color:#fc6}"
 ".bad{color:#f66}.ok{color:#6f6}</style><link rel='stylesheet' href='/ui.css'></head><body>"
 MYPI_BRAND_HEADER
-"<nav class='nav-tiles' aria-label='Dashboard sections'><a href='#overview'>Overview</a><a href='#traffic'>Traffic</a>"
-"<a href='#wifi'>Wi-Fi uplink</a><a href='#access-point'>Access point</a><a href='#ethernet'>Ethernet</a>"
-"<a href='#system'>System</a><a href='#diagnostics'>Diagnostics</a></nav>"
-"<h1>Hotspot control panel</h1><p><a href='/api/status'>Status API</a> | <a href='/api/log'>Device log</a></p>"
 "<p id='msg'></p>"
-"<h2 id='overview'>Overview</h2><table id='t'></table>"
-"<h2 id='traffic'>Network traffic</h2><table id='ns'></table>"
-"<p><button onclick='resetPeaks()'>Reset peaks</button> <button id='lb' onclick='logToggle()'>Start log</button> "
-"<button onclick='dlLog()'>Download CSV</button> <span id='lst'></span></p>"
-"<h2 id='wifi'>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
+"<section class='page' data-page='overview'><h2>Overview</h2><table id='t'></table></section>"
+"<section class='page' data-page='wifi'><h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
 "<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
 "<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
 "<fieldset><legend>Edit STA profile</legend>Slot <select id='ss'></select> SSID <input id='sn'> "
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
-"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
-"<h2 id='access-point'>Access point (AP profiles)</h2><p id='aps'></p>"
+"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset></section>"
+"<section class='page' data-page='access-point'><h2>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
 "<fieldset><legend>Edit AP profile</legend>Slot <select id='as'></select> SSID <input id='an'> "
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
-"<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset>"
-"<h2 id='system'>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
+"<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset></section>"
+"<section class='page' data-page='traffic'><h2>Network traffic</h2><table id='ns'></table>"
+"<p><button onclick='resetPeaks()'>Reset peaks</button> <button id='lb' onclick='logToggle()'>Start log</button> "
+"<button onclick='dlLog()'>Download CSV</button> <span id='lst'></span></p>"
+"<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
+"<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
+"<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
+"NAT path: put a phone/PC on the AP and run an internet speed test.</small></p></section>"
+"<section class='page' data-page='ethernet'><h2>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
+"<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
+"<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p></section>"
+"<section class='page' data-page='system'><h2>Radio (band / width / protocols / power)</h2><table id='rd'></table>"
 "<p>STA width <select id='rsb'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select> AP width <select id='rab'><option value='0'>auto</option><option value='1'>20</option><option value='2'>40</option></select><br>"
 "STA protocols <label><input type='checkbox' id='sta-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='sta-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='sta-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='sta-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='sta-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='sta-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='sta-proto-def'></span><br>"
 "AP protocols <label><input type='checkbox' id='ap-proto-b' style='width:auto' onchange=protoHint()>b</label> <label><input type='checkbox' id='ap-proto-g' style='width:auto' onchange=protoHint()>g</label> <label><input type='checkbox' id='ap-proto-n' style='width:auto' onchange=protoHint()>n</label> <label><input type='checkbox' id='ap-proto-a' style='width:auto' onchange=protoHint()>a</label> <label><input type='checkbox' id='ap-proto-ac' style='width:auto' onchange=protoHint()>ac</label> <label><input type='checkbox' id='ap-proto-ax' style='width:auto' disabled title='disabled until a fixed C5 radio firmware'>ax (off)</label> <span id='ap-proto-def'></span><br>"
@@ -104,16 +115,13 @@ MYPI_BRAND_HEADER
 "<small>Width in MHz (auto = driver default / negotiated). Max 40 MHz (ESP32-C5). Protocols: none checked = default (b/g/n on 2.4 GHz, a/n/ac on 5 GHz); 11ax is disabled until a fixed C5 radio firmware is available (TX hang with ax + TCP upload, ESP-IDF #19238). TX power 2-21 dBm. The driver caps DTIM at 10. STA and AP share one radio and one channel. Changes take effect after a reboot.</small></p>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
-"<h2 id='ethernet'>Ethernet</h2><p id='es'></p><p>Mode <select id='em'><option value='lan'>LAN (bridged to the AP: same subnet as Wi-Fi clients)</option>"
-"<option value='wan'>WAN (DHCP client, uplink)</option></select> <button onclick='saveEth()'>Save</button> "
-"<button onclick='reboot()'>Reboot</button> <small>(mode change takes effect after a reboot)</small></p>"
-"<h2>Throughput test (iperf server)</h2><p>Window <input id='iw' value='300' style='width:5em'> s "
-"<button onclick='ipStart()'>Arm</button> <button onclick='ipStop()'>Stop</button> <span id='is'></span></p>"
-"<p><small>From a PC: <code>iperf -c &lt;device IP&gt; -t 10 -i 1</code> (iperf2, TCP port 5001). "
-"NAT path: put a phone/PC on the AP and run an internet speed test.</small></p>"
-"<h2 id='diagnostics'>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
+"<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
+"<button onclick='reboot()'>Reboot</button></p></section>"
+"<section class='page' data-page='debug'><h2>Diagnostics</h2><p class='links'><a href='/pins'>Pin test &amp; wiring check</a> "
+"<a href='/api/status'>Status API</a> <a href='/api/log'>Device log (raw)</a></p>"
+"<h2>Last touch events</h2><pre id='touch' style='height:auto'></pre>"
 "<h2>Log <label style='font-size:.8em'><input type='checkbox' id='follow' style='width:auto' checked> follow</label></h2>"
-"<pre id='log'></pre><script>"
+"<pre id='log'></pre></section><script>"
 "function $(i){return document.getElementById(i)}"
 "function esc(s){return String(s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';')}"
 "function band(c){return c>14?'5 GHz':'2.4 GHz'}"

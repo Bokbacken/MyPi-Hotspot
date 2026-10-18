@@ -51,6 +51,39 @@ static void test_waveform_geometry(void)
     }
 }
 
+static void test_full_width_divider(void)
+{
+    // LCD divider: the whole word "Hotspot" (70 bits) spread over the 240 px screen width.
+    uint8_t bits[8 * MYPI_UART_BITS_PER_BYTE];
+    size_t total = mypi_uart_frame_text("Hotspot", bits, sizeof(bits));
+    assert(total == 70);
+    assert(mypi_uart_x_span(0, 0, total, 240) == 0);
+    assert(mypi_uart_x_span(0, total, total, 240) == 240);
+    assert(mypi_uart_x_span(5, total, total, 240) == 245);
+    for (size_t i = 0; i < total; i++) {
+        int w = mypi_uart_x_span(0, i + 1, total, 240) - mypi_uart_x_span(0, i, total, 240);
+        assert(w == 3 || w == 4);   // 240/70 = 3.43 px per bit, no gaps or overlaps
+    }
+    assert(mypi_uart_x_span(7, 3, 0, 240) == 7);
+}
+
+static void test_rssi_color_steps(void)
+{
+    assert(mypi_rssi_color_step(-95) == 0);
+    assert(mypi_rssi_color_step(-80) == 0);
+    assert(mypi_rssi_color_step(-40) == MYPI_RSSI_COLOR_STEPS - 1);
+    assert(mypi_rssi_color_step(-20) == MYPI_RSSI_COLOR_STEPS - 1);
+    int seen[MYPI_RSSI_COLOR_STEPS] = {0};
+    int previous = 0;
+    for (int rssi = -80; rssi <= -40; rssi++) {
+        int step = mypi_rssi_color_step(rssi);
+        assert(step >= previous && step - previous <= 1);
+        seen[step] = 1;
+        previous = step;
+    }
+    for (int i = 0; i < MYPI_RSSI_COLOR_STEPS; i++) assert(seen[i]);
+}
+
 static void test_password_utf8_and_length(void)
 {
     char password[64] = "";
@@ -107,6 +140,8 @@ int main(void)
 {
     test_serial();
     test_waveform_geometry();
+    test_full_width_divider();
+    test_rssi_color_steps();
     test_password_utf8_and_length();
     test_touch_geometry();
     puts("UI primitive tests passed");

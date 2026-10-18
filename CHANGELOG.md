@@ -5,6 +5,32 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.3 — LVGL standard, touch → LVGL, paged web UI (builds, not hardware-tested)
+- **LVGL is the standard and only UI path.** Removed `CONFIG_MYPI_UI_LVGL` and the
+  `sdkconfig.lvgl` overlay; `ui_lvgl_port.c`, `mypi_ui/lvgl_view.c` are always built and
+  the `display_ui` task always has an 8 KiB stack. If LVGL init fails, the home view
+  falls back to plain-text status lines.
+- **Touch → LVGL (ARCHITECTURE step 4):** the main touch loop publishes rotation-corrected
+  samples (`ui_lvgl_port_touch_feed()`, spinlock) to an LVGL pointer indev; `read_cb` and
+  `lv_timer_handler()` run only on the UI task. OTA > rescue > normal UI priority and the
+  existing tap/swipe navigation are unchanged. LVGL pixels are only written during the
+  synchronous status render, never over menus/OTA/rescue.
+- **MyPi status font** `main/mypi_font_14.c` (DejaVu Sans 14 px, 4 bpp, generated with
+  lv_font_conv 1.5.3): ASCII + `° µ Å Ä Ö å ä ö μ π —`; used by all LVGL status lines.
+- **LCD Wi-Fi icon:** 20-step linear red (≤ -80 dBm) → green (≥ -40 dBm) gradient
+  (`mypi_rssi_color_step()` in `ui_layout.h`); not-connected handling unchanged.
+- **LCD divider:** the 8N1 waveform now encodes the whole word `Hotspot` (70 bits) over
+  the full 240 px width (`mypi_uart_x_span()`), same 8 px height, header and home bottom.
+- **Web header:** more space around the logo, larger `Hotspot`, right-aligned Wi-Fi icon +
+  STA RSSI (e.g. `-56 dBm`, same color gradient, `—` when not connected; polled from
+  `/api/status` every 5 s), divider with margin above and below, page buttons below it.
+- **Web pages:** the long dashboard is split into hash-routed pages in one HTML shell:
+  Overview → Wi-Fi → Access point (incl. clients) → Traffic (incl. iperf) → Ethernet →
+  System (radio, display rotation, P4/C5 OTA links, reboot) → Debug (pins, status/log
+  API, touch events, log). Same 39 URI handlers; all APIs and `/update`, `/c5update`,
+  `/pins` unchanged.
+- Tests: new full-width divider and RSSI-step tests (C), routing/RSSI/page-order tests (JS).
+
 ## 0.8.2 — LVGL foundation build (LVGL variant HW-tested)
 - **HW-tested:** the `sdkconfig.lvgl` variant was flashed via `/update`; the LVGL
   status viewport renders correctly and normal operation works. This also covers the

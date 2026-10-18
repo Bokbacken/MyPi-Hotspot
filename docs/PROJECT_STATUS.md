@@ -38,7 +38,8 @@ P4/C5 OTA paths are unchanged.
 | LCD menu + web theme (v0.8.0) | HW-tested |
 | μ/π logo header, antialiased title, RSSI-colored Wi-Fi icon (v0.8.1) | HW-tested as part of the v0.8.2 LVGL build |
 | LVGL 9.4.0 home status viewport, `CONFIG_MYPI_UI_LVGL=y` (v0.8.2, `sdkconfig.lvgl`) | HW-tested (display and normal operation OK) |
-| v0.8.2 default build (`CONFIG_MYPI_UI_LVGL=n`) | Builds; not separately flashed |
+| v0.8.2 default build (`CONFIG_MYPI_UI_LVGL=n`) | Builds; not separately flashed (option removed in 0.8.3) |
+| v0.8.3: LVGL standard, touch → LVGL pointer indev, MyPi font (å ä ö μ π), 20-step RSSI icon color, full-width `Hotspot` LCD divider, paged web UI with dBm header | Builds (0 warnings), host tests pass; not yet hardware-tested |
 
 ## Architecture in short
 
