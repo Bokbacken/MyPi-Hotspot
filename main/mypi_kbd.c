@@ -11,6 +11,10 @@ LV_FONT_DECLARE(mypi_font_14);
 #define KBD_MAGIC      0x4B424431u     // "KBD1"
 #define KBD_ROWS       5
 #define KBD_BUTTONS    4
+// Finger travel per character step, in percent of a small wheel row (~29 px on 240x320).
+// Distance-based (not time-based), so it also acts as the wheel's debounce/inertia.
+/* v0.8.8: slowed scroll debounce per user feedback */
+#define MYPI_KBD_SCROLL_STEP_PCT 100   // Was 50 (half a row) in 0.8.7
 #define COL_BG         0x000000
 #define COL_TEXT       0xFFFFFF
 #define COL_MUTED      0x8C8C8C
@@ -151,7 +155,7 @@ static void wheel_event(lv_event_t *e)
     lv_indev_t *indev = lv_indev_active();
     if (k->closing || !indev) return;
     int32_t small_h = k->row_y[1] - k->row_y[0];
-    int32_t step_px = LV_MAX(4, small_h / 2);           // One character per half row height
+    int32_t step_px = LV_MAX(8, small_h * MYPI_KBD_SCROLL_STEP_PCT / 100);
     int32_t slop = LV_MAX(6, small_h / 3);
     int32_t swipe_px = LV_MAX(24, lv_obj_get_width(k->wheel) / 5);
     bool changed = false;
@@ -202,6 +206,17 @@ static void wheel_event(lv_event_t *e)
     }
 }
 
+// Calls the owner with a private copy of the text, so the owner may close the keyboard
+// (which wipes core.text) inside the callback and still use the text it was given.
+static void notify(kbd_t *k, bool confirmed)
+{
+    char copy[MYPI_KBD_TEXT_CAP];
+    if (!k->cb) return;
+    snprintf(copy, sizeof(copy), "%s", k->core.text);
+    k->cb(copy, confirmed, k->user);
+    memset(copy, 0, sizeof(copy));
+}
+
 static void button_event(lv_event_t *e)
 {
     kbd_t *k = (kbd_t *)lv_event_get_user_data(e);
@@ -211,7 +226,7 @@ static void button_event(lv_event_t *e)
     clear_hint(k);
     switch (id) {
     case 0:     // BACK: cancel, then close
-        if (k->cb) k->cb(k->core.text, false, k->user);
+        notify(k, false);
         mypi_kbd_delete(k->root);
         return;
     case 1:
@@ -221,7 +236,7 @@ static void button_event(lv_event_t *e)
         if (!mypi_kbd_insert(&k->core)) mypi_kbd_set_hint(k->root, "Max length reached");
         break;
     default:    // OK: the owner validates and closes
-        if (k->cb) k->cb(k->core.text, true, k->user);
+        notify(k, true);
         return;
     }
     refresh(k);

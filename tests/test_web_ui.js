@@ -81,4 +81,41 @@ assert.equal(shouldPollStatus(true, false), true);
 assert.equal(shouldPollStatus(true, true), false);
 assert.equal(shouldPollStatus(false, false), false);
 
+// Password Show/Hide toggle (v0.8.8): one button per password field, flips the type both ways.
+const { togglePassword, addPasswordToggles } = require("../main/web_ui.js");
+assert.equal((webC.match(/type='password'/g) || []).length >= 2, true);
+function fakeInput(id) {
+  return { id, type: "password", dataset: {}, after: null,
+    insertAdjacentElement(where, el) { assert.equal(where, "afterend"); this.after = el; } };
+}
+function fakeButton() {
+  const b = { attrs: {}, listeners: {}, textContent: "", title: "",
+    setAttribute(n, v) { this.attrs[n] = v; }, getAttribute(n) { return this.attrs[n]; },
+    addEventListener(t, fn) { this.listeners[t] = fn; }, click() { this.listeners.click(); } };
+  return b;
+}
+const pwInputs = [fakeInput("spw"), fakeInput("apw")];
+const pwDoc = {
+  querySelectorAll(sel) { assert.equal(sel, "input[type=password]"); return pwInputs.filter((i) => i.type === "password"); },
+  createElement(tag) { assert.equal(tag, "button"); return fakeButton(); },
+};
+assert.equal(addPasswordToggles(pwDoc), 2);
+for (const input of pwInputs) {
+  const btn = input.after;
+  assert.ok(btn && btn.type === "button" && btn.className === "pw-toggle");
+  assert.equal(btn.getAttribute("aria-controls"), input.id);
+  btn.click();
+  assert.equal(input.type, "text");
+  assert.equal(btn.getAttribute("aria-pressed"), "true");
+  assert.match(btn.textContent, /Hide/);
+  btn.click();
+  assert.equal(input.type, "password");
+  assert.match(btn.textContent, /Show/);
+}
+assert.equal(addPasswordToggles(pwDoc), 2);           // Idempotent: no second button
+assert.equal(pwInputs.every((i) => i.dataset.pwToggle === "1"), true);
+const lone = fakeInput(""), loneBtn = fakeButton();
+assert.equal(togglePassword(lone, loneBtn), true);
+assert.equal(togglePassword(lone, loneBtn), false);
+
 console.log("Web UI serial, routing and signal tests passed");

@@ -5,6 +5,30 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.8 — 2026-10-18 (bugfix, builds, not hardware-tested)
+
+Fixes from the first hardware evaluation of the 0.8.7 keyboard.
+
+### Fixed
+- **Wi-Fi password lost on OK (profile saved as "open")**: `password_kbd_done()` in
+  `display_ui.c` closed the keyboard before queueing the connect job. Closing wipes the
+  keyboard's text buffer, and the callback's `text` pointed into that buffer, so the job
+  copied an empty string and `sta_profile_save()` stored an open profile. The callback now
+  copies the password first, queues the job, wipes its copy and only then closes. The module
+  itself (`mypi_kbd.c`) now also hands callbacks a private copy of the text, so any owner may
+  close the keyboard inside its callback. A log line reports the password length (never the
+  content) on OK. Regression test added in `tests/test_mypi_ui.c`.
+- **Scroll wheel too fast**: `MYPI_KBD_SCROLL_STEP_PCT` in `mypi_kbd.c` sets the finger travel
+  per character step; raised from 50 % to 100 % of a small wheel row (about 14 px to 29 px on
+  the 240x320 panel), so each step needs a deliberate movement.
+
+### Changed
+- The Wi-Fi password on the LCD is shown in plain text during evaluation (`mask=false` in the
+  `ui_lvgl_port_kbd_open()` call). The module still honors `mask=true` for other callers.
+- Web UI: every password field (STA and AP profile forms) gets a small "Show"/"Hide" button
+  that toggles the input between `type="password"` and `type="text"` (vanilla JS in
+  `web_ui.js`, added automatically to any `input[type=password]`).
+
 ## 0.8.7 — 2026-10-18 (builds, not hardware-tested)
 - **New reusable scroll-wheel keyboard module (`main/mypi_kbd.c/.h`, LVGL):** Companion-style
   text input — field with label, text and cursor; range tabs `az AZ 09 #+ åä`; hint row

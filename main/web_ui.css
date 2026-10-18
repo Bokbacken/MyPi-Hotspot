@@ -141,6 +141,7 @@ input, select, button {
 input[type=checkbox] { min-height: auto; accent-color: var(--mypi-orange); }
 button { cursor: pointer; }
 button:hover { border-color: var(--mypi-orange); }
+button.pw-toggle { min-height: 2.5rem; padding: .3rem .5rem; font-size: .85em; color: var(--mypi-muted, inherit); }
 pre {
   max-width: 100%;
   overflow: auto;

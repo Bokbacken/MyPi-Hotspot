@@ -108,6 +108,18 @@ static void kbd_delete_cb(lv_event_t *e)
     kbd_deleted++;
 }
 
+// v0.8.8 regression: the owner closes the keyboard inside the OK callback (as display_ui does)
+// and must still see the text it was handed; 0.8.7 passed a pointer into the wiped buffer.
+static lv_obj_t *closing_kbd;
+static void kbd_close_first_cb(const char *text, bool confirmed, void *user)
+{
+    (void)user;
+    mypi_kbd_delete(closing_kbd);
+    snprintf(kbd_last, sizeof(kbd_last), "%s", text);
+    kbd_confirmed = confirmed;
+    kbd_calls++;
+}
+
 static void click(lv_obj_t *kbd, int button)    // 0 BACK, 1 DEL, 2 NEXT, 3 OK (last 4 children)
 {
     lv_obj_send_event(lv_obj_get_child(kbd, button - 4), LV_EVENT_CLICKED, NULL);
@@ -165,6 +177,18 @@ static void test_kbd(int width, int height, int x, int y, int w, int h)
     }
     assert(kbd_deleted == 1);
     assert(mypi_kbd_create(screen, 0, 0, 20, 20, MYPI_KBD_STYLE_WHEEL, "", "", 8, false, NULL, NULL) == NULL);
+
+    kbd_calls = 0;
+    closing_kbd = mypi_kbd_create(screen, x, y, w, h, MYPI_KBD_STYLE_WHEEL, "Password", "secret12",
+                                  63, false, kbd_close_first_cb, NULL);
+    assert(closing_kbd);
+    click(closing_kbd, 3);                           // OK -> callback closes first, then reads text
+    assert(kbd_calls == 1 && kbd_confirmed && strcmp(kbd_last, "secret12") == 0);
+    assert(mypi_kbd_get_text(closing_kbd) == NULL);  // Module buffer is wiped
+    for (int i = 0; i < 5; i++) {
+        lv_tick_inc(40);
+        lv_timer_handler();
+    }
     lv_display_delete(display);
 }
 
@@ -234,7 +258,11 @@ static void test_kbd_gestures(void)
     int32_t cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
     int32_t small = lv_obj_get_height(wheel) * 20 / 112;
 
-    drag(cx, cy - small, 0, 3 * (small / 2) + 2);    // Finger down 3 half-rows: a -> x
+    drag(cx, cy - small, 0, small / 2);             // v0.8.8: half a row no longer steps
+    click(kbd, 2);
+    assert(*last_char(kbd) == 'a');
+    click(kbd, 1);
+    drag(cx, cy - 2 * small, 0, 3 * small + 2);     // Finger down 3 full rows: a -> x
     click(kbd, 2);
     assert(*last_char(kbd) == 'x');
     drag(cx + 60, cy, -100, 0);                     // Swipe left: next range (AZ)

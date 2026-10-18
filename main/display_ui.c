@@ -516,17 +516,23 @@ static void draw_wifi_scan(const ui_state_t *ui)
 static void password_kbd_done(const char *text, bool confirmed, void *user)
 {
     (void)user;
+    if (confirmed) ESP_LOGI(TAG, "Password keyboard OK, length %u bytes", (unsigned)strlen(text ? text : ""));
     if (confirmed && !mypi_wifi_pass_length_valid(text)) {
         ui_lvgl_port_kbd_set_hint("8-63 bytes, or empty = open");
         return;
     }
-    char ssid[33];
+    // v0.8.8: copy the password BEFORE closing. Closing the keyboard wipes its text buffer,
+    // and in 0.8.7 `text` pointed into that buffer, so the job got an empty password and
+    // the new profile was saved as an open network.
+    char ssid[33], pass[65];
+    strlcpy(pass, text ? text : "", sizeof(pass));
     portENTER_CRITICAL(&s_ui_mux);
     strlcpy(ssid, s_ui.password_ssid, sizeof(ssid));
     portEXIT_CRITICAL(&s_ui_mux);
-    ui_lvgl_port_kbd_close();
     // An empty password connects to an open network.
-    if (confirmed) ui_queue_job(UI_JOB_CONNECT, -1, ssid, text);
+    if (confirmed) ui_queue_job(UI_JOB_CONNECT, -1, ssid, pass);
+    memset(pass, 0, sizeof(pass));
+    ui_lvgl_port_kbd_close();
     portENTER_CRITICAL(&s_ui_mux);
     memset(s_ui.password, 0, sizeof(s_ui.password));
     if (s_ui.view == UI_PASSWORD) s_ui.view = UI_WIFI_SCAN;
@@ -541,7 +547,8 @@ static void password_kbd_open(void)
     strlcpy(ssid, s_ui.password_ssid, sizeof(ssid));
     portEXIT_CRITICAL(&s_ui_mux);
     snprintf(label, sizeof(label), "Password: %s", ssid);
-    if (!ui_lvgl_port_kbd_open(label, "", 63, true, password_kbd_done, NULL)) {
+    // v0.8.8: plain text (mask=false) during evaluation; typos are too easy with hidden input.
+    if (!ui_lvgl_port_kbd_open(label, "", 63, false, password_kbd_done, NULL)) {
         ui_set_message("Keyboard unavailable", false);
         portENTER_CRITICAL(&s_ui_mux);
         s_ui.view = UI_WIFI_SCAN;
