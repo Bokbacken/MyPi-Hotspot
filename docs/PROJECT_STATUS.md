@@ -1,6 +1,6 @@
 # MyPi-Hotspot — project status
 
-Snapshot: 2026-10-16, firmware **v0.7.0**. See `CHANGELOG.md` for the per-version list
+Snapshot: 2026-10-18, firmware **v0.9.8**. See `CHANGELOG.md` for the per-version list
 and `README.md` for wiring, flashing and usage.
 
 ## Verified baseline checkpoint — 2026-10-17
@@ -20,6 +20,49 @@ UI, character-wheel, page-navigation, logo and header follow-ups in PRs
 No follow-up code is imported or newly marked hardware-tested by this checkpoint.
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
+
+## v0.9.8 — 2026-10-18 (builds, not hardware-tested)
+
+- Revert: `sdkconfig.defaults` and `c5_slave/sdkconfig.defaults.esp32c5` restored to v0.9.6
+  values (host SDIO RX queue 64, RX staging 4, cache TX default 32; C5 buffers 16/64/64,
+  BA 32, SDIO queues 40/40). Host IRAM opts left at defaults (no explicit Kconfig overrides).
+- Retained: the log line in `wifi.c` that prints the Wi-Fi buffer config sent to the C5 (added
+  in v0.9.7; useful for diagnostics in future tuning rounds).
+- C5 tuning: on hold until an official ESP-Hosted release (3.0.10+). Do not attempt new buffer
+  experiments with the current 3.0.9 C5.
+- v0.9.7 HW result: AP disappeared ~30 s after boot (download ~1.5 Mbit/s, upload 0, then link
+  lost). Likely DMA buffer starvation from larger RX queue (128) and staging (6).
+- v0.9.6 HW result: HT40 links at 40 MHz stably, but is slower than ac/HT20 and disturbs
+  Wi-Fi 7 APs. ac/HT20 is the recommended 5 GHz setting. PR #18 merged to main (467e628).
+- Build: 0 warnings; all 4 host test suites passed. Not hardware-tested.
+
+## v0.9.7 — 2026-10-18 (HW-tested: unstable — reverted in v0.9.8)
+
+- C5 buffer / upload throughput tuning: host SDIO RX queue 64 → 128, RX staging 4 → 6,
+  cache TX 32 → 64, IRAM opts pinned; C5 slave buffers 16/32 → 32/128 dynamic, BA 32 → 64,
+  SDIO TX queue 40 → 64. All reverted in v0.9.8.
+- HW result: not usable (AP link lost ~30 s after start). See v0.9.8 note above.
+
+## v0.9.6 — 2026-10-18 (HW-tested: HT40 functional; ac/HT20 recommended)
+
+- 5 GHz HT40 fix: C5 / IDF v6.1 only allows 40 MHz in 11an mode. When ac/ax are enabled,
+  the driver silently stays at 20 MHz. `apply_proto()` now strips ac/ax from the 5 GHz
+  protocol mask when `bw_5g = HT40`; HT20 retains the selected protocols.
+- Width re-applied after the post-start protocol re-apply (a protocol change can reset it).
+- HW result: HT40 links up stably at 40 MHz, but throughput is lower than ac/HT20. HT40
+  also disturbs Kent's Wi-Fi 7 APs. Recommended: ac/HT20 (`bw_5g = HT20`, select manually);
+  the firmware default is still HT40.
+- UI: Optimize dropdown shows "HT40 - 11n" / "HT20 - ac/ax allowed" with an explanation.
+
+## v0.9.5 — 2026-10-18 (HW-tested: HT40 result invalid — fixed in v0.9.6)
+
+- Two new Optimize dropdowns (both require reboot):
+  - `bw_5g`: 5 GHz channel width HT40 (default) / HT20. 2.4 GHz stays locked to HT20.
+  - `sdio_mhz`: SDIO clock 40 / 50 MHz with auto-fallback (50 MHz trial; reverts to 40 if C5
+    fails). Real bus clock logged at boot and returned by `GET /api/opt` as `sdio_real_khz`.
+- 50 MHz wrapper (`main/sdio_clk.c`, `--wrap=sdmmc_io_enable_hs_mode`) lifts the IDF 40 MHz
+  card limit when the configured host clock exceeds it.
+- HW result (HT40): link stayed at HT20 despite an 80 MHz AP — root cause found in v0.9.6.
 
 ## v0.9.0 — 2026-10-18 (builds, not hardware-tested)
 
@@ -87,6 +130,11 @@ P4/C5 OTA paths are unchanged.
 | LVGL 9.4.0 home status viewport, `CONFIG_MYPI_UI_LVGL=y` (v0.8.2, `sdkconfig.lvgl`) | HW-tested (display and normal operation OK) |
 | v0.8.2 default build (`CONFIG_MYPI_UI_LVGL=n`) | Builds; not separately flashed (option removed in 0.8.3) |
 | v0.8.3: LVGL standard, touch → LVGL pointer indev, MyPi font (å ä ö μ π), 20-step RSSI icon color, full-width `Hotspot` LCD divider, paged web UI with dBm header | Builds (0 warnings), host tests pass; not yet hardware-tested |
+| On-screen LVGL scroll-wheel keyboard, `mypi_kbd` (v0.8.7) | HW-tested |
+| Optimize page (v0.9.x): web only, dropdowns/checkboxes, NVS `mypi_opt` | Builds, host tests pass; individual options tested as listed below |
+| TCP window 32/64/128 KB applied in lwIP (v0.9.4) | HW-tested |
+| 5 GHz width HT40/HT20 + SDIO clock 40/50 MHz with auto-fallback (v0.9.6) | HW-tested; HT40 works but is slower, HT20 recommended |
+| Revert of the v0.9.7 buffer tuning to v0.9.6 values (v0.9.8) | Builds (0 warnings), host tests pass; not yet hardware-tested |
 
 ## Architecture in short
 
@@ -110,8 +158,13 @@ P4/C5 OTA paths are unchanged.
 
 - **The C5 has one radio.** In APSTA, AP and STA always share one channel and band;
   2.4 GHz and 5 GHz cannot run at the same time. Dual radio is on hold.
-- **11ax is disabled** until a new C5 radio firmware fixes ESP-IDF #19238
-  (TCP TX hangs). Focus is b/g/n/a/ac. **Max bandwidth 40 MHz.**
+- **11ax is selectable but not the default.** The UI shows a warning: known C5 issue
+  ESP-IDF #19238 (upload can drop to ~0). Focus is b/g/n/a/ac.
+- **40 MHz only in 11n/11an** on the C5. With 11ac/11ax on 5 GHz the driver stays at 20 MHz,
+  so HT40 drops ac/ax. 5 GHz HT20 is recommended; the firmware default is still HT40.
+- **2.4 GHz is always HT20.**
+- **SDIO runs at 40 MHz by default**; 50 MHz is optional (Optimize) with auto-fallback to 40 MHz.
+- **C5 firmware and buffer tuning are on hold** until an official ESP-Hosted 3.0.10+ release.
 - ESP-IDF **v6.1**, ESP-Hosted **3.0.9** on both host and C5 slave.
   ESP-Hosted v2 and v3 RPC are incompatible; host and slave must match.
 - The C5 is updated permanently through `/c5update` (flash path A).
@@ -120,17 +173,26 @@ P4/C5 OTA paths are unchanged.
 - Preferred flashing: OTA via `/update` (keeps NVS). A merged binary at 0x0 likely
   erases NVS (profiles, settings).
 
-## Buffer findings (basis for the next tuning round)
+## Buffer findings (v0.9.7 investigation — defer tuning until ESP-Hosted 3.0.10+)
 
-- The P4 decides most of the C5's Wi-Fi buffers: the slave builds its
-  `wifi_init_config_t` from values sent by the host over RPC. The C5's own
-  `ESP_WIFI_*` buffer settings are mostly ignored; SDIO queues, SW aggregation and the
-  TX BA window on the C5 still apply.
-- Hypothesis: with `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` IDF forces static TX buffers, so
-  `WIFI_RMT_STATIC_TX_BUFFER_NUM=16` is what is used, not the dynamic 128. This may
-  limit uplink/AP TX. Verify via the C5 boot log (`default | host | final` table).
-- Baseline to compare against (v0.5.3, ch36 STA, ch1 AP, 20 MHz/ac):
-  STA RX 16.32 / TX 20.76, AP RX 20.61 / TX 16.26 Mbit/s (peak).
+Investigated in v0.9.7; reverted in v0.9.8. Do **not** retry C5 buffer changes with ESP-Hosted 3.0.9.
+
+**RPC v2 routing (confirmed):** `esp_wifi_init()` sends a `wifi_init_config_t` built from
+`WIFI_RMT_*` Kconfig values to the C5 via ESP-Hosted RPC v2. The C5 slave applies most of
+them as-is. **Exceptions:**
+- `cache_tx_buf_num`: C5 has no PSRAM → IDF replaces with 0 regardless of host value.
+- `tx_ba_win`: not part of the RPC struct; only the C5's own sdkconfig value is used.
+- `amsdu_tx_enabled`: forwarded but requires PSRAM on C5 → leave off.
+
+**v0.9.7 HW failure (AP lost ~30 s):** raising host SDIO RX queue 64 → 128 and RX staging
+4 → 6 added too much internal DMA pressure (similar to the v0.8.5 `dma_alloc failed`
+pattern with a 128 KB TCP window).
+
+**Baseline to compare against** (v0.5.3, ch36 STA, ch1 AP, 20 MHz/ac):
+STA RX 16.32 / TX 20.76, AP RX 20.61 / TX 16.26 Mbit/s (peak).
+
+**When 3.0.10+ is available:** re-evaluate SDIO RX queue (try 96 before 128), re-measure
+against the baseline, and watch the boot log for `dma_alloc failed` and `eh_sdio` errors.
 
 ## Lessons learned
 
