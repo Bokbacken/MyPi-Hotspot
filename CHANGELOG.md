@@ -5,6 +5,36 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.7 — 2026-10-18 (builds, not hardware-tested)
+- **New reusable scroll-wheel keyboard module (`main/mypi_kbd.c/.h`, LVGL):** Companion-style
+  text input — field with label, text and cursor; range tabs `az AZ 09 #+ åä`; hint row
+  `< range >   ^ char v`; 5-slot wrapping wheel (row ratio 20:20:32:20:20, current row
+  highlighted with an accent box) with `^`/`v` arrows; bottom row **BACK / DEL / NEXT / OK**.
+  The caller passes parent, position and size; the whole layout scales from w/h
+  (field 14 %, tabs 10 %, hint 7 %, wheel ~51 %, buttons 18 %).
+- **Input:** vertical drag on the wheel steps one character per half row height (finger
+  down = previous), a horizontal swipe changes range (one per swipe, left = next), tapping a
+  tab selects the range, tapping an outer row moves it to the center. NEXT inserts the
+  selected character, DEL removes the last UTF-8 character, OK calls back with
+  `confirmed=true`, BACK calls back with `confirmed=false` and closes. `max_len` is in bytes;
+  `mask` shows one `*` per character.
+- **Font-aware:** every range is filtered against the glyphs in `mypi_font_14`
+  (`lv_font_get_glyph_dsc`), so missing glyphs are never offered. With the current font the
+  Latin range contains only `å ä ö Å Ä Ö`; é è ü ß etc. are listed but filtered out.
+- **Styles:** `MYPI_KBD_STYLE_WHEEL`; `MYPI_KBD_STYLE_FULLKEY` is reserved for large screens.
+  Unknown styles fall back to the wheel.
+- **Wi-Fi password entry replaced:** the old framebuffer PREV/NEXT/ASCII-LATIN/ADD/DEL page
+  (`draw_password()`, wheel state in `ui_state_t`) is removed. Choosing a network without a
+  profile opens the keyboard full screen; OK with an empty password connects as an open
+  network, 1–7 bytes shows a hint and keeps the keyboard open, BACK returns to the scan list.
+  OTA/rescue close the keyboard. The UI task ticks every 20 ms while it is open.
+- **LVGL port:** the keyboard runs on a second, full-screen (240×320) LVGL display created on
+  first use; the pointer indev is switched to it while open. The status viewport is unchanged.
+- **Tests:** `test_ui_primitives.c` covers the pure logic (`main/mypi_kbd_core.h`: ranges,
+  filtering, wrap, range switching, UTF-8 insert/delete, byte limit); `test_mypi_ui.c`
+  creates the keyboard at three sizes and drives it through the buttons and simulated
+  pointer drags/taps.
+
 ## 0.8.6 — PSRAM for large buffers, automatic C5 restart before emergency mode (HW-tested: P4 OTA and C5 OTA over Wi-Fi STA OK)
 - **Internal RAM freed (~83 KB):** the LVGL heap (`work_mem_int`, 64 KB), the LVGL draw buffer
   (`s_pixels`, 9.6 KB) and the crash tail are now placed in PSRAM

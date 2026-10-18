@@ -81,6 +81,33 @@ released. Tap navigation, swipe-to-rescue and rescue option hits stay in the mai
 (`display_ui_handle_tap()`, `display_ui_rescue_hit()`), so behavior is unchanged until
 pages are migrated to interactive LVGL widgets.
 
+### Text input module (0.8.7)
+
+`main/mypi_kbd.h` is the single text-input entry point for local LVGL screens:
+
+```c
+typedef void (*mypi_kbd_cb_t)(const char *text, bool confirmed, void *user);
+typedef enum { MYPI_KBD_STYLE_WHEEL = 0 /* MYPI_KBD_STYLE_FULLKEY reserved */ } mypi_kbd_style_t;
+lv_obj_t *mypi_kbd_create(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
+                          mypi_kbd_style_t style, const char *label, const char *initial_text,
+                          size_t max_len, bool mask, mypi_kbd_cb_t cb, void *user);
+void mypi_kbd_delete(lv_obj_t *kbd);              // async, idempotent, wipes the text
+void mypi_kbd_set_hint(lv_obj_t *kbd, const char *message);
+const char *mypi_kbd_get_text(lv_obj_t *kbd);
+```
+
+- The caller gives placement and size; all parts scale from w/h (field 14 %, tabs 10 %,
+  hint 7 %, wheel ~51 % with rows 20:20:32:20:20, buttons 18 %). The font is `mypi_font_14`;
+  the current row is emphasized with an accent box since no larger font is built in.
+- Pure logic (ranges, glyph filter hook, wrap, UTF-8 edit, byte limit) lives in the header-only
+  `main/mypi_kbd_core.h` (no LVGL) and is host-tested.
+- The style parameter lets large screens get a full keyboard later without changing callers;
+  unknown styles fall back to the wheel.
+- Hosting on the Hotspot: `ui_lvgl_port_kbd_open/close/active/set_hint/tick()` put the keyboard
+  on a second, full-screen LVGL display and move the pointer indev to it. While open,
+  `ui_lvgl_port_kbd_tick()` (UI task, every 20 ms, under `display_lock()`) runs LVGL and copies
+  rendered areas into the framebuffer; `ui_lvgl_port_poll()` is skipped so no invalidation is lost.
+
 ### Status font
 
 `main/mypi_font_14.c` is DejaVu Sans 14 px, 4 bpp (license: `assets/DejaVu-LICENSE.txt`),

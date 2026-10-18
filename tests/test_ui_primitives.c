@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "mypi_kbd_core.h"
 #include "ui_input.h"
 #include "ui_layout.h"
 #include "ui_serial.h"
@@ -121,6 +122,92 @@ static void test_password_utf8_and_length(void)
     assert(mypi_utf8_backspace(max_password) && strlen(max_password) == 61);
 }
 
+// Mirrors mypi_font_14: ASCII plus å ä ö Å Ä Ö (other Latin letters are absent).
+static bool fake_font(uint32_t cp, void *ctx)
+{
+    (void)ctx;
+    return (cp >= 0x20 && cp <= 0x7E) || cp == 0xE5 || cp == 0xE4 || cp == 0xF6 ||
+           cp == 0xC5 || cp == 0xC4 || cp == 0xD6;
+}
+
+static bool no_digits(uint32_t cp, void *ctx)
+{
+    (void)ctx;
+    return cp < '0' || cp > '9';
+}
+
+static void test_kbd_core(void)
+{
+    mypi_kbd_core_t k;
+    // Unfiltered tables.
+    mypi_kbd_core_init(&k, NULL, 63, NULL, NULL);
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_LOWER) == 26);
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_DIGIT) == 10);
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_SYMBOL) == 33);   // space + 32 punctuation
+    assert(mypi_kbd_range_codepoint(&k, MYPI_KBD_RANGE_SYMBOL, 0) == ' ');
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_LATIN) == MYPI_KBD_LATIN_COUNT);
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_COUNT) == 0);
+
+    // Font filter: only the six Swedish letters survive in the Latin range.
+    mypi_kbd_core_init(&k, "", 63, fake_font, NULL);
+    assert(k.range == MYPI_KBD_RANGE_LOWER && k.index == 0);
+    assert(mypi_kbd_range_count(&k, MYPI_KBD_RANGE_LATIN) == 6);
+    assert(mypi_kbd_range_codepoint(&k, MYPI_KBD_RANGE_LATIN, 0) == 0xE5);
+    assert(mypi_kbd_range_codepoint(&k, MYPI_KBD_RANGE_LATIN, 5) == 0xD6);
+    assert(mypi_kbd_range_codepoint(&k, MYPI_KBD_RANGE_LATIN, 6) == 0);
+
+    // Wheel stepping wraps in both directions; the 5 visible rows wrap too.
+    assert(mypi_kbd_current(&k, 0) == 'a');
+    assert(mypi_kbd_current(&k, -1) == 'z' && mypi_kbd_current(&k, -2) == 'y');
+    assert(mypi_kbd_current(&k, 2) == 'c');
+    mypi_kbd_step(&k, -1);
+    assert(mypi_kbd_current(&k, 0) == 'z');
+    mypi_kbd_step(&k, 1);
+    mypi_kbd_step(&k, 27);
+    assert(mypi_kbd_current(&k, 0) == 'b');
+    mypi_kbd_step(&k, -53);
+    assert(mypi_kbd_current(&k, 0) == 'a');
+
+    // Ranges: next/previous wrap around, set_range resets the index.
+    mypi_kbd_step(&k, 3);
+    assert(mypi_kbd_set_range(&k, MYPI_KBD_RANGE_UPPER) && k.index == 0 && mypi_kbd_current(&k, 0) == 'A');
+    mypi_kbd_next_range(&k, -1);
+    mypi_kbd_next_range(&k, -1);
+    assert(k.range == MYPI_KBD_RANGE_LATIN && mypi_kbd_current(&k, 0) == 0xE5);
+    mypi_kbd_next_range(&k, 1);
+    assert(k.range == MYPI_KBD_RANGE_LOWER);
+    assert(!mypi_kbd_set_range(&k, -1) && !mypi_kbd_set_range(&k, MYPI_KBD_RANGE_COUNT));
+
+    // Empty ranges are skipped.
+    mypi_kbd_core_init(&k, "", 63, no_digits, NULL);
+    assert(!mypi_kbd_set_range(&k, MYPI_KBD_RANGE_DIGIT));
+    mypi_kbd_set_range(&k, MYPI_KBD_RANGE_UPPER);
+    mypi_kbd_next_range(&k, 1);
+    assert(k.range == MYPI_KBD_RANGE_SYMBOL);
+
+    // Insert/delete through the module with UTF-8 and a byte limit.
+    mypi_kbd_core_init(&k, "", 5, fake_font, NULL);
+    mypi_kbd_set_range(&k, MYPI_KBD_RANGE_LATIN);
+    assert(mypi_kbd_insert(&k) && mypi_kbd_insert(&k));          // "åå" = 4 bytes
+    assert(strcmp(k.text, "\xC3\xA5\xC3\xA5") == 0);
+    assert(!mypi_kbd_insert(&k));                                // 6 bytes > max_len 5
+    mypi_kbd_set_range(&k, MYPI_KBD_RANGE_DIGIT);
+    assert(mypi_kbd_insert(&k) && strlen(k.text) == 5);          // 1-byte '0' still fits
+    assert(!mypi_kbd_insert(&k));
+    assert(mypi_kbd_char_count(k.text) == 3);
+    assert(mypi_kbd_delete_char(&k) && mypi_kbd_delete_char(&k) && strcmp(k.text, "\xC3\xA5") == 0);
+    assert(mypi_kbd_delete_char(&k) && k.text[0] == '\0' && !mypi_kbd_delete_char(&k));
+
+    // Initial text is truncated on a UTF-8 boundary; max_len is clamped to the buffer.
+    mypi_kbd_core_init(&k, "ab\xC3\xA5", 3, NULL, NULL);
+    assert(strcmp(k.text, "ab") == 0);
+    mypi_kbd_core_init(&k, "x", 1000, NULL, NULL);
+    assert(k.max_len == MYPI_KBD_TEXT_CAP - 1 && strcmp(k.text, "x") == 0);
+    mypi_kbd_core_init(&k, "", 63, NULL, NULL);
+    for (int i = 0; i < 63; i++) assert(mypi_kbd_insert(&k));
+    assert(!mypi_kbd_insert(&k) && strlen(k.text) == 63 && mypi_wifi_pass_length_valid(k.text));
+}
+
 static void test_touch_geometry(void)
 {
     assert(mypi_ui_row_hit(40, 40, 34, 3, 6) == 0);
@@ -143,6 +230,7 @@ int main(void)
     test_full_width_divider();
     test_rssi_color_steps();
     test_password_utf8_and_length();
+    test_kbd_core();
     test_touch_geometry();
     puts("UI primitive tests passed");
     return 0;
