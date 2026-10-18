@@ -5,7 +5,10 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
-## 0.8.2 — LVGL foundation build (builds, not hardware-tested)
+## 0.8.2 — LVGL foundation build (LVGL variant HW-tested)
+- **HW-tested:** the `sdkconfig.lvgl` variant was flashed via `/update`; the LVGL
+  status viewport renders correctly and normal operation works. This also covers the
+  0.8.1 header/logo changes. The default variant was not separately flashed.
 - First firmware build of PR #9 (LVGL 9.4.0, `mypi_ui/` status model, `ui_lvgl_port`).
   PR #9 could not be built in the Copilot environment (component registry DNS failure).
 - Default build keeps `CONFIG_MYPI_UI_LVGL=n`: same UI as 0.8.1 (LVGL is fetched but

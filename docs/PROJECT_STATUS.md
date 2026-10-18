@@ -35,6 +35,10 @@ P4/C5 OTA paths are unchanged.
 | OTA progress on the LCD (v0.6.3) | HW-tested |
 | P4 SDIO RX staging slots = 4, tuned C5 slave queues (v0.6.3) | HW-tested; throughput vs. baseline not yet recorded here |
 | Ethernet emergency mode (v0.7.0) | HW-tested |
+| LCD menu + web theme (v0.8.0) | HW-tested |
+| μ/π logo header, antialiased title, RSSI-colored Wi-Fi icon (v0.8.1) | HW-tested as part of the v0.8.2 LVGL build |
+| LVGL 9.4.0 home status viewport, `CONFIG_MYPI_UI_LVGL=y` (v0.8.2, `sdkconfig.lvgl`) | HW-tested (display and normal operation OK) |
+| v0.8.2 default build (`CONFIG_MYPI_UI_LVGL=n`) | Builds; not separately flashed |
 
 ## Architecture in short
 
@@ -90,7 +94,7 @@ P4/C5 OTA paths are unchanged.
 
 ## Regression checklist (run for every new build)
 
-All builds up to v0.7.0 have passed on hardware. Repeat this list after each change.
+All builds up to v0.8.0, plus the v0.8.2 LVGL variant, have passed on hardware. Repeat this list after each change.
 
 
 1. Flash via `/update`; confirm the new version on the status page.
