@@ -5,6 +5,10 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.9 — 2026-10-18 (bugfix, builds, not hardware-tested)
+
+- Fix: password reveal now works — server populates value attribute (`/api/profiles` and `/api/approfiles` return the stored password; the STA/AP edit forms are filled on page load, on Edit and on slot change; fields stay `type="password"` until Show is clicked).
+
 ## 0.8.8 — 2026-10-18 (bugfix, builds, not hardware-tested)
 
 Fixes from the first hardware evaluation of the 0.8.7 keyboard.

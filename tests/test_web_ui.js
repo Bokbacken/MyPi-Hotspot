@@ -84,6 +84,11 @@ assert.equal(shouldPollStatus(false, false), false);
 // Password Show/Hide toggle (v0.8.8): one button per password field, flips the type both ways.
 const { togglePassword, addPasswordToggles } = require("../main/web_ui.js");
 assert.equal((webC.match(/type='password'/g) || []).length >= 2, true);
+// v0.8.9: both profile APIs return the stored password and the edit forms fill it in.
+assert.equal((webC.match(/cJSON_AddStringToObject\(o, "pass", p\.valid \? p\.pass : ""\)/g) || []).length, 2);
+assert.ok(webC.includes("$('spw').value=x.pass||''") && webC.includes("$('apw').value=x.pass||''"));
+assert.ok(/if\(FL\)\{FL=0;edS\(/.test(webC), "forms must be filled on first page load");
+assert.ok(!/\$\('[as]pw'\)\.value=''/.test(webC), "password fields must not be blanked");
 function fakeInput(id) {
   return { id, type: "password", dataset: {}, after: null,
     insertAdjacentElement(where, el) { assert.equal(where, "afterend"); this.after = el; } };

@@ -84,14 +84,14 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='wifi'><h2>Wi-Fi uplink (STA profiles)</h2><table id='sp'></table>"
 "<p><button onclick='conn(-1)'>Connect (auto, best RSSI)</button> <button onclick='disc()'>Disconnect</button> "
 "<button onclick='scan()'>Scan</button></p><table id='sc'></table>"
-"<fieldset><legend>Edit STA profile</legend>Slot <select id='ss'></select> SSID <input id='sn'> "
+"<fieldset><legend>Edit STA profile</legend>Slot <select id='ss' onchange=edS(+this.value)></select> SSID <input id='sn'> "
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
 "Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset></section>"
 "<section class='page' data-page='access-point'><h2>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
-"<fieldset><legend>Edit AP profile</legend>Slot <select id='as'></select> SSID <input id='an'> "
+"<fieldset><legend>Edit AP profile</legend>Slot <select id='as' onchange=edA(+this.value)></select> SSID <input id='an'> "
 "Password <input id='apw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='aclr' style='width:auto'>open (no password)</label><br>"
 "Subnet <select id='asub'></select> <label><input type='checkbox' id='anat' style='width:auto' checked>NAT (share uplink)</label> "
 "<label><input type='checkbox' id='aboot' style='width:auto'>start at boot</label> <button onclick='saveAp()'>Save</button></fieldset></section>"
@@ -142,7 +142,7 @@ MYPI_BRAND_HEADER
 "async function post(u,b){try{let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});"
 "let t=await r.text(),j;try{j=JSON.parse(t)}catch(e){j={ok:r.ok,msg:t}}$('msg').textContent=u+': '+(j.ok?'OK':'ERROR')+(j.msg?' - '+j.msg:'')+(j.error?' - '+j.error:'');return j.ok}"
 "catch(e){$('msg').textContent=u+': '+e;return false}}"
-"let SP=[],AP=[];"
+"let SP=[],AP=[],FL=1;"
 "async function ld(){try{"
 "let p=await (await fetch('/api/profiles')).json();SP=p.profiles;"
 "$('sp').innerHTML=tr(['Slot','SSID','IP','Pass',''],1)+SP.filter(x=>x.valid).map(x=>tr([x.slot+(x.slot==p.active?' *':''),esc(x.ssid),"
@@ -157,10 +157,11 @@ MYPI_BRAND_HEADER
 "let r=await (await fetch('/api/radio')).json();$('rsb').value=r.sta_bw;$('rab').value=r.ap_bw;setProtoMask('sta',r.sta_proto);setProtoMask('ap',r.ap_proto);"
 "let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
 "$('band-mode').value=r.band_mode;$('tx-power').value=r.tx_power_dbm;$('ap-beacon').value=r.ap_beacon_tu;$('ap-dtim').value=r.ap_dtim;protoHint();"
+"if(FL){FL=0;edS(SP[p.active]?p.active:0);edA(0)}"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
-"function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value='';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
+"function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value=x.pass||'';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
 "$('sip').value=x.ip;$('smk').value=x.mask||'255.255.255.0';$('sgw').value=x.gw;$('sdn').value=x.dns}"
-"function edA(i){let x=AP[i];$('as').value=i;$('an').value=x.ssid;$('apw').value='';$('aclr').checked=!x.has_pass;$('asub').value=x.subnet;"
+"function edA(i){let x=AP[i];$('as').value=i;$('an').value=x.ssid;$('apw').value=x.pass||'';$('aclr').checked=!x.has_pass;$('asub').value=x.subnet;"
 "$('anat').checked=x.nat;$('aboot').checked=x.on_boot}"
 "async function saveSta(){await post('/api/profile/save',{slot:+$('ss').value,ssid:$('sn').value,pass:$('spw').value,clear_pass:$('sclr').checked,"
 "dhcp:$('sd').checked,ip:$('sip').value,mask:$('smk').value,gw:$('sgw').value,dns:$('sdn').value});ld()}"
@@ -1032,7 +1033,8 @@ static void subnet_str(int idx, char *out, size_t n)
 
 // --- STA profiles ---
 
-// GET /api/profiles - passwords are never returned, only has_pass.
+// GET /api/profiles - includes the stored password so the web form can show it
+// (local admin UI); the Show/Hide button reveals it on demand.
 static esp_err_t api_profiles_get(httpd_req_t *req)
 {
     wifi_sta_extra_t ex;
@@ -1049,6 +1051,7 @@ static esp_err_t api_profiles_get(httpd_req_t *req)
         cJSON_AddBoolToObject(o, "valid", p.valid);
         cJSON_AddStringToObject(o, "ssid", p.valid ? p.ssid : "");
         cJSON_AddBoolToObject(o, "has_pass", p.valid && p.pass[0]);
+        cJSON_AddStringToObject(o, "pass", p.valid ? p.pass : "");
         cJSON_AddBoolToObject(o, "dhcp", !p.valid || p.dhcp);
         cJSON_AddStringToObject(o, "ip", p.valid ? p.ip : "");
         cJSON_AddStringToObject(o, "mask", p.valid ? p.mask : "");
@@ -1156,6 +1159,7 @@ static esp_err_t api_approfiles_get(httpd_req_t *req)
         cJSON_AddBoolToObject(o, "valid", p.valid);
         cJSON_AddStringToObject(o, "ssid", p.valid ? p.ssid : "");
         cJSON_AddBoolToObject(o, "has_pass", p.valid && p.pass[0]);
+        cJSON_AddStringToObject(o, "pass", p.valid ? p.pass : "");
         cJSON_AddNumberToObject(o, "subnet", p.valid ? p.subnet : 0);
         cJSON_AddBoolToObject(o, "nat", !p.valid || p.nat);
         cJSON_AddBoolToObject(o, "on_boot", p.valid && p.on_boot);
