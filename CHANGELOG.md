@@ -5,6 +5,31 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.8.5 — Persistent logs in flash, OTA receive fixes (builds, not hardware-tested)
+- **Persistent logs (`logstore.c`):** the unused `storage` partition (FAT, ~3.9 MB) is mounted
+  at `/store`; logs go to `/store/logs`. An OTA upload (P4 or C5) is **always** captured
+  (8 KB of context before the start, appended every 2 s) and committed as a saved log, so it
+  survives the reboot or crash that follows a failed upload. Session capture ("Capture every
+  session") is off by default and can be switched on from the Diagnostics page (saved in NVS,
+  appended every 15 s, rolls over at 512 KB). The newest 5–10 logs are kept (default 8).
+  A capture that was interrupted by a reset is committed at the next boot marked
+  `NOT FINISHED` with the reset reason; web-triggered reboots commit the live log first.
+- **Crash tail:** the last 8 KB of log output is kept in no-init RAM and saved after a
+  panic / watchdog / software reset (not after power-on or brown-out).
+- **Log API:** `GET /api/logstore` (status + list), `GET /api/logstore/file?name=…[&dl=1]`,
+  `POST /api/logstore/config?enabled=0|1&keep=5..10`, `POST /api/logstore/save`,
+  `POST /api/logstore/clear`. RAM log buffer raised to 32 KB (PSRAM).
+- **OTA hypothesis fixes (from the v0.8.4 upload log):** free internal heap fell from 218K to
+  50K during upload and the SDIO driver could not allocate its 14 KB DMA read buffer
+  (`dma_alloc(14336) failed; dropping read`). TCP receive window lowered 128 KB → 64 KB and
+  64 KB internal RAM reserved for DMA (`SPIRAM_MALLOC_RESERVE_INTERNAL`, small allocations
+  ≤4 KB stay internal). The log hook now preserves `errno`, and the `httpd_txrx` warning is
+  silenced, because `httpd_sock_err()` logs before reading `errno` — a receive timeout
+  (EAGAIN, errno 11) was turned into a hard error and aborted the upload.
+- **OTA diagnostics:** one `OTA mem:` line per second (free internal heap, largest internal
+  DMA block, recv code); upload peer/local addresses now printed correctly for IPv4-mapped
+  IPv6 sockets.
+
 ## 0.8.4 — Wi-Fi OTA: less traffic during upload, upload diagnostics (builds, not hardware-tested)
 - **Analysis:** LVGL is not run during OTA (the UI task draws only the OTA view and does
   not call `lv_timer_handler()`; touch is not fed to LVGL), so LVGL is unlikely to slow

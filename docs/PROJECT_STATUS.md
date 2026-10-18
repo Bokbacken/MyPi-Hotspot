@@ -21,6 +21,20 @@ No follow-up code is imported or newly marked hardware-tested by this checkpoint
 Firmware sources, versions, build configuration, partition tables, bootloader and
 P4/C5 OTA paths are unchanged.
 
+## v0.8.5 work in progress — 2026-10-18 (builds, not hardware-tested)
+
+- Wi-Fi OTA has failed on almost every attempt since v0.8.3/v0.8.4. The v0.8.4 upload log
+  showed free internal heap 218K → 50K, `eh_sdio: dma_alloc(14336) failed; dropping read`,
+  then `httpd_req_recv` returned -1 (errno 11 / EAGAIN) after ~15 s at 0.06 Mbit/s.
+- **Hypothesis 1:** received TCP segments hold internal RAM until the app reads them; with a
+  128 KB window and flash writes slowing the reader, SDIO DMA buffers run out and packets drop.
+  Mitigation: TCP window 64 KB, 64 KB internal RAM reserved for DMA.
+- **Hypothesis 2:** `httpd_sock_err()` logs before reading errno; the log hook clobbered errno so
+  a timeout became a hard failure. Mitigation: errno preserved, `httpd_txrx` warning silenced.
+- Persistent logs (`/api/logstore`): OTA uploads always saved to flash so the log can be read
+  after the reboot that follows a failed upload; session capture on demand.
+- Next: flash v0.8.5, repeat Wi-Fi OTA (and Ethernet OTA as reference), fetch the saved log.
+
 ## What the device does today
 
 | Area | Status |

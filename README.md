@@ -151,7 +151,8 @@ MyPi-Hotspot/
 │   ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
 │   ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
 │   ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
-│   ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log)
+│   ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log) + crash tail
+│   ├── logstore.h/.c     Persistent logs on the `storage` FAT partition (OTA always, sessions on demand)
 │   ├── pintest.h/.c      Boot-time wiring check and manual pin control (served at /pins)
 │   ├── wifi.h/.c         Wi-Fi APSTA over ESP-Hosted: STA auto-select/reconnect, AP + clients, scan, mDNS
 │   ├── profiles.h/.c     STA (10) and AP (4) profiles in NVS
@@ -303,6 +304,8 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | `/` | Live status page (refreshes every 2 s): uptime, memory, Wi-Fi, display, touch, last touch events, OTA state, log |
 | `/api/status` | Same data as JSON |
 | `/api/log` | The RAM log buffer as plain text (boot log included, oldest first) |
+| `/api/logstore` | Saved logs in flash: status + list (see [Saved logs](#saved-logs-in-flash)) |
+| `/api/logstore/file?name=L0000012.TXT` | One saved log as text (`&dl=1` downloads it) |
 | `/update` | OTA upload form |
 | Network API | STA/AP profiles, scan, AP clients, Ethernet mode, traffic stats, iperf — see [Network API](#network-api) |
 | `/api/debug?on=1\|0` (POST) | Switch debug mode on/off (saved in NVS) |
@@ -326,6 +329,23 @@ percentage and KB done / total. Touch is ignored meanwhile. A failure stays on s
 the status screen returns; on success the board reboots 2 s after *Done - rebooting*. The same state is in
 `/api/status` as `ota` (`active`, `target`, `phase`, `pct`, `bytes_done`, `bytes_total`, `err`), and the
 upload pages poll it after 100 % to show verifying / done / failed.
+
+### Saved logs in flash
+
+`/api/log` lives in RAM and is empty after a reboot. Since v0.8.5 logs can be saved in the
+`storage` partition (FAT, mounted at `/store/logs`) and read after the restart:
+
+- **OTA uploads are always saved** — success, failure, or a crash/reset during the upload
+  (then the log is committed at the next boot, marked `NOT FINISHED` with the reset reason).
+- **Capture every session** (Diagnostics page, or `POST /api/logstore/config?enabled=1`) is off by
+  default; switch it on only while hunting a problem.
+- The newest 5–10 logs are kept (`keep`, default 8). After a panic or watchdog reset the last
+  8 KB of log output (crash tail) is saved as well.
+- Diagnostics page → **Saved logs (flash)**: list, view, download, *Save now*, *Delete all*.
+- Terminal: `curl http://mypi-hotspot.local/api/logstore` and
+  `curl "http://mypi-hotspot.local/api/logstore/file?name=L0000012.TXT"`.
+
+Note: flashing the *merged* image over USB erases NVS (settings) but not the log partition.
 
 ## Wi-Fi co-processor (ESP32-C5)
 
