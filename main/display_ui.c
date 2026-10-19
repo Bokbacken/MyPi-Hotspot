@@ -44,6 +44,9 @@ static const char *TAG = "display_ui";
 #define CAM_SHUTTER_X0  120
 #define CAM_STATUS_Y    236
 #define CAM_MSG_Y       250
+// Without a touch for this long the camera page returns to the menu, so a forgotten preview does
+// not keep the sensor/ISP streaming (the stream stops CONFIG_MYPI_CAMERA_IDLE_STOP_S later).
+#define CAM_PAGE_TIMEOUT_MS (5 * 60 * 1000)
 
 typedef enum {
     UI_HOME,
@@ -98,6 +101,7 @@ static bool s_job_pending;
 static bool s_redraw_requested = true;
 static bool s_kbd_open_req;     // Set by the tap handler, consumed by the UI task (LVGL owner)
 static uint16_t *s_cam_preview; // Camera page preview pixels (PSRAM, UI task only)
+static volatile TickType_t s_last_tap;  // Camera page timeout
 
 static void draw_centered(int y, const char *s, uint16_t fg, int scale);
 
@@ -781,6 +785,7 @@ void display_ui_handle_tap(int x, int y)
 {
     ui_state_t ui;
     ui_snapshot(&ui);
+    s_last_tap = xTaskGetTickCount();
     switch (ui.view) {
     case UI_HOME:
         if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
@@ -1145,7 +1150,14 @@ static void ui_task(void *arg)
             portEXIT_CRITICAL(&s_ui_mux);
             ui_state_t ui;
             ui_snapshot(&ui);
-            if (ui.view == UI_CAMERA) {
+            if (ui.view == UI_CAMERA && !ui.busy &&
+                xTaskGetTickCount() - s_last_tap > pdMS_TO_TICKS(CAM_PAGE_TIMEOUT_MS)) {
+                portENTER_CRITICAL(&s_ui_mux);
+                if (s_ui.view == UI_CAMERA) s_ui.view = UI_MENU;
+                portEXIT_CRITICAL(&s_ui_mux);
+                ui.view = UI_MENU;
+                draw_menu();
+            } else if (ui.view == UI_CAMERA) {
                 draw_camera(&ui, ticks == 0 || redraw);     // Preview: every tick
             } else if (ticks == 0 || redraw) {
                 switch (ui.view) {

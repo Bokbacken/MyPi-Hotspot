@@ -63,11 +63,13 @@ static void set_error(esp_err_t err, const char *fmt, ...)
     ESP_LOGW(TAG, "%s (%s)", s_st.last_error, esp_err_to_name(err));
 }
 
+#if CONFIG_MYPI_CAMERA_ENABLE
 static void clear_error(void)
 {
     s_st.last_err = ESP_OK;
     s_st.last_error[0] = '\0';
 }
+#endif
 
 static bool lock(void)
 {
@@ -591,7 +593,13 @@ esp_err_t camera_init(void)
     struct v4l2_capability cap = {0};
     struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && ioctl(fd, VIDIOC_G_FMT, &fmt) == 0) {
+        // QUERYCAP reports the interface ("MIPI-CSI"); the sensor is the one enabled driver
+        // that answered the auto-detect (the project enables only OV5647 by default).
+#ifdef CONFIG_CAMERA_OV5647
+        strlcpy(s_st.sensor, "OV5647", sizeof(s_st.sensor));
+#else
         strlcpy(s_st.sensor, (const char *)cap.card, sizeof(s_st.sensor));
+#endif
         s_st.width = (uint16_t)fmt.fmt.pix.width;
         s_st.height = (uint16_t)fmt.fmt.pix.height;
         s_st.state = CAMERA_STATE_READY;

@@ -8,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "mypi_kbd.h"
 #include "mypi_ui/lvgl_view.h"
+// lv_image_cache_drop(): not in lvgl.h (LVGL 9.4 exposes it via lvgl_private.h).
+#include "src/misc/cache/lv_cache.h"
 
 #if LV_TXT_ENC != LV_TXT_ENC_UTF8 || !LV_USE_LABEL
 #error "MyPi LVGL UI requires UTF-8 text encoding and the label widget"

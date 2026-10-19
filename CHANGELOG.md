@@ -5,6 +5,27 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.10.0 — 2026-10-19 (compile-checked with ESP-IDF v6.1, not hardware-tested)
+
+Camera support for the OV5647 module ("P5V04A SUNNY") on the NANO MIPI-CSI connector.
+
+- New `camera.c/.h` (+ host-testable `camera_core.h`) on `espressif/esp_video` 2.5 (V4L2,
+  MIPI-CSI + ISP pipeline controller for AE/AWB) and the `esp_cam_sensor` OV5647 driver
+  (auto-detect, 800x640 RAW8 -> RGB565). The stream runs only on demand and stops after 10 s
+  idle; photos use the hardware JPEG encoder.
+- Photos: `/store/photos/IMGnnnnn.JPG` on the FAT `storage` partition (directory created on
+  first capture, keeps the newest 20, keeps 512 KB free for logs, `logstore_lock()` serializes
+  file access).
+- LCD: menu item **Camera** (menu rows 34 -> 30 px for 7 items) with an LVGL preview
+  (`ui_lvgl_port_render_camera()`), **SHUTTER** (capture on the UI worker, stack 4 -> 6 KB) and
+  **BACK**; returns to the menu after 5 min without touch.
+- Web: **Camera** page (preview, shutter, saved photos) and `/api/camera/{status,frame.jpg,
+  capture,photo,delete}`. Errors name their stage (camera / capture / storage) in both UIs.
+- Touch: the I2C bus is shared with the camera SCCB (`touch_i2c_bus()`); touch error recovery
+  no longer deletes a shared bus.
+- New menuconfig menu **MyPi-Hotspot → Camera**; `sdkconfig.defaults` enables the OV5647 and
+  disables the unused DVP video device.
+
 ## 0.9.8 — 2026-10-18 (builds, not hardware-tested)
 
 - Revert the v0.9.7 buffer tuning. HW test of v0.9.7: AP disappeared shortly
