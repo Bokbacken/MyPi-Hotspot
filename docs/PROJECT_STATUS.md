@@ -159,7 +159,8 @@ P4/C5 OTA paths are unchanged.
 - **The C5 has one radio.** In APSTA, AP and STA always share one channel and band;
   2.4 GHz and 5 GHz cannot run at the same time. Dual radio is on hold.
 - **11ax is selectable but not the default.** The UI shows a warning: known C5 issue
-  ESP-IDF #19238 (upload can drop to ~0). Focus is b/g/n/a/ac.
+  [ESP-IDF #19238](https://github.com/espressif/esp-idf/issues/19238) (upload can drop to ~0;
+  see *Known issues and monitoring*). Focus is b/g/n/a/ac.
 - **40 MHz only in 11n/11an** on the C5. With 11ac/11ax on 5 GHz the driver stays at 20 MHz,
   so HT40 drops ac/ax. 5 GHz HT20 is recommended; the firmware default is still HT40.
 - **2.4 GHz is always HT20.**
@@ -172,6 +173,23 @@ P4/C5 OTA paths are unchanged.
 - All rates are Mbit/s with 2 decimals (`*_mbps`). Old CSV files with `*_bps` are bytes/s.
 - Preferred flashing: OTA via `/update` (keeps NVS). A merged binary at 0x0 likely
   erases NVS (profiles, settings).
+
+## Known issues and monitoring
+
+### ESP-IDF #19238 — TX hang on ESP32-C5 under TCP uplink load
+
+| Item | Details |
+|---|---|
+| Link | <https://github.com/espressif/esp-idf/issues/19238> |
+| Description | Under sustained TCP uplink load the C5 stops transmitting (upload drops to ~0). Root cause per the issue comments: EDCA/TX buffer exhaustion. |
+| Status (2026-10-19) | Open, reported 2026-10-13, assigned to MaxwellAlan; no fix or PR yet |
+| Affects | ESP-IDF Wi-Fi libraries in v6.1 (not reported on v5.5). This project uses IDF v6.1, so it is affected. |
+| Fix path | A new ESP-IDF release, then a C5 slave rebuild. **Not** ESP-Hosted 3.0.10 (the bug is not in esp-hosted). |
+| Our esp-hosted | Official `espressif/esp_hosted` **v3.0.9** from the IDF Component Registry, not the `esphome/esp-hosted-firmware` ESPHome fork |
+| Workaround | 11ax off by default (UI warning); ac/HT20 recommended on 5 GHz |
+
+The ESP-Hosted 3.0.10 hold (buffer tuning, see below) is separate: 3.0.10 may help SDIO
+throughput but will not fix #19238.
 
 ## Buffer findings (v0.9.7 investigation — defer tuning until ESP-Hosted 3.0.10+)
 
