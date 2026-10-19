@@ -84,6 +84,18 @@ static inline bool camera_frame_valid(int w, int h, size_t stride, int bpp, size
     return stride >= row && (size_t)h <= SIZE_MAX / stride && available >= stride * (size_t)h;
 }
 
+/** esp_video can omit bytesperline/sizeimage; actual buffer lengths are checked separately. */
+static inline bool camera_frame_layout(int w, int h, int bpp, size_t bytesperline,
+                                        size_t sizeimage, size_t *stride)
+{
+    if (!stride || w <= 0 || (bpp != 2 && bpp != 3) ||
+        (size_t)w > SIZE_MAX / (size_t)bpp) return false;
+    size_t row_stride = bytesperline ? bytesperline : (size_t)w * bpp;
+    if (!camera_frame_valid(w, h, row_stride, bpp, sizeimage ? sizeimage : SIZE_MAX)) return false;
+    *stride = row_stride;
+    return true;
+}
+
 /** esp_video RGB24 maps to ISP_COLOR_RGB888 (BGR24 in IDF 6.1), matching JPEG RGB888 input. */
 static inline bool camera_pack_jpeg_pixels(const uint8_t *src, int w, int h, size_t stride,
                                            int bpp, size_t available, uint8_t *dst, size_t dst_len)

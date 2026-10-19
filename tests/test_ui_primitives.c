@@ -331,6 +331,25 @@ static void test_camera_settings(void)
 
 static void test_camera_rgb_conversion(void)
 {
+    size_t stride = 0;
+    // esp_video's G_FMT omits optional layout metadata, but QUERYBUF supplies real lengths.
+    assert(camera_frame_layout(800, 640, 3, 0, 0, &stride));
+    assert(stride == 2400);
+    assert(camera_frame_valid(800, 640, stride, 3, 1536000));
+    assert(!camera_frame_valid(800, 640, stride, 3, 1535999));
+    assert(!camera_frame_valid(800, 640, stride, 3, 0));
+    assert(camera_frame_layout(800, 640, 2, 0, 0, &stride));
+    assert(stride == 1600);
+    assert(camera_frame_layout(3, 2, 3, 12, 0, &stride) && stride == 12);
+    assert(camera_frame_layout(3, 2, 3, 0, 18, &stride) && stride == 9);
+    assert(camera_frame_layout(3, 2, 3, 12, 24, &stride));
+    assert(!camera_frame_layout(3, 2, 3, 12, 23, &stride));
+    assert(!camera_frame_layout(3, 2, 3, 8, 0, &stride));
+    assert(!camera_frame_layout(1, 2, 3, SIZE_MAX, 0, &stride));
+    assert(!camera_frame_layout(0, 2, 3, 0, 0, &stride));
+    assert(!camera_frame_layout(3, 0, 3, 0, 0, &stride));
+    assert(!camera_frame_layout(3, 2, 4, 0, 0, &stride));
+    assert(!camera_frame_layout(3, 2, 3, 0, 0, NULL));
     // ISP RGB888 uses BGR24 byte order, including row padding that must never become a pixel.
     const uint8_t rgb[] = {0,0,255, 0,255,0, 255,0,0, 0xaa,0xbb,0xcc,
                            255,255,255, 0,0,0, 255,0,255, 0xaa,0xbb,0xcc};

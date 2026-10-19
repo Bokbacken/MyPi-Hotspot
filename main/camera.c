@@ -351,6 +351,8 @@ static esp_err_t apply_flip(int fd, const camera_settings_t *settings)
 
 static bool probe_flip(int fd, uint32_t id)
 {
+    // This driver's get_para_value always returns NOT_SUPPORTED; do not trigger error logs.
+    if (strcmp(s_st.sensor, "OV5647") == 0) return false;
     struct v4l2_ext_control ctrl = {.id = id};
     struct v4l2_ext_controls ctrls = {
         .ctrl_class = V4L2_CTRL_CLASS_USER, .count = 1, .controls = &ctrl,
@@ -413,12 +415,14 @@ static esp_err_t stream_start(void)
     s_st.width = (uint16_t)fmt.fmt.pix.width;
     s_st.height = (uint16_t)fmt.fmt.pix.height;
     s_bpp = fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24 ? 3 : 2;
-    s_stride = fmt.fmt.pix.bytesperline ? fmt.fmt.pix.bytesperline : fmt.fmt.pix.width * s_bpp;
-    if (!camera_frame_valid(s_st.width, s_st.height, s_stride, s_bpp, fmt.fmt.pix.sizeimage)) {
+    size_t stride;
+    if (!camera_frame_layout(s_st.width, s_st.height, s_bpp, fmt.fmt.pix.bytesperline,
+                             fmt.fmt.pix.sizeimage, &stride) || stride > UINT32_MAX) {
         set_error(ESP_ERR_INVALID_SIZE, "Camera reported an invalid frame stride/size");
         err = ESP_ERR_INVALID_SIZE;
         goto fail;
     }
+    s_stride = (uint32_t)stride;
     err = apply_flip(fd, &s_settings);
     if (err != ESP_OK) {
         set_error(err, "Camera orientation could not be applied");
@@ -449,6 +453,11 @@ static esp_err_t stream_start(void)
         };
         if (ioctl(fd, VIDIOC_QUERYBUF, &buf) != 0) {
             set_error(ESP_FAIL, "Camera buffer query failed");
+            goto fail;
+        }
+        if (!camera_frame_valid(s_st.width, s_st.height, s_stride, s_bpp, buf.length)) {
+            set_error(ESP_ERR_INVALID_SIZE, "Camera buffer is smaller than the frame layout");
+            err = ESP_ERR_INVALID_SIZE;
             goto fail;
         }
         s_buf[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
