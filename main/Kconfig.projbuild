@@ -164,4 +164,78 @@ menu "MyPi-Hotspot"
                 exposed on the web UI and /api/log.
     endmenu
 
+    menu "Camera"
+        config MYPI_CAMERA_ENABLE
+            bool "MIPI-CSI camera (OV5647 / P5V04A SUNNY)"
+            default y
+            depends on IDF_TARGET_ESP32P4
+            help
+                Camera on the ESP32-P4-NANO CSI connector via espressif/esp_video (V4L2, CSI +
+                ISP) with the OV5647 driver from esp_cam_sensor (auto-detected over SCCB).
+                Adds the LCD "Camera" page and the web "Camera" tab. Photos are saved as
+                JPEG in /store/photos (FAT 'storage' partition). Without a camera the
+                firmware runs normally and both pages show "Camera not detected".
+
+        config MYPI_CAMERA_SCCB_KHZ
+            int "SCCB (I2C) clock (kHz)"
+            range 50 400
+            default 100
+            help
+                The camera control bus is the board I2C bus (GPIO7/8) shared with the touch
+                controller; the camera driver adds its device to the touch driver's bus.
+
+        config MYPI_CAMERA_RESET_GPIO
+            int "Camera reset GPIO (-1 = not connected)"
+            range -1 54
+            default -1
+
+        config MYPI_CAMERA_PWDN_GPIO
+            int "Camera power-down GPIO (-1 = not connected)"
+            range -1 54
+            default -1
+
+        config MYPI_CAMERA_HFLIP
+            bool "Mirror the image horizontally"
+            default n
+
+        config MYPI_CAMERA_VFLIP
+            bool "Flip the image vertically"
+            default n
+
+        config MYPI_CAMERA_JPEG_QUALITY
+            int "JPEG quality of saved photos"
+            range 10 100
+            default 85
+
+        config MYPI_CAMERA_PREVIEW_QUALITY
+            int "JPEG quality of the web preview"
+            range 10 100
+            default 50
+            help
+                Lower = smaller frames and a faster web preview.
+
+        config MYPI_CAMERA_MAX_PHOTOS
+            int "Photos kept in /store/photos"
+            range 1 500
+            default 20
+            help
+                The oldest photo is deleted when a new one would exceed this count. The
+                storage partition is about 3.9 MB and shared with the log store.
+
+        config MYPI_CAMERA_STORAGE_RESERVE_KB
+            int "Storage space kept free for logs (KB)"
+            range 0 2048
+            default 512
+            help
+                A capture fails with "Storage full" instead of using this space.
+
+        config MYPI_CAMERA_IDLE_STOP_S
+            int "Stop the camera stream after (seconds without use)"
+            range 2 600
+            default 10
+            help
+                The stream (sensor, CSI, ISP, frame buffers) only runs while a preview is
+                shown; it stops this long after the last frame was used.
+    endmenu
+
 endmenu

@@ -27,6 +27,7 @@ static const char *TAG = "touch";
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
+static volatile bool s_bus_shared;  // Another driver (camera SCCB) has devices on s_bus
 static SemaphoreHandle_t s_int_sem;
 static bool s_int_enabled;
 
@@ -102,6 +103,17 @@ static void check_bus_lines(void)
     }
 }
 
+static esp_err_t dev_add(void)
+{
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = TOUCH_I2C_ADDR,
+        .scl_speed_hz = TOUCH_I2C_HZ,
+        .scl_wait_us = 20000,   // Tolerate clock stretching by the CST816
+    };
+    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
+}
+
 static esp_err_t bus_create(void)
 {
     i2c_master_bus_config_t bus_cfg = {
@@ -113,14 +125,7 @@ static esp_err_t bus_create(void)
         .flags.enable_internal_pullup = true,  // The board/LCD module also has pull-ups
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_bus), TAG, "i2c_new_master_bus");
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = TOUCH_I2C_ADDR,
-        .scl_speed_hz = TOUCH_I2C_HZ,
-        .scl_wait_us = 20000,   // Tolerate clock stretching by the CST816
-    };
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
+    return dev_add();
 }
 
 static void bus_destroy(void)
@@ -283,7 +288,24 @@ static void handle_error(esp_err_t err)
         s_last_err_log_us = now;
     }
 
-    if (s_err_consecutive % REINIT_AFTER_ERRORS == 0) {
+    if (s_err_consecutive % REINIT_AFTER_ERRORS == 0 && s_bus_shared && s_bus) {
+        // The camera has its SCCB device on this bus: never delete the bus under it. Re-add only
+        // the touch device, reset the bus and pulse TP_RST.
+        s_reinits++;
+        ESP_LOGW(TAG, "Re-initializing touch device + bus reset + TP_RST pulse (shared bus, re-init #%lu)",
+                 (unsigned long)s_reinits);
+        if (s_dev) {
+            i2c_master_bus_rm_device(s_dev);
+            s_dev = NULL;
+        }
+        i2c_master_bus_reset(s_bus);
+        tp_reset_pulse();
+        esp_err_t derr = dev_add();
+        if (derr != ESP_OK) {
+            s_dev = NULL;
+            ESP_LOGE(TAG, "Touch device re-add failed: %s", esp_err_to_name(derr));
+        }
+    } else if (s_err_consecutive % REINIT_AFTER_ERRORS == 0) {
         s_reinits++;
         ESP_LOGW(TAG, "Re-initializing I2C bus + TP_RST pulse (re-init #%lu)", (unsigned long)s_reinits);
         bus_destroy();
@@ -330,6 +352,12 @@ esp_err_t touch_read(touch_point_t *pt)
         pt->y = LCD_V_RES - 1 - pt->y;
     }
     return ESP_OK;
+}
+
+i2c_master_bus_handle_t touch_i2c_bus(void)
+{
+    if (s_bus) s_bus_shared = true;
+    return s_bus;
 }
 
 uint32_t touch_consecutive_errors(void)

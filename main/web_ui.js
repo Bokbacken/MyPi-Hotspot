@@ -45,8 +45,8 @@
   }
 
   // Dashboard pages: one HTML shell, sections selected by location.hash (no extra URI handlers).
-  const PAGES = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "optimize", "debug"];
-  const PAGE_ALIASES = { diagnostics: "debug", status: "overview", clients: "access-point", opt: "optimize" };
+  const PAGES = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "camera", "optimize", "debug"];
+  const PAGE_ALIASES = { diagnostics: "debug", status: "overview", clients: "access-point", opt: "optimize", photo: "camera" };
 
   function pageFromHash(hash) {
     const key = String(hash || "").replace(/^#/, "").toLowerCase();
@@ -369,14 +369,177 @@
     }
   }
 
+  // Camera page (v0.10.0): status + saved photos from /api/camera/status, preview = one JPEG at a time
+  // from /api/camera/frame.jpg while the page is visible (the firmware stops the stream when idle),
+  // shutter = POST /api/camera/capture. Errors name the failing stage (camera, capture, storage).
+  const CAMERA_PREVIEW_MS = 300, CAMERA_RETRY_MS = 3000;
+  const CAMERA_STAGES = { camera: "Camera", capture: "Capture", storage: "Storage" };
+  const CAMERA_PHOTO_RE = /^IMG\d{5}\.JPG$/;
+
+  function cameraUsable(s) {
+    return !!(s && s.enabled && ["ready", "streaming", "error"].includes(s.state));
+  }
+
+  function cameraStatusText(s) {
+    if (!s) return "Device unreachable";
+    if (!s.enabled) return "Camera support is disabled in this firmware (menuconfig: MyPi-Hotspot > Camera)";
+    if (s.state === "starting") return "Camera starting...";
+    if (s.state === "not_detected") return "Camera not detected" + (s.error ? `: ${s.error}` : "");
+    const base = `${s.sensor || "Camera"} ${s.width}x${s.height}`;
+    if (s.state === "error") return `${base} - error: ${s.error || "unknown"} (retrying)`;
+    return `${base} - ${s.state === "streaming" ? "streaming" : "ready"}`;
+  }
+
+  function cameraStorageText(s) {
+    const st = s && s.storage;
+    if (!st || !st.mounted) return "Storage not mounted: photos cannot be saved";
+    return `/store/photos - ${(s.photos || []).length} of max ${s.max_photos} photos, ${st.free_kb} KB free of ${st.total_kb} KB`;
+  }
+
+  function cameraResultText(j) {
+    if (!j) return "Capture failed: device unreachable";
+    if (j.ok) return `Saved ${j.name} (${Math.ceil((j.size || 0) / 1024)} KB)`;
+    return `${CAMERA_STAGES[j.stage] || "Camera"} error: ${j.error || "unknown"}`;
+  }
+
+  function cameraPhotoRows(photos) {
+    const rows = (photos || []).filter((p) => p && CAMERA_PHOTO_RE.test(p.name)).map((p) => {
+      const url = `/api/camera/photo?name=${p.name}`;
+      return `<tr><td>${p.name}</td><td>${Math.ceil((p.size || 0) / 1024)} KB</td>` +
+        `<td><a href='${url}' target='_blank'>view</a> <a href='${url}&dl=1'>download</a> ` +
+        `<button type='button' onclick="MyPiSerial.cameraDelete('${p.name}')">delete</button></td></tr>`;
+    });
+    return rows.length ? "<tr><th>Photo</th><th>Size</th><th></th></tr>" + rows.join("") : "<tr><td>No photos saved yet</td></tr>";
+  }
+
+  function camSet(doc, id, text, bad) {
+    const el = doc.getElementById(id);
+    if (!el) return null;
+    el.textContent = text;
+    if (bad !== undefined && el.classList) {
+      el.classList.toggle("bad", !!bad);
+      el.classList.toggle("ok", !bad);
+    }
+    return el;
+  }
+
+  async function cameraLoad(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    let s = null;
+    try {
+      s = await (await f("/api/camera/status")).json();
+    } catch (e) {
+      s = null;
+    }
+    const usable = cameraUsable(s);
+    camSet(doc, "cam-st", cameraStatusText(s), !usable || s.state === "error");
+    const store = camSet(doc, "cam-store", cameraStorageText(s), !(s && s.storage && s.storage.mounted));
+    if (store && !s) store.textContent = "";
+    const btn = doc.getElementById("cam-shutter");
+    if (btn) btn.disabled = !usable;
+    const table = doc.getElementById("cam-photos");
+    if (table && s) table.innerHTML = cameraPhotoRows(s.photos);
+    return s;
+  }
+
+  async function cameraCapture(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const btn = doc.getElementById("cam-shutter");
+    if (btn) btn.disabled = true;
+    camSet(doc, "cam-msg", "Capturing...");
+    let j = null;
+    try {
+      j = await (await f("/api/camera/capture", { method: "POST" })).json();
+    } catch (e) {
+      j = null;
+    }
+    camSet(doc, "cam-msg", cameraResultText(j), !(j && j.ok));
+    await cameraLoad(doc, f);
+    return j;
+  }
+
+  async function cameraDelete(name, document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    if (!CAMERA_PHOTO_RE.test(String(name))) return null;
+    if (typeof root.confirm === "function" && !root.confirm(`Delete ${name}?`)) return null;
+    let j = null;
+    try {
+      j = await (await f(`/api/camera/delete?name=${name}`, { method: "POST" })).json();
+    } catch (e) {
+      j = null;
+    }
+    camSet(doc, "cam-msg", j && j.ok ? `Deleted ${name}` : `Delete failed: ${(j && j.error) || "device unreachable"}`, !(j && j.ok));
+    await cameraLoad(doc, f);
+    return j;
+  }
+
+  function cameraVisible(doc) {
+    const section = doc.querySelector && doc.querySelector("section.page[data-page='camera']");
+    return !!section && !section.hidden && !doc.hidden;
+  }
+
+  // One preview frame into #cam-img. Throws with the firmware's reason text on failure.
+  async function cameraFrame(doc, f) {
+    const r = await f(`/api/camera/frame.jpg?t=${Date.now()}`, { cache: "no-store" });
+    if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+    const blob = await r.blob();
+    const img = doc.getElementById("cam-img");
+    if (!img || !root.URL || !root.URL.createObjectURL) return;
+    const old = img.dataset && img.dataset.url;
+    const url = root.URL.createObjectURL(blob);
+    img.src = url;
+    if (img.dataset) img.dataset.url = url;
+    if (old) root.URL.revokeObjectURL(old);
+  }
+
+  let cameraLoopRunning = false;
+
+  // Sequential preview loop (never more than one request in flight); ends when the page is hidden.
+  async function cameraPreview(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    if (cameraLoopRunning) return;
+    cameraLoopRunning = true;
+    let failed = false;
+    try {
+      while (cameraVisible(doc)) {
+        let delay = CAMERA_PREVIEW_MS;
+        try {
+          await cameraFrame(doc, f);
+          const err = doc.getElementById("cam-err");
+          if (err) err.hidden = true;
+          if (failed) await cameraLoad(doc, f);
+          failed = false;
+        } catch (e) {
+          const err = camSet(doc, "cam-err", `Preview unavailable: ${e && e.message ? e.message : e}`);
+          if (err) err.hidden = false;
+          if (!failed) await cameraLoad(doc, f);
+          failed = true;
+          delay = CAMERA_RETRY_MS;
+        }
+        await new Promise((resolve) => root.setTimeout(resolve, delay));
+      }
+    } finally {
+      cameraLoopRunning = false;
+    }
+  }
+
+  function cameraOpen(document) {
+    if (typeof root.fetch !== "function" || !cameraVisible(document)) return;
+    cameraLoad(document).then(() => cameraPreview(document));
+  }
+
   function start(document) {
     drawDividers(document);
     addPasswordToggles(document);
     const isShell = !!showPage(document, root.location && root.location.hash);
     if (isShell) {
       root.addEventListener("hashchange", () => {
-        if (showPage(document, root.location.hash) === "optimize" && typeof root.fetch === "function") optLoad(document);
+        const page = showPage(document, root.location.hash);
+        if (page === "optimize" && typeof root.fetch === "function") optLoad(document);
+        if (page === "camera") cameraOpen(document);
       });
+      if (document.addEventListener) document.addEventListener("visibilitychange", () => cameraOpen(document));
+      cameraOpen(document);
     }
     if (typeof root.fetch === "function") {
       updateWifi(document, root.fetch.bind(root));
@@ -392,7 +555,8 @@
   const api = { frame8n1, waveformPath, drawDividers, pageFromHash, showPage, rssiStep, rssiColor, staSignal, shouldPollStatus, togglePassword, addPasswordToggles,
     OPT_FIELDS, OPT_SELECTS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, sdioStatus, optLoad, optSave, optClearEmergency,
     PROTO_BITS, protoMaskFromChecks, protoSetChecks, protoFilterForBand, protoLabel, protoHint, radioFillForm, radioReadForm,
-    radioRebootRequired };
+    radioRebootRequired, cameraUsable, cameraStatusText, cameraStorageText, cameraResultText, cameraPhotoRows,
+    cameraLoad, cameraCapture, cameraDelete, cameraVisible, cameraFrame, cameraPreview };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {

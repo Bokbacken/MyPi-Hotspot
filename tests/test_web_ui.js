@@ -45,7 +45,7 @@ function fakeElement(attrs) {
     classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); }, has: (n) => classes.has(n) },
   };
 }
-const pages = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "optimize", "debug"];
+const pages = ["overview", "wifi", "access-point", "traffic", "ethernet", "system", "camera", "optimize", "debug"];
 const sections = pages.map((page) => fakeElement({ dataset: { page } }));
 const links = pages.map((page) => fakeElement({ attrs: { href: `/#${page}` } }));
 const fakeDoc = {
@@ -417,5 +417,99 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ids["opt-sdio-st"].textContent, "active 40 MHz (bus 40 MHz) - fell back from 50 MHz after a C5 failure");
   assert.equal(ui.sdioStatus({ sdio_mhz: 50, active: { sdio_mhz: 40 } }), "active 40 MHz - saved 50 MHz, reboot pending");
 
-  console.log("Web UI serial, routing, signal and Optimize tests passed");
+  // Camera page (v0.10.0): status texts, error stages, photo table and the capture/delete flows.
+  assert.equal(ui.pageFromHash("#camera"), "camera");
+  assert.equal(ui.cameraUsable({ enabled: true, state: "ready" }), true);
+  assert.equal(ui.cameraUsable({ enabled: true, state: "not_detected" }), false);
+  assert.equal(ui.cameraUsable({ enabled: false, state: "disabled" }), false);
+  assert.equal(ui.cameraUsable(null), false);
+  assert.equal(ui.cameraStatusText({ enabled: true, state: "ready", sensor: "OV5647", width: 800, height: 640 }),
+    "OV5647 800x640 - ready");
+  assert.equal(ui.cameraStatusText({ enabled: true, state: "not_detected", error: "Camera not detected: check the CSI ribbon cable" }),
+    "Camera not detected: Camera not detected: check the CSI ribbon cable");
+  assert.match(ui.cameraStatusText({ enabled: true, state: "error", sensor: "OV5647", width: 800, height: 640, error: "Frame timeout" }),
+    /error: Frame timeout \(retrying\)$/);
+  assert.match(ui.cameraStatusText({ enabled: false, state: "disabled" }), /disabled in this firmware/);
+  assert.equal(ui.cameraStatusText(null), "Device unreachable");
+  assert.equal(ui.cameraResultText({ ok: true, name: "IMG00003.JPG", size: 51300 }), "Saved IMG00003.JPG (51 KB)");
+  assert.equal(ui.cameraResultText({ ok: false, stage: "storage", error: "Storage full (300 KB free, photo 80 KB): delete photos" }),
+    "Storage error: Storage full (300 KB free, photo 80 KB): delete photos");
+  assert.equal(ui.cameraResultText({ ok: false, stage: "capture", error: "JPEG encoding failed" }), "Capture error: JPEG encoding failed");
+  assert.equal(ui.cameraResultText({ ok: false, stage: "camera", error: "Camera not detected" }), "Camera error: Camera not detected");
+  assert.equal(ui.cameraResultText(null), "Capture failed: device unreachable");
+  assert.equal(ui.cameraStorageText({ storage: { mounted: false } }), "Storage not mounted: photos cannot be saved");
+  assert.equal(ui.cameraStorageText({ storage: { mounted: true, free_kb: 3000, total_kb: 3900 }, photos: [{}], max_photos: 20 }),
+    "/store/photos - 1 of max 20 photos, 3000 KB free of 3900 KB");
+  const rows = ui.cameraPhotoRows([{ name: "IMG00002.JPG", size: 2048 }, { name: "<img onerror=x>", size: 1 }]);
+  assert.match(rows, /IMG00002\.JPG<\/td><td>2 KB/);
+  assert.match(rows, /\/api\/camera\/photo\?name=IMG00002\.JPG&dl=1/);
+  assert.equal(rows.includes("onerror"), false);
+  assert.equal(ui.cameraPhotoRows([]), "<tr><td>No photos saved yet</td></tr>");
+  // The firmware routes used by the page exist.
+  for (const uri of ["/api/camera/status", "/api/camera/frame.jpg", "/api/camera/capture", "/api/camera/photo", "/api/camera/delete"]) {
+    assert.ok(webC.includes(`.uri = "${uri}"`), uri);
+  }
+
+  const cam = { state: "ready", photos: [], fail: null, deleted: [] };
+  const camFetch = async (url, opts) => {
+    const method = (opts && opts.method) || "GET";
+    if (url === "/api/camera/status") {
+      return { json: async () => ({ enabled: true, state: cam.state, sensor: "OV5647", width: 800, height: 640,
+        storage: { mounted: true, free_kb: 3000, total_kb: 3900 }, max_photos: 20, photos: cam.photos }) };
+    }
+    if (url === "/api/camera/capture" && method === "POST") {
+      if (cam.fail) return { json: async () => ({ ok: false, ...cam.fail }) };
+      const name = `IMG0000${cam.photos.length + 1}.JPG`;
+      cam.photos.unshift({ name, size: 40000 });
+      return { json: async () => ({ ok: true, name, size: 40000 }) };
+    }
+    if (url.startsWith("/api/camera/delete?name=") && method === "POST") {
+      const name = url.split("=")[1];
+      cam.deleted.push(name);
+      cam.photos = cam.photos.filter((p) => p.name !== name);
+      return { json: async () => ({ ok: true }) };
+    }
+    if (url.startsWith("/api/camera/frame.jpg")) {
+      if (cam.state !== "ready") return { ok: false, status: 503, text: async () => "Camera not detected: check the CSI ribbon cable" };
+      return { ok: true, blob: async () => ({ size: 1 }) };
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const camIds = {};
+  for (const id of ["cam-st", "cam-store", "cam-shutter", "cam-photos", "cam-msg", "cam-err", "cam-img"]) {
+    const cls = new Set();
+    camIds[id] = { textContent: "", innerHTML: "", disabled: true, hidden: true, dataset: {},
+      classList: { toggle(n, on) { if (on) cls.add(n); else cls.delete(n); }, has: (n) => cls.has(n) } };
+  }
+  const camDoc = { getElementById: (id) => camIds[id] || null };
+  await ui.cameraLoad(camDoc, camFetch);
+  assert.equal(camIds["cam-st"].textContent, "OV5647 800x640 - ready");
+  assert.equal(camIds["cam-shutter"].disabled, false);
+  assert.equal(camIds["cam-photos"].innerHTML, "<tr><td>No photos saved yet</td></tr>");
+  let jr = await ui.cameraCapture(camDoc, camFetch);
+  assert.equal(jr.ok, true);
+  assert.equal(camIds["cam-msg"].textContent, "Saved IMG00001.JPG (40 KB)");
+  assert.equal(camIds["cam-msg"].classList.has("ok"), true);
+  assert.match(camIds["cam-photos"].innerHTML, /IMG00001\.JPG/);
+  cam.fail = { stage: "storage", error: "Storage not mounted (FAT partition 'storage')" };
+  jr = await ui.cameraCapture(camDoc, camFetch);
+  assert.equal(jr.ok, false);
+  assert.equal(camIds["cam-msg"].textContent, "Storage error: Storage not mounted (FAT partition 'storage')");
+  assert.equal(camIds["cam-msg"].classList.has("bad"), true);
+  jr = await ui.cameraDelete("IMG00001.JPG", camDoc, camFetch);
+  assert.equal(jr.ok, true);
+  assert.deepEqual(cam.deleted, ["IMG00001.JPG"]);
+  assert.equal(await ui.cameraDelete("../x", camDoc, camFetch), null);
+  // Preview: a camera failure shows the firmware's reason and disables the shutter.
+  cam.state = "not_detected";
+  await assert.rejects(ui.cameraFrame(camDoc, camFetch), /Camera not detected: check the CSI ribbon cable/);
+  await ui.cameraLoad(camDoc, camFetch);
+  assert.equal(camIds["cam-shutter"].disabled, true);
+  assert.equal(camIds["cam-st"].classList.has("bad"), true);
+  // Hidden page: the preview loop does not start.
+  await ui.cameraPreview({ ...camDoc, hidden: false, querySelector: () => ({ hidden: true }) }, camFetch);
+  assert.equal(ui.cameraVisible({ hidden: false, querySelector: () => ({ hidden: false }) }), true);
+  assert.equal(ui.cameraVisible({ hidden: true, querySelector: () => ({ hidden: false }) }), false);
+
+  console.log("Web UI serial, routing, signal, Optimize and Camera tests passed");
 })().catch((e) => { console.error(e); process.exit(1); });

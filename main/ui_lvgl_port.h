@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "mypi_kbd.h"
 #include "mypi_ui/state.h"
 
@@ -12,6 +13,11 @@
 bool ui_lvgl_port_init(void);
 // Caller holds display_lock(); pixels are copied synchronously into the framebuffer.
 bool ui_lvgl_port_render(const mypi_ui_status_t *state);
+// Camera page (v0.10.0): shows an RGB565 preview (width x height, at most 240 x 200, centered; NULL =
+// none) and an optional centered overlay text (errors/status, 0xRRGGBB color) in the status viewport.
+// Caller holds display_lock(); pixels must stay valid until the next render call.
+bool ui_lvgl_port_render_camera(const uint16_t *pixels, int width, int height, const char *overlay,
+                                uint32_t overlay_rgb);
 // Runs LVGL timers (pointer indev polling). Never draws: only render() may touch the framebuffer.
 void ui_lvgl_port_poll(void);
 void ui_lvgl_port_deinit(void);

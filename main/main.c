@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 
+#include "camera.h"
 #include "diag.h"
 #include "display.h"
 #include "display_ui.h"
@@ -97,6 +98,13 @@ void app_main(void)
     bool touch_ok = touch_init() == ESP_OK;
     if (!touch_ok) {
         ESP_LOGE(TAG, "Touch init failed - touch disabled");
+    }
+
+    // Camera (MIPI-CSI, SCCB on the touch I2C bus): probe only, streams start on demand.
+    // Runs before the OTA image is marked valid, so a camera driver crash rolls an update back.
+    esp_err_t cam_err = camera_init();
+    if (cam_err != ESP_OK && cam_err != ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "Camera unavailable (%s) - camera pages show the reason", esp_err_to_name(cam_err));
     }
 
     // Rollback protection: a freshly OTA-updated image is confirmed once it got this far.

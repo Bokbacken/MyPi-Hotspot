@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "camera.h"
 #include "cJSON.h"
 #include "diag.h"
 #include "display.h"
@@ -63,7 +64,7 @@ extern const char _binary_web_ui_js_end[];
     "<div class='mypi-divider'><svg data-text='Hotspot'></svg></div>" \
     "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/#overview'>Overview</a><a href='/#wifi'>Wi-Fi</a>" \
     "<a href='/#access-point'>Access point</a><a href='/#traffic'>Traffic</a><a href='/#ethernet'>Ethernet</a>" \
-    "<a href='/#system'>System</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
+    "<a href='/#system'>System</a><a href='/#camera'>Camera</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -112,6 +113,12 @@ MYPI_BRAND_HEADER
 "<small>(applied immediately, saved across reboots)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
+// v0.10.0 Camera page: live preview (one JPEG at a time while the page is visible), shutter, saved
+// photos. Logic in web_ui.js (MyPiSerial.camera*).
+"<section class='page' data-page='camera'><h2>Camera</h2><p id='cam-st'></p>"
+"<div class='cam-view'><img id='cam-img' alt='Camera preview'><p id='cam-err' class='bad' hidden></p></div>"
+"<p><button type='button' id='cam-shutter' onclick='MyPiSerial.cameraCapture()' disabled>Shutter</button> <span id='cam-msg'></span></p>"
+"<h3 style='font-size:1em'>Saved photos</h3><p id='cam-store'></p><table id='cam-photos'></table></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
 // AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
 // width (HT40/HT20) and the SDIO clock (40/50 MHz, auto-fallback) to the radio grid. Checkboxes and
@@ -1756,6 +1763,146 @@ static esp_err_t api_logstore_clear_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, err == ESP_OK ? "cleared" : esp_err_to_name(err));
 }
 
+// ---------------------------------------------------------------------------
+// Camera API (v0.10.0): status, preview frame, capture, saved photos (/store/photos)
+// ---------------------------------------------------------------------------
+
+#define CAMERA_LIST_MAX 64
+
+// GET /api/camera/status
+static esp_err_t api_camera_status_get(httpd_req_t *req)
+{
+    camera_status_t st;
+    camera_get_status(&st);
+    logstore_info_t li;
+    logstore_get_info(&li);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "enabled", st.state != CAMERA_STATE_DISABLED);
+    cJSON_AddStringToObject(j, "state", camera_state_name(st.state));
+    cJSON_AddStringToObject(j, "sensor", st.sensor);
+    cJSON_AddNumberToObject(j, "width", st.width);
+    cJSON_AddNumberToObject(j, "height", st.height);
+    cJSON_AddNumberToObject(j, "frames", st.frames);
+    cJSON_AddNumberToObject(j, "photos_taken", st.photos_taken);
+    cJSON_AddStringToObject(j, "error", st.last_error);
+    cJSON_AddStringToObject(j, "last_photo", st.last_photo);
+    cJSON_AddNumberToObject(j, "max_photos", CONFIG_MYPI_CAMERA_MAX_PHOTOS);
+    cJSON *sto = cJSON_AddObjectToObject(j, "storage");
+    cJSON_AddBoolToObject(sto, "mounted", li.mounted);
+    cJSON_AddNumberToObject(sto, "free_kb", li.free_kb);
+    cJSON_AddNumberToObject(sto, "total_kb", li.total_kb);
+    cJSON *arr = cJSON_AddArrayToObject(j, "photos");
+    camera_photo_t *list = calloc(CAMERA_LIST_MAX, sizeof(camera_photo_t));
+    int n = list ? camera_photo_list(list, CAMERA_LIST_MAX) : 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", list[i].name);
+        cJSON_AddNumberToObject(o, "size", list[i].size);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(list);
+    return send_json(req, j);
+}
+
+// GET /api/camera/frame.jpg: one fresh preview frame; 503 + reason text if the camera fails.
+static esp_err_t api_camera_frame_get(httpd_req_t *req)
+{
+    uint8_t *jpg = NULL;
+    size_t len = 0;
+    esp_err_t err = camera_snapshot_jpeg(CONFIG_MYPI_CAMERA_PREVIEW_QUALITY, &jpg, &len);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (err != ESP_OK) {
+        camera_status_t st;
+        camera_get_status(&st);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, st.last_error[0] ? st.last_error : esp_err_to_name(err));
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    err = httpd_resp_send(req, (const char *)jpg, len);
+    free(jpg);
+    return err;
+}
+
+// POST /api/camera/capture -> {"ok":true,"name":"IMG00001.JPG","size":n} or
+// {"ok":false,"stage":"camera|capture|storage","error":"..."}
+static esp_err_t api_camera_capture_post(httpd_req_t *req)
+{
+    char name[CAMERA_PHOTO_NAME_LEN];
+    uint32_t size = 0;
+    esp_err_t err = camera_capture_save(name, sizeof(name), &size);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", err == ESP_OK);
+    if (err == ESP_OK) {
+        cJSON_AddStringToObject(j, "name", name);
+        cJSON_AddNumberToObject(j, "size", size);
+    } else {
+        camera_status_t st;
+        camera_get_status(&st);
+        cJSON_AddStringToObject(j, "stage", camera_stage_name(st.capture_stage));
+        cJSON_AddStringToObject(j, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
+        httpd_resp_set_status(req, st.capture_stage == CAMERA_STAGE_STORAGE ? "507 Insufficient Storage" :
+                                   (st.capture_stage == CAMERA_STAGE_CAMERA ? "503 Service Unavailable" :
+                                    "500 Internal Server Error"));
+    }
+    return send_json(req, j);
+}
+
+// GET /api/camera/photo?name=IMG00001.JPG  (add &dl=1 to download)
+static esp_err_t api_camera_photo_get(httpd_req_t *req)
+{
+    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "", dl[4] = "", path[48];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "name", name, sizeof(name));
+        httpd_query_key_value(q, "dl", dl, sizeof(dl));
+    }
+    if (!camera_photo_path(name, path, sizeof(path))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: GET /api/camera/photo?name=IMGnnnnn.JPG");
+    }
+    if (!logstore_lock(5000)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "storage busy");
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        logstore_unlock();
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    char disp[64];
+    if (dl[0] == '1') {
+        snprintf(disp, sizeof(disp), "attachment; filename=\"mypi-%s\"", name);
+        httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    }
+    const size_t bs = 4096;
+    char *buf = malloc(bs);
+    esp_err_t err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+    size_t r;
+    while (err == ESP_OK && (r = fread(buf, 1, bs, f)) > 0) {
+        err = httpd_resp_send_chunk(req, buf, r);
+    }
+    fclose(f);
+    logstore_unlock();
+    free(buf);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    return err;
+}
+
+// POST /api/camera/delete?name=IMG00001.JPG
+static esp_err_t api_camera_delete_post(httpd_req_t *req)
+{
+    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "name", name, sizeof(name));
+    }
+    if (!camera_photo_name_ok(name)) return send_result(req, ESP_ERR_INVALID_ARG, NULL, "name=IMGnnnnn.JPG");
+    esp_err_t err = camera_photo_delete(name);
+    return send_result(req, err, "deleted", err == ESP_ERR_NOT_FOUND ? "photo not found" : NULL);
+}
+
 esp_err_t web_start(void)
 {
     // httpd_sock_err() logs a warning BEFORE it inspects errno; the logging path can clobber
@@ -1820,6 +1967,11 @@ esp_err_t web_start(void)
         { .uri = "/api/iperf/start",    .method = HTTP_POST, .handler = api_iperf_start },
         { .uri = "/api/iperf/stop",     .method = HTTP_POST, .handler = api_iperf_stop },
         { .uri = "/api/iperf",          .method = HTTP_GET,  .handler = api_iperf_get },
+        { .uri = "/api/camera/status",  .method = HTTP_GET,  .handler = api_camera_status_get },
+        { .uri = "/api/camera/frame.jpg", .method = HTTP_GET, .handler = api_camera_frame_get },
+        { .uri = "/api/camera/capture", .method = HTTP_POST, .handler = api_camera_capture_post },
+        { .uri = "/api/camera/photo",   .method = HTTP_GET,  .handler = api_camera_photo_get },
+        { .uri = "/api/camera/delete",  .method = HTTP_POST, .handler = api_camera_delete_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);

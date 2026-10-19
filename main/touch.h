@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "sdkconfig.h"
 #include "pins.h"   // All GPIO assignments (VERIFY BEFORE FLASHING)
@@ -48,6 +49,13 @@ bool touch_wait(bool finger_down, int idle_timeout_ms);
 /** Read the controller once. Returns ESP_OK and fills *pt on success.
  *  Failures are counted, logged rate-limited and trigger bus recovery. */
 esp_err_t touch_read(touch_point_t *pt);
+
+/**
+ * The board I2C bus (TP_SDA/TP_SCL, GPIO7/8), NULL if touch_init() could not create it. Other
+ * drivers on the same bus (camera SCCB) use this handle; after the first call touch recovery no
+ * longer deletes/re-creates the bus, it only re-adds the touch device and resets the bus.
+ */
+i2c_master_bus_handle_t touch_i2c_bus(void);
 
 /** Number of consecutive failed reads (0 = healthy). */
 uint32_t touch_consecutive_errors(void);

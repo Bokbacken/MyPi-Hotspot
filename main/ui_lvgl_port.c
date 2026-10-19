@@ -1,5 +1,7 @@
 #include "ui_lvgl_port.h"
 
+#include <string.h>
+
 #include "display.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
@@ -17,6 +19,12 @@ static lv_display_t *s_display;
 static lv_indev_t *s_indev;
 static mypi_ui_lvgl_view_t s_view;
 static bool s_render_active;
+// Camera preview (v0.10.0): an image + overlay label in the same status viewport, shown instead of
+// the status view while the camera page is open. The pixels stay owned by the caller.
+static lv_obj_t *s_cam_root;
+static lv_obj_t *s_cam_img;
+static lv_obj_t *s_cam_label;
+static lv_image_dsc_t s_cam_dsc;
 // Partial draw buffer (LVGL flush buffer) in INTERNAL RAM (v0.9.0, RAM strategy: time-critical): LVGL
 // renders here, flush() copies into the PSRAM framebuffer, which display.c pushes over SPI via
 // internal DMA bounce buffers. 9.6 KB.
@@ -94,6 +102,41 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->state = pressed && inside ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
+static void camera_view_create(lv_obj_t *screen)
+{
+    s_cam_root = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_cam_root);
+    lv_obj_set_size(s_cam_root, LCD_H_RES, MYPI_LVGL_STATUS_HEIGHT);
+    lv_obj_set_style_bg_color(s_cam_root, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_cam_root, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_cam_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cam_root, LV_OBJ_FLAG_HIDDEN);
+    s_cam_img = lv_image_create(s_cam_root);
+    lv_obj_center(s_cam_img);
+    lv_obj_add_flag(s_cam_img, LV_OBJ_FLAG_HIDDEN);
+    s_cam_label = lv_label_create(s_cam_root);
+    lv_obj_set_style_text_font(s_cam_label, &mypi_font_14, 0);
+    lv_obj_set_width(s_cam_label, LCD_H_RES - 16);
+    lv_obj_set_style_text_align(s_cam_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_cam_label, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_bg_color(s_cam_label, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_cam_label, LV_OPA_70, 0);
+    lv_obj_center(s_cam_label);
+    lv_obj_add_flag(s_cam_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void camera_view_show(bool on)
+{
+    if (!s_cam_root || !s_view.root) return;
+    if (on) {
+        lv_obj_add_flag(s_view.root, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_cam_root, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cam_root, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_view.root, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 bool ui_lvgl_port_init(void)
 {
     if (s_display) return true;
@@ -110,6 +153,7 @@ bool ui_lvgl_port_init(void)
     mypi_ui_lvgl_view_init(&s_view, lv_display_get_screen_active(s_display));
     // Status labels inherit the MyPi font (ASCII + å ä ö Å Ä Ö μ π).
     lv_obj_set_style_text_font(s_view.root, &mypi_font_14, 0);
+    camera_view_create(lv_display_get_screen_active(s_display));
 
     s_indev = lv_indev_create();
     if (s_indev) {
@@ -122,8 +166,45 @@ bool ui_lvgl_port_init(void)
 
 bool ui_lvgl_port_render(const mypi_ui_status_t *state)
 {
-    if (!s_display || !mypi_ui_lvgl_view_update(&s_view, state)) return false;
+    if (!s_display) return false;
+    camera_view_show(false);
+    if (!mypi_ui_lvgl_view_update(&s_view, state)) return false;
     // Legacy screens may have overwritten the viewport since the previous frame.
+    lv_obj_invalidate(lv_display_get_screen_active(s_display));
+    s_render_active = true;
+    lv_refr_now(s_display);
+    s_render_active = false;
+    return true;
+}
+
+bool ui_lvgl_port_render_camera(const uint16_t *pixels, int width, int height, const char *overlay,
+                                uint32_t overlay_rgb)
+{
+    if (!s_display || !s_cam_root) return false;
+    camera_view_show(true);
+    if (pixels && width > 0 && height > 0 && width <= LCD_H_RES && height <= MYPI_LVGL_STATUS_HEIGHT) {
+        lv_image_cache_drop(&s_cam_dsc);    // Same buffer, new frame
+        memset(&s_cam_dsc, 0, sizeof(s_cam_dsc));
+        s_cam_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_cam_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        s_cam_dsc.header.w = (uint32_t)width;
+        s_cam_dsc.header.h = (uint32_t)height;
+        s_cam_dsc.header.stride = (uint32_t)width * 2;
+        s_cam_dsc.data_size = (uint32_t)width * (uint32_t)height * 2;
+        s_cam_dsc.data = (const uint8_t *)pixels;
+        lv_image_set_src(s_cam_img, &s_cam_dsc);
+        lv_obj_center(s_cam_img);
+        lv_obj_remove_flag(s_cam_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cam_img, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (overlay && overlay[0]) {
+        lv_label_set_text(s_cam_label, overlay);
+        lv_obj_set_style_text_color(s_cam_label, lv_color_hex(overlay_rgb), 0);
+        lv_obj_remove_flag(s_cam_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cam_label, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_invalidate(lv_display_get_screen_active(s_display));
     s_render_active = true;
     lv_refr_now(s_display);
@@ -259,5 +340,6 @@ void ui_lvgl_port_deinit(void)
     lv_display_delete(s_display);
     s_display = NULL;
     s_view.root = NULL;
+    s_cam_root = s_cam_img = s_cam_label = NULL;
     lv_deinit();
 }
