@@ -200,7 +200,14 @@ already 32 (`WIFI_RMT_STATIC_RX_BUFFER_NUM`, higher than the suggested 10) and
 `CONFIG_SPIRAM_SPEED=80` is the applicable P4 symbol (`CONFIG_ESP32P4_SPIRAM_SPEED`
 does not exist in IDF 6.1). 2.4 GHz is locked to HT20 at runtime
 (`esp_wifi_set_bandwidths`). 802.11ax is selectable again since v0.9.3 but not in the default
-set; the UI warns about the known C5 upload issue (ESP-IDF #19238). Host SDIO RX queue 64 and RX
+set; the UI warns about the known C5 upload issue
+([ESP-IDF #19238](https://github.com/espressif/esp-idf/issues/19238): TX hang under TCP uplink
+load, with all static TX buffers outstanding while RX callbacks continue. The issue asks whether a
+lost TX completion or stalled EDCA state machine is responsible; its root cause is unconfirmed.
+The reporter reproduced on IDF v6.1 but not v5.5 in their tested setup; this project's use of v6.1
+does not establish that its 11ax upload result has the same cause. No fix or delivery release has
+been announced. A C5 rebuild is conditional on an applicable IDF Wi-Fi-library fix being confirmed
+and released; whether ESP-Hosted 3.0.10 is relevant to #19238 is unconfirmed. Host SDIO RX queue 64 and RX
 staging 4 are the v0.9.6 values restored in v0.9.8; C5 buffer tuning is on hold until an official
 ESP-Hosted 3.0.10+.
 

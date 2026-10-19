@@ -22,6 +22,31 @@ v0.9.8 is the current main. Flash `mypi-hotspot-v0.9.8-ota.bin` via `/update`
 
 **Recommended setting:** ac / HT20 on 5 GHz — HT40 links up but is slower and disturbs Wi-Fi 7 APs.
 
+## Monitor ESP-IDF #19238 (C5 TX hang under TCP uplink load)
+
+- **Issue:** [espressif/esp-idf#19238](https://github.com/espressif/esp-idf/issues/19238) —
+  "TX hang on ESP32-C5 under TCP uplink load".
+- **Reported symptom:** the reporter describes TX stopping during sustained traffic, TCP writes
+  timing out, all static TX buffers remaining outstanding, and RX callbacks continuing. This does
+  not establish that TCP downloads continue. The issue asks whether a lost TX completion or a
+  stalled EDCA state machine is responsible; the root cause is unconfirmed.
+- **Status (checked 2026-10-19):** open, reported 2026-10-13, assigned to MaxwellAlan. No diagnosis,
+  fix, or delivery release has been announced.
+- **Versions:** the reporter reproduced the issue with ESP-IDF **v6.1** but not **v5.5** in their
+  tested setup. MyPi-Hotspot also builds with IDF v6.1, but sharing that version does not establish
+  that our 11ax upload result has the same cause.
+- **Possible fix path:** if an ESP-IDF Wi-Fi-library fix for this issue is confirmed and released,
+  rebuilding the C5 slave with that release may be appropriate. Whether ESP-Hosted 3.0.10 is
+  relevant to this issue is unconfirmed; its separate role in buffer tuning remains under
+  investigation.
+- **Which esp-hosted we use:** the official
+  [espressif/esp-hosted](https://components.espressif.com/components/espressif/esp_hosted)
+  **v3.0.9** from the IDF Component Registry (pinned in `main/idf_component.yml`). Not
+  `esphome/esp-hosted-firmware`, which is a separate ESPHome fork with an ESP-NOW overlay.
+- **While unconfirmed:** keep 11ax off (not in the default set; the UI warns), use ac/HT20 on 5 GHz.
+- **If an applicable fix is released:** note the IDF release, rebuild the C5 slave on it, flash via
+  `/c5update`, then re-run the upload test with ax ticked and compare with the v0.5.3 baseline.
+
 ## Hotspot v0.9.5–v0.9.6 — HW-tested (PRs merged)
 
 - v0.9.5 (PR #18): SDIO 40/50 MHz and 5 GHz HT40/HT20 Optimize dropdowns. HW result: HT40 stayed at
