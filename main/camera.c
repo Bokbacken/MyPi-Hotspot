@@ -161,7 +161,7 @@ esp_err_t camera_photo_delete(const char *name)
 #define JPEG_TIMEOUT_MS     500
 #define RETRY_BACKOFF_MS    3000    // After a stream failure: fail fast instead of blocking every UI tick
 
-static int s_fd = -1;
+static volatile int s_fd = -1;     // Read unlocked by idle_task as a cheap pre-check
 static uint8_t *s_buf[CAMERA_BUF_COUNT];
 static size_t s_buf_len[CAMERA_BUF_COUNT];
 static uint32_t s_stride;               // Bytes per line of the RGB565 frames
@@ -366,9 +366,10 @@ static esp_err_t encode(const struct v4l2_buffer *buf, int quality, size_t *len)
         }
     }
     if (!s_jpeg_out) {
-        // Worst case for a detailed frame at high quality stays well below 1 byte per pixel.
+        // Same size as the RGB565 input (2 bytes per pixel): enough even at quality 100 on a detailed
+        // scene. PSRAM, allocated only while the stream runs.
         jpeg_encode_memory_alloc_cfg_t mem = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
-        s_jpeg_out = jpeg_alloc_encoder_mem((size_t)s_st.width * s_st.height, &mem, &s_jpeg_out_size);
+        s_jpeg_out = jpeg_alloc_encoder_mem((size_t)s_st.width * s_st.height * 2, &mem, &s_jpeg_out_size);
         if (!s_jpeg_out) {
             s_jpeg_out_size = 0;
             set_error(ESP_ERR_NO_MEM, "No memory for the JPEG buffer");
@@ -528,8 +529,9 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
                 size_t written = f ? fwrite(s_jpeg_out, 1, len, f) : 0;
                 bool closed = f && fclose(f) == 0;
                 if (!f || written != len || !closed) {
+                    int e = errno;
                     unlink(path);
-                    set_error(ESP_ERR_INVALID_SIZE, "Write failed: %s (errno %d)", name, errno);
+                    set_error(ESP_ERR_INVALID_SIZE, "Write failed: %s (errno %d)", name, e);
                     err = ESP_ERR_INVALID_SIZE;
                 }
             }

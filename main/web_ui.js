@@ -438,7 +438,7 @@
     const btn = doc.getElementById("cam-shutter");
     if (btn) btn.disabled = !usable;
     const table = doc.getElementById("cam-photos");
-    if (table && s) table.innerHTML = cameraPhotoRows(s.photos);
+    if (table) table.innerHTML = s ? cameraPhotoRows(s.photos) : "";
     return s;
   }
 
