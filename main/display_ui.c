@@ -287,14 +287,13 @@ static void ui_worker(void *arg)
         case UI_JOB_CAMERA_CAPTURE: {
             char name[CAMERA_PHOTO_NAME_LEN];
             uint32_t bytes = 0;
-            esp_err_t cerr = camera_capture_save(name, sizeof(name), &bytes);
+            camera_capture_result_t result;
+            esp_err_t cerr = camera_capture_save(name, sizeof(name), &bytes, &result);
             if (cerr == ESP_OK) {
                 snprintf(message, sizeof(message), "Saved %s (%lu KB)", name, (unsigned long)((bytes + 1023) / 1024));
             } else {
-                // Init, capture or storage failure: the camera module explains which one.
-                camera_status_t cs;
-                camera_get_status(&cs);
-                snprintf(message, sizeof(message), "%.63s", cs.last_error[0] ? cs.last_error : esp_err_to_name(cerr));
+                snprintf(message, sizeof(message), "%.63s",
+                         result.error[0] ? result.error : esp_err_to_name(cerr));
             }
             break;
         }

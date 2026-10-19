@@ -34,10 +34,13 @@
 static const char *TAG = "camera";
 
 static SemaphoreHandle_t s_lock;
+static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 #if CONFIG_MYPI_CAMERA_ENABLE
 static camera_status_t s_st = {.state = CAMERA_STATE_STARTING};
+static camera_status_t s_status_snapshot = {.state = CAMERA_STATE_STARTING};
 #else
 static camera_status_t s_st = {.state = CAMERA_STATE_DISABLED};
+static camera_status_t s_status_snapshot = {.state = CAMERA_STATE_DISABLED};
 #endif
 
 #define LOCK_TIMEOUT_MS     4000
@@ -78,6 +81,9 @@ static bool lock(void)
 
 static void unlock(void)
 {
+    portENTER_CRITICAL(&s_status_mux);
+    s_status_snapshot = s_st;
+    portEXIT_CRITICAL(&s_status_mux);
     xSemaphoreGive(s_lock);
 }
 
@@ -87,7 +93,9 @@ void camera_get_status(camera_status_t *out)
         *out = s_st;
         unlock();
     } else {
-        *out = s_st;    // Busy (capture in progress): a slightly stale copy is fine for display
+        portENTER_CRITICAL(&s_status_mux);
+        *out = s_status_snapshot;
+        portEXIT_CRITICAL(&s_status_mux);
     }
 }
 
@@ -464,14 +472,14 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len)
 static esp_err_t prepare_name(char *name, size_t name_size)
 {
     mkdir(CAMERA_PHOTO_DIR, 0775);
-    camera_photo_t *list = calloc(CONFIG_MYPI_CAMERA_MAX_PHOTOS + 16, sizeof(camera_photo_t));
-    if (!list) return ESP_ERR_NO_MEM;
     long max_seq = 0;
-    int count = scan_photos(list, CONFIG_MYPI_CAMERA_MAX_PHOTOS + 16, &max_seq);
-    int stored = count < CONFIG_MYPI_CAMERA_MAX_PHOTOS + 16 ? count : CONFIG_MYPI_CAMERA_MAX_PHOTOS + 16;
+    int count = scan_photos(NULL, 0, &max_seq);
+    camera_photo_t *list = count > 0 ? calloc((size_t)count, sizeof(camera_photo_t)) : NULL;
+    if (count > 0 && !list) return ESP_ERR_NO_MEM;
+    int stored = scan_photos(list, count, NULL);
     int drop = camera_prune_count(count, CONFIG_MYPI_CAMERA_MAX_PHOTOS);
     if (drop > stored) drop = stored;
-    qsort(list, stored, sizeof(list[0]), cmp_newest_first);
+    if (stored > 1) qsort(list, stored, sizeof(list[0]), cmp_newest_first);
     for (int i = 0; i < drop; i++) {
         char path[48];
         camera_photo_path(list[stored - 1 - i].name, path, sizeof(path));
@@ -483,13 +491,20 @@ static esp_err_t prepare_name(char *name, size_t name_size)
     return ESP_OK;
 }
 
-esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out)
+esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out,
+                              camera_capture_result_t *result)
 {
     if (name_out && name_size) name_out[0] = '\0';
     if (bytes_out) *bytes_out = 0;
+    if (result) {
+        result->stage = CAMERA_STAGE_NONE;
+        result->error[0] = '\0';
+    }
     if (!lock()) {
-        s_st.capture_stage = CAMERA_STAGE_CAPTURE;
-        set_error(ESP_ERR_TIMEOUT, "Camera busy, try again");
+        if (result) {
+            result->stage = CAMERA_STAGE_CAPTURE;
+            strlcpy(result->error, "Camera busy, try again", sizeof(result->error));
+        }
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t err = check_usable();
@@ -503,6 +518,11 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
         frame_put(&buf);
     }
     if (err != ESP_OK) {
+        if (result) {
+            result->stage = s_st.capture_stage;
+            strlcpy(result->error, s_st.last_error[0] ? s_st.last_error : esp_err_to_name(err),
+                    sizeof(result->error));
+        }
         unlock();
         return err;
     }
@@ -555,6 +575,10 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
         if (name_out) strlcpy(name_out, name, name_size);
         if (bytes_out) *bytes_out = (uint32_t)len;
         ESP_LOGI(TAG, "Saved %s/%s (%u bytes, %ux%u)", CAMERA_PHOTO_DIR, name, (unsigned)len, s_st.width, s_st.height);
+    } else if (result) {
+        result->stage = s_st.capture_stage;
+        strlcpy(result->error, s_st.last_error[0] ? s_st.last_error : esp_err_to_name(err),
+                sizeof(result->error));
     }
     unlock();
     return err;
@@ -624,13 +648,21 @@ esp_err_t camera_init(void)
         }
     }
     if (fd >= 0) close(fd);
-    if (s_st.state != CAMERA_STATE_READY) return s_st.last_err;
+    if (s_st.state != CAMERA_STATE_READY) {
+        portENTER_CRITICAL(&s_status_mux);
+        s_status_snapshot = s_st;
+        portEXIT_CRITICAL(&s_status_mux);
+        return s_st.last_err;
+    }
 
     ESP_LOGI(TAG, "Camera %s detected, %ux%u (SCCB %s bus, %d kHz)", s_st.sensor, s_st.width, s_st.height,
              bus ? "shared touch" : "own", CONFIG_MYPI_CAMERA_SCCB_KHZ);
     if (xTaskCreate(idle_task, "camera_idle", 3072, NULL, 1, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Idle-stop task not started; the stream keeps running once started");
     }
+    portENTER_CRITICAL(&s_status_mux);
+    s_status_snapshot = s_st;
+    portEXIT_CRITICAL(&s_status_mux);
     return ESP_OK;
 }
 
@@ -640,6 +672,9 @@ esp_err_t camera_init(void)
 {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
     set_error(ESP_ERR_NOT_SUPPORTED, "Camera support disabled in menuconfig (MyPi-Hotspot > Camera)");
+    portENTER_CRITICAL(&s_status_mux);
+    s_status_snapshot = s_st;
+    portEXIT_CRITICAL(&s_status_mux);
     return ESP_ERR_NOT_SUPPORTED;
 }
 
@@ -657,11 +692,15 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
-esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out)
+esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out,
+                              camera_capture_result_t *result)
 {
     if (name_out && name_size) name_out[0] = '\0';
     if (bytes_out) *bytes_out = 0;
-    s_st.capture_stage = CAMERA_STAGE_CAMERA;
+    if (result) {
+        result->stage = CAMERA_STAGE_CAMERA;
+        strlcpy(result->error, "Camera support is disabled", sizeof(result->error));
+    }
     return ESP_ERR_NOT_SUPPORTED;
 }
 

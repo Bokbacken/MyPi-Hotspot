@@ -1767,7 +1767,7 @@ static esp_err_t api_logstore_clear_post(httpd_req_t *req)
 // Camera API (v0.10.0): status, preview frame, capture, saved photos (/store/photos)
 // ---------------------------------------------------------------------------
 
-#define CAMERA_LIST_MAX 64
+#define CAMERA_LIST_MAX CONFIG_MYPI_CAMERA_MAX_PHOTOS
 
 // GET /api/camera/status
 static esp_err_t api_camera_status_get(httpd_req_t *req)
@@ -1830,19 +1830,18 @@ static esp_err_t api_camera_capture_post(httpd_req_t *req)
 {
     char name[CAMERA_PHOTO_NAME_LEN];
     uint32_t size = 0;
-    esp_err_t err = camera_capture_save(name, sizeof(name), &size);
+    camera_capture_result_t result;
+    esp_err_t err = camera_capture_save(name, sizeof(name), &size, &result);
     cJSON *j = cJSON_CreateObject();
     cJSON_AddBoolToObject(j, "ok", err == ESP_OK);
     if (err == ESP_OK) {
         cJSON_AddStringToObject(j, "name", name);
         cJSON_AddNumberToObject(j, "size", size);
     } else {
-        camera_status_t st;
-        camera_get_status(&st);
-        cJSON_AddStringToObject(j, "stage", camera_stage_name(st.capture_stage));
-        cJSON_AddStringToObject(j, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
-        httpd_resp_set_status(req, st.capture_stage == CAMERA_STAGE_STORAGE ? "507 Insufficient Storage" :
-                                   (st.capture_stage == CAMERA_STAGE_CAMERA ? "503 Service Unavailable" :
+        cJSON_AddStringToObject(j, "stage", camera_stage_name(result.stage));
+        cJSON_AddStringToObject(j, "error", result.error[0] ? result.error : esp_err_to_name(err));
+        httpd_resp_set_status(req, result.stage == CAMERA_STAGE_STORAGE ? "507 Insufficient Storage" :
+                                   (result.stage == CAMERA_STAGE_CAMERA || err == ESP_ERR_TIMEOUT ? "503 Service Unavailable" :
                                     "500 Internal Server Error"));
     }
     return send_json(req, j);

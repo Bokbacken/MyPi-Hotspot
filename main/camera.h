@@ -30,13 +30,18 @@ typedef struct {
     esp_err_t last_err;             // ESP_OK when the last operation succeeded
     char last_error[CAMERA_ERROR_LEN];  // Human-readable reason of the last failure ("" = none)
     char last_photo[CAMERA_PHOTO_NAME_LEN];
-    camera_stage_t capture_stage;   // Where the last camera_capture_save() failed (NONE = saved)
+    camera_stage_t capture_stage;   // Where the last completed camera_capture_save() failed
 } camera_status_t;
 
 typedef struct {
     char name[CAMERA_PHOTO_NAME_LEN];
     uint32_t size;
 } camera_photo_t;
+
+typedef struct {
+    camera_stage_t stage;
+    char error[CAMERA_ERROR_LEN];
+} camera_capture_result_t;
 
 /** Probe the sensor once (call after touch_init(): the camera shares its I2C bus). */
 esp_err_t camera_init(void);
@@ -57,10 +62,11 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len);
  * CONFIG_MYPI_CAMERA_MAX_PHOTOS are deleted first). name_out receives the file name.
  * Errors: ESP_ERR_INVALID_STATE camera not detected, ESP_ERR_TIMEOUT / ESP_FAIL capture,
  * ESP_ERR_NOT_FOUND storage not mounted, ESP_ERR_NO_MEM storage full or out of memory,
- * ESP_ERR_INVALID_SIZE write failed. camera_get_status().last_error explains the failure and
- * .capture_stage tells whether the camera, the capture or the storage failed.
+ * ESP_ERR_INVALID_SIZE write failed. result reports this request's failure without changing
+ * the shared status if the camera is busy; camera_get_status() reports the last completed operation.
  */
-esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out);
+esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out,
+                              camera_capture_result_t *result);
 
 /** Saved photos, newest first. Returns the count (<= max). */
 int camera_photo_list(camera_photo_t *out, int max);
