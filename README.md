@@ -533,11 +533,11 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
 | SCCB (I2C) clock | 100 kHz | Camera control bus speed |
 | Reset / power-down GPIO | -1 | Leave at -1 unless your module wiring needs a reset / power-down pin |
 | Mirror / flip | off | Image orientation |
-| JPEG quality (photos / web preview) | 85 / 50 | Higher = larger files |
+| JPEG quality (photos / web preview) | 95 / 95 | Quality-first defaults; higher = larger files |
 | Photos kept | 20 | The oldest photo is deleted when more would be stored |
 | Storage space kept free for logs | 512 KB | A capture fails with "Storage full" instead |
 | Stop stream after | 10 s | The stream only runs while a preview is shown |
-| Component config → Espressif Camera Sensors Configurations → OV5647 | 800x640 RAW8 | Sensor mode (ISP output RGB565) |
+| Component config → Espressif Camera Sensors Configurations → OV5647 | 800x640 RAW8 | Sensor mode; web lists the actual active mode, not invented resolutions |
 
 ### Using
 
@@ -546,6 +546,19 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
   failed. **BACK** returns to the menu (the page also returns there after 5 minutes without touch).
 - **Web:** the **Camera** page (`/#camera`) shows a live preview (one JPEG at a time while the page
   is visible), a **Shutter** button and the saved photos with view / download / delete.
+  **Basic settings** exposes the current resolution, separate preview/photo JPEG quality (10–100),
+  driver-supported horizontal/vertical flips, web live preview on/off, idle stop (2–600 s),
+  photo retention (1–500), and log storage reserve (0–2048 KB). **Save and apply** persists these
+  in NVS without a reboot; **Load defaults** only fills the form until saved. The current
+  firmware uses a single configured sensor mode, so the resolution list is read-only.
+  Unsupported flips are disabled. Turning live preview off stops web polling, not shutter,
+  LCD preview, or an explicit QR read. Retention applies on the next capture, and the reserve
+  prevents new photos consuming the space left for logs.
+- **Web image fidelity:** the capture pipeline requests full-colour RGB888 from the ISP instead
+  of quantizing every web frame to RGB565 first, with RGB565 fallback if the driver cannot supply
+  RGB888. JPEG encoding uses 4:4:4 chroma sampling and preserves ESP-IDF's native BGR byte order,
+  not just a higher quality number. Only the LCD preview is converted to RGB565 when RGB888 is
+  available. This prioritizes image fidelity over frame rate and uses more PSRAM/bandwidth.
 - Photos are stored as `/store/photos/IMGnnnnn.JPG` (800x640) on the FAT `storage` partition
   (about 3.9 MB, shared with the [saved logs](#saved-logs-in-flash)); the directory is created on
   the first capture.
@@ -554,6 +567,8 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
 |---|---|
 | `GET /api/camera/status` | `{enabled, state, sensor, width, height, frames, photos_taken, error, last_photo, max_photos, storage{mounted,free_kb,total_kb}, photos[{name,size}]}`; `state` is `disabled`, `starting`, `not_detected`, `ready`, `streaming` or `error` |
 | `GET /api/camera/frame.jpg` | One fresh preview frame (`image/jpeg`); `503` + reason text when the camera fails |
+| `GET /api/camera/settings` | `{settings, defaults, capabilities:{hflip,vflip,modes:[{width,height}]}}` |
+| `POST /api/camera/settings` | JSON settings: `width`, `height`, `preview_quality`, `photo_quality`, `hflip`, `vflip`, `live_preview`, `idle_stop_s`, `max_photos`, `reserve_kb`; omitted fields stay unchanged; invalid types/ranges or unsupported modes/flips are rejected |
 | `POST /api/camera/capture` | Saves a photo: `{"ok":true,"name":"IMG00001.JPG","size":64512}` or `{"ok":false,"stage":"camera\|capture\|storage","error":"..."}` (HTTP 503 / 500 / 507) |
 | `GET /api/camera/photo?name=IMG00001.JPG` | The photo (`&dl=1` downloads it) |
 | `POST /api/camera/delete?name=IMG00001.JPG` | Deletes a photo |
@@ -565,6 +580,31 @@ write failed). Without a camera the firmware runs normally; the pages show "Came
 Quick check after flashing: the serial log shows `camera: Camera OV5647 detected, 800x640` at boot;
 open the LCD Camera page and the web Camera page, press the shutter on each, and confirm the new
 photo opens from the web list. `curl -X POST http://mypi-hotspot.local/api/camera/capture` works too.
+On hardware, compare preview and a saved photo of the same colour-gradient/QR target, check
+orientation, pause/resume web preview, and reboot to confirm saved settings. The RGB888/4:4:4
+path removes avoidable colour quantization, but sensor/ISP colour reproduction still requires
+hardware verification; host tests cannot establish perceived image quality.
+
+### Wi-Fi uplink / WAN QR helper (web only)
+
+On **Wi-Fi** (`/#wifi`), choose **Read Wi-Fi QR from camera** with exactly one Wi-Fi QR code
+in front of the connected MyPi camera. This requests the existing fresh JPEG endpoint; it never
+uses the phone/PC camera and does not save a photo. QR reads use JPEG quality 95
+(`GET /api/camera/frame.jpg?qr=1`), independent of a lowered live-preview setting.
+Browsers with native `BarcodeDetector`
+QR support decode locally. Many browsers require a secure context for that API, so it may be
+unavailable on the device's HTTP page. The same helper then provides the camera image and a
+masked **manual fallback** field for locally decoded `WIFI:` text. No external decoder service
+or new firmware decoder dependency is used.
+
+The helper accepts visible WPA/WPA2 personal and open networks, including escaped QR delimiters.
+Unsupported security types (for example WEP or enterprise), hidden networks, and malformed
+credentials are rejected rather than silently converted. Detection shows the SSID and security
+with the password masked. Choose **Fill selected STA profile**, review the slot and IP settings,
+then explicitly **Save** and **Connect** using the existing controls. Detection alone never
+changes network settings. QR payloads/passwords are not logged or put in URLs or browser storage;
+pending QR credentials are cleared on discard, filling, navigation away, or hiding the tab.
+Use the local admin UI only on a trusted network: device HTTP does not encrypt credentials.
 
 ### Emergency mode (Ethernet rescue, v0.7.0)
 

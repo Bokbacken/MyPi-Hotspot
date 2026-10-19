@@ -92,7 +92,24 @@ MYPI_BRAND_HEADER
 "<fieldset><legend>Edit STA profile</legend>Slot <select id='ss' onchange=edS(+this.value)></select> SSID <input id='sn'> "
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
-"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset></section>"
+"Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
+"<fieldset id='wan-qr'><legend>Wi-Fi uplink / WAN QR helper</legend>"
+"<p>Read a Wi-Fi QR code using the connected MyPi camera, not this browser's camera. "
+"Nothing is saved or connected automatically.</p>"
+"<button type='button' id='qr-read' onclick='MyPiSerial.wifiQrRead()'>Read Wi-Fi QR from camera</button> "
+"<a href='#camera'>Camera settings</a><p id='qr-msg' role='status'></p>"
+"<div class='cam-view'><img id='qr-img' alt='MyPi camera image for Wi-Fi QR reading'></div>"
+"<details><summary>Manual fallback (browsers without QR decoding)</summary>"
+"<p>Decode the camera image locally with a trusted QR reader, then paste its WIFI: text here. "
+"Do not upload credentials to an online decoder.</p>"
+"<label>Wi-Fi QR text <input id='qr-payload' type='password' autocomplete='off'></label> "
+"<button type='button' onclick='MyPiSerial.wifiQrParse()'>Review QR text</button></details>"
+"<div id='qr-review' hidden><p>Network: <b id='qr-ssid'></b> Security: <b id='qr-security'></b></p>"
+"<label>Password <input id='qr-password' type='password' readonly autocomplete='off'></label>"
+"<p><button type='button' id='qr-fill' onclick='MyPiSerial.wifiQrFill()' disabled>Fill selected STA profile</button> "
+"<button type='button' onclick='MyPiSerial.wifiQrClear()'>Discard</button></p>"
+"<p>Review the selected slot and network settings above, then click Save. Use Connect separately.</p>"
+"</div></fieldset></section>"
 "<section class='page' data-page='access-point'><h2>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
@@ -126,6 +143,21 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='camera'><h2>Camera</h2><p id='cam-st'></p>"
 "<div class='cam-view'><img id='cam-img' alt='Camera preview'><p id='cam-err' class='bad' hidden></p></div>"
 "<p><button type='button' id='cam-shutter' onclick='MyPiSerial.cameraCapture()' disabled>Shutter</button> <span id='cam-msg'></span></p>"
+"<fieldset id='cam-settings' disabled><legend>Basic settings</legend>"
+"<p><label>Resolution <select id='cam-resolution'></select></label> <small id='cam-mode-note'></small></p>"
+"<p><label>Web preview JPEG quality <input id='cam-preview_quality' type='number' min='10' max='100'></label> "
+"<label>Photo JPEG quality <input id='cam-photo_quality' type='number' min='10' max='100'></label> (10&ndash;100)</p>"
+"<p><label><input id='cam-hflip' type='checkbox' style='width:auto'>Horizontal flip</label> "
+"<label><input id='cam-vflip' type='checkbox' style='width:auto'>Vertical flip</label> "
+"<label><input id='cam-live_preview' type='checkbox' style='width:auto' onchange='MyPiSerial.cameraLiveChanged()'>Live preview</label></p>"
+"<p><label>Idle stop (seconds) <input id='cam-idle_stop_s' type='number' min='2' max='600'></label> "
+"<label>Max photos retained <input id='cam-max_photos' type='number' min='1' max='500'></label> "
+"<label>Storage reserve for logs (KB) <input id='cam-reserve_kb' type='number' min='0' max='2048'></label></p>"
+"<button type='button' onclick='MyPiSerial.cameraSettingsSave()'>Save and apply</button> "
+"<button type='button' onclick='MyPiSerial.cameraSettingsReset()'>Load defaults</button> "
+"<span id='cam-settings-msg' role='status'></span>"
+"<p><small>Settings persist across reboots. Retention is enforced on the next capture; reserve prevents photos using log space. "
+"Live preview affects this web page only; shutter and the WAN QR helper still work.</small></p></fieldset>"
 "<h3 style='font-size:1em'>Saved photos</h3><p id='cam-store'></p><table id='cam-photos'></table></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
 // AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
@@ -1798,13 +1830,102 @@ static esp_err_t api_logstore_clear_post(httpd_req_t *req)
 // Camera API (v0.10.0): status, preview frame, capture, saved photos (/store/photos)
 // ---------------------------------------------------------------------------
 
-#define CAMERA_LIST_MAX CONFIG_MYPI_CAMERA_MAX_PHOTOS
+#define CAMERA_LIST_MAX 500
+
+static void add_camera_settings(cJSON *j, const camera_settings_t *s)
+{
+    cJSON_AddNumberToObject(j, "width", s->width);
+    cJSON_AddNumberToObject(j, "height", s->height);
+    cJSON_AddNumberToObject(j, "preview_quality", s->preview_quality);
+    cJSON_AddNumberToObject(j, "photo_quality", s->photo_quality);
+    cJSON_AddBoolToObject(j, "hflip", s->hflip);
+    cJSON_AddBoolToObject(j, "vflip", s->vflip);
+    cJSON_AddBoolToObject(j, "live_preview", s->live_preview);
+    cJSON_AddNumberToObject(j, "idle_stop_s", s->idle_stop_s);
+    cJSON_AddNumberToObject(j, "max_photos", s->max_photos);
+    cJSON_AddNumberToObject(j, "reserve_kb", s->reserve_kb);
+}
+
+static esp_err_t api_camera_settings_get(httpd_req_t *req)
+{
+    camera_settings_t settings, defaults;
+    camera_capabilities_t caps;
+    esp_err_t err = camera_get_settings(&settings);
+    if (err == ESP_OK) err = camera_get_capabilities(&caps);
+    if (err != ESP_OK) return send_result(req, err, NULL, "camera settings unavailable");
+    if (caps.mode_count == 0) return send_result(req, ESP_ERR_NOT_SUPPORTED, NULL, "camera not available");
+    camera_settings_defaults(&defaults);
+    defaults.width = settings.width;
+    defaults.height = settings.height;
+    defaults.hflip = defaults.hflip && caps.hflip;
+    defaults.vflip = defaults.vflip && caps.vflip;
+    cJSON *j = cJSON_CreateObject();
+    add_camera_settings(cJSON_AddObjectToObject(j, "settings"), &settings);
+    add_camera_settings(cJSON_AddObjectToObject(j, "defaults"), &defaults);
+    cJSON *c = cJSON_AddObjectToObject(j, "capabilities");
+    cJSON_AddBoolToObject(c, "hflip", caps.hflip);
+    cJSON_AddBoolToObject(c, "vflip", caps.vflip);
+    cJSON *modes = cJSON_AddArrayToObject(c, "modes");
+    for (int i = 0; i < caps.mode_count; i++) {
+        cJSON *mode = cJSON_CreateObject();
+        cJSON_AddNumberToObject(mode, "width", caps.modes[i].width);
+        cJSON_AddNumberToObject(mode, "height", caps.modes[i].height);
+        cJSON_AddItemToArray(modes, mode);
+    }
+    return send_json(req, j);
+}
+
+static bool camera_json_int(const cJSON *j, const char *key, int min, int max, int *out)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(j, key);
+    if (!value) return true;
+    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
+        value->valuedouble < min || value->valuedouble > max ||
+        value->valuedouble != value->valueint) return false;
+    *out = value->valueint;
+    return true;
+}
+
+static bool camera_json_bool(const cJSON *j, const char *key, bool *out)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(j, key);
+    if (!value) return true;
+    if (!cJSON_IsBool(value)) return false;
+    *out = cJSON_IsTrue(value);
+    return true;
+}
+
+static esp_err_t api_camera_settings_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    camera_settings_t s;
+    esp_err_t err = camera_get_settings(&s);
+    if (err == ESP_OK) {
+        bool valid = cJSON_IsObject(j) &&
+            camera_json_int(j, "width", 16, 65535, &s.width) &&
+            camera_json_int(j, "height", 16, 65535, &s.height) &&
+            camera_json_int(j, "preview_quality", 10, 100, &s.preview_quality) &&
+            camera_json_int(j, "photo_quality", 10, 100, &s.photo_quality) &&
+            camera_json_int(j, "idle_stop_s", 2, 600, &s.idle_stop_s) &&
+            camera_json_int(j, "max_photos", 1, 500, &s.max_photos) &&
+            camera_json_int(j, "reserve_kb", 0, 2048, &s.reserve_kb) &&
+            camera_json_bool(j, "hflip", &s.hflip) &&
+            camera_json_bool(j, "vflip", &s.vflip) &&
+            camera_json_bool(j, "live_preview", &s.live_preview);
+        err = valid ? camera_save_settings(&s) : ESP_ERR_INVALID_ARG;
+    }
+    cJSON_Delete(j);
+    return send_result(req, err, "saved and applied", "invalid, unsupported, or unavailable camera settings");
+}
 
 // GET /api/camera/status
 static esp_err_t api_camera_status_get(httpd_req_t *req)
 {
     camera_status_t st;
     camera_get_status(&st);
+    camera_settings_t settings;
+    camera_settings_defaults(&settings);
+    camera_get_settings(&settings);
     logstore_info_t li;
     logstore_get_info(&li);
     cJSON *j = cJSON_CreateObject();
@@ -1817,7 +1938,7 @@ static esp_err_t api_camera_status_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "photos_taken", st.photos_taken);
     cJSON_AddStringToObject(j, "error", st.last_error);
     cJSON_AddStringToObject(j, "last_photo", st.last_photo);
-    cJSON_AddNumberToObject(j, "max_photos", CONFIG_MYPI_CAMERA_MAX_PHOTOS);
+    cJSON_AddNumberToObject(j, "max_photos", settings.max_photos);
     cJSON *sto = cJSON_AddObjectToObject(j, "storage");
     cJSON_AddBoolToObject(sto, "mounted", li.mounted);
     cJSON_AddNumberToObject(sto, "free_kb", li.free_kb);
@@ -1840,7 +1961,12 @@ static esp_err_t api_camera_frame_get(httpd_req_t *req)
 {
     uint8_t *jpg = NULL;
     size_t len = 0;
-    esp_err_t err = camera_snapshot_jpeg(CONFIG_MYPI_CAMERA_PREVIEW_QUALITY, &jpg, &len);
+    char query[64], qr[4] = "";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "qr", qr, sizeof(qr));
+    }
+    int quality = strcmp(qr, "1") == 0 ? 95 : 0;
+    esp_err_t err = camera_snapshot_jpeg(quality, &jpg, &len);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (err != ESP_OK) {
         camera_status_t st;
@@ -1999,6 +2125,8 @@ esp_err_t web_start(void)
         { .uri = "/api/iperf/stop",     .method = HTTP_POST, .handler = api_iperf_stop },
         { .uri = "/api/iperf",          .method = HTTP_GET,  .handler = api_iperf_get },
         { .uri = "/api/camera/status",  .method = HTTP_GET,  .handler = api_camera_status_get },
+        { .uri = "/api/camera/settings", .method = HTTP_GET, .handler = api_camera_settings_get },
+        { .uri = "/api/camera/settings", .method = HTTP_POST, .handler = api_camera_settings_post },
         { .uri = "/api/camera/frame.jpg", .method = HTTP_GET, .handler = api_camera_frame_get },
         { .uri = "/api/camera/capture", .method = HTTP_POST, .handler = api_camera_capture_post },
         { .uri = "/api/camera/photo",   .method = HTTP_GET,  .handler = api_camera_photo_get },

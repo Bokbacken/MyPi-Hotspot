@@ -375,6 +375,254 @@
   const CAMERA_PREVIEW_MS = 300, CAMERA_RETRY_MS = 3000;
   const CAMERA_STAGES = { camera: "Camera", capture: "Capture", storage: "Storage" };
   const CAMERA_PHOTO_RE = /^IMG\d{5}\.JPG$/;
+  const CAMERA_NUMBERS = ["preview_quality", "photo_quality", "idle_stop_s", "max_photos", "reserve_kb"];
+  const CAMERA_BOOLEANS = ["hflip", "vflip", "live_preview"];
+  const cameraForms = new WeakMap();
+
+  function cameraSettingsFill(doc, settings, caps) {
+    for (const key of CAMERA_NUMBERS) {
+      const el = doc.getElementById("cam-" + key);
+      if (el) el.value = String(settings[key]);
+    }
+    for (const key of CAMERA_BOOLEANS) {
+      const el = doc.getElementById("cam-" + key);
+      if (el) {
+        el.checked = !!settings[key];
+        if (key !== "live_preview") el.disabled = !caps[key];
+      }
+    }
+    const select = doc.getElementById("cam-resolution");
+    if (select) {
+      select.replaceChildren();
+      for (const mode of caps.modes || []) {
+        const option = doc.createElement("option");
+        option.value = `${mode.width}x${mode.height}`;
+        option.textContent = option.value;
+        select.appendChild(option);
+      }
+      select.value = `${settings.width}x${settings.height}`;
+      select.disabled = (caps.modes || []).length < 2;
+    }
+    camSet(doc, "cam-mode-note", (caps.modes || []).length < 2 ?
+      "Current firmware sensor mode only; no synthetic resolutions." : "Driver-supported modes only.");
+  }
+
+  async function cameraSettingsLoad(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const form = doc.getElementById("cam-settings");
+    try {
+      const response = await f("/api/camera/settings", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok || !data.settings || !data.capabilities) throw new Error();
+      cameraForms.set(doc, data);
+      cameraSettingsFill(doc, data.settings, data.capabilities);
+      if (form) form.disabled = false;
+      return data;
+    } catch (e) {
+      if (form) form.disabled = true;
+      camSet(doc, "cam-settings-msg", "Camera settings unavailable", true);
+      return null;
+    }
+  }
+
+  async function cameraSettingsSave(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    if (!cameraForms.has(doc)) return null;
+    const settings = {};
+    for (const key of CAMERA_NUMBERS) {
+      const input = doc.getElementById("cam-" + key);
+      if (!input.value.trim() || (input.checkValidity && !input.checkValidity())) {
+        camSet(doc, "cam-settings-msg", "Check the setting ranges", true);
+        return null;
+      }
+      settings[key] = Number(input.value);
+      if (!Number.isInteger(settings[key])) return null;
+    }
+    for (const key of CAMERA_BOOLEANS) settings[key] = doc.getElementById("cam-" + key).checked;
+    const [width, height] = doc.getElementById("cam-resolution").value.split("x").map(Number);
+    settings.width = width;
+    settings.height = height;
+    try {
+      const response = await f("/api/camera/settings", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error();
+      await cameraSettingsLoad(doc, f);
+      await cameraLoad(doc, f);
+      camSet(doc, "cam-settings-msg", "Saved and applied", false);
+      if (cameraVisible(doc) && cameraLiveEnabled(doc)) cameraPreview(doc, f);
+      return result;
+    } catch (e) {
+      camSet(doc, "cam-settings-msg", "Could not save camera settings; check supported values and retry", true);
+      return null;
+    }
+  }
+
+  function cameraSettingsReset(document) {
+    const doc = document || root.document, data = cameraForms.get(doc);
+    if (!data) return;
+    cameraSettingsFill(doc, data.defaults, data.capabilities);
+    camSet(doc, "cam-settings-msg", "Defaults loaded; Save and apply to keep them");
+    cameraLiveChanged(doc);
+  }
+
+  function cameraLiveEnabled(doc) {
+    const input = doc.getElementById("cam-live_preview");
+    return !input || input.checked;
+  }
+
+  function cameraLiveChanged(document) {
+    const doc = document || root.document;
+    if (cameraLiveEnabled(doc) && cameraVisible(doc)) cameraPreview(doc);
+  }
+
+  // Decode only the WIFI payload subset the STA profile supports. Never include raw credentials
+  // in error messages, URLs, logs, HTML, or persistent browser storage.
+  function parseWifiQr(raw) {
+    const invalid = () => { throw new Error("Invalid or unsupported Wi-Fi QR (use WPA/WPA2 or an open, visible network)"); };
+    if (typeof raw !== "string" || raw.length > 2048 || !raw.startsWith("WIFI:")) return invalid();
+    const fields = Object.create(null);
+    let part = "", escaped = false;
+    for (const char of raw.slice(5)) {
+      if (escaped) {
+        if (!"\\;,:\"".includes(char)) return invalid();
+        part += char;
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === ";") {
+        if (part) {
+          const colon = part.indexOf(":");
+          const key = part.slice(0, colon);
+          if (colon < 1 || Object.hasOwn(fields, key)) return invalid();
+          fields[key] = part.slice(colon + 1);
+        }
+        part = "";
+      } else {
+        part += char;
+      }
+    }
+    if (escaped || part) return invalid();
+    const ssid = fields.S, security = fields.T || "nopass", pass = fields.P || "";
+    const bytes = (value) => new TextEncoder().encode(value).length;
+    if (!ssid || bytes(ssid) > 32 || /[\u0000-\u001f\u007f]/.test(ssid + pass)) return invalid();
+    if (fields.H && fields.H.toLowerCase() !== "false") return invalid();
+    if (!["WPA", "WPA2", "nopass"].includes(security)) return invalid();
+    if (security !== "nopass" &&
+        !((bytes(pass) >= 8 && bytes(pass) <= 63) || /^[0-9a-fA-F]{64}$/.test(pass))) return invalid();
+    if (security === "nopass" && pass) return invalid();
+    return { ssid, pass, security };
+  }
+
+  const wifiQrCandidates = new WeakMap();
+  const wifiQrBusy = new WeakSet();
+  const wifiQrGeneration = new WeakMap();
+
+  function wifiQrClear(document) {
+    const doc = document || root.document;
+    wifiQrGeneration.set(doc, (wifiQrGeneration.get(doc) || 0) + 1);
+    wifiQrCandidates.delete(doc);
+    for (const id of ["qr-password", "qr-payload"]) {
+      const input = doc.getElementById(id);
+      if (input) input.value = "";
+    }
+    const review = doc.getElementById("qr-review"), fill = doc.getElementById("qr-fill");
+    if (review) review.hidden = true;
+    if (fill) fill.disabled = true;
+    camSet(doc, "qr-ssid", "");
+    camSet(doc, "qr-security", "");
+    const img = doc.getElementById("qr-img");
+    if (img && img.dataset.url) {
+      root.URL.revokeObjectURL(img.dataset.url);
+      delete img.dataset.url;
+      img.removeAttribute("src");
+    }
+  }
+
+  function wifiQrReview(doc, raw) {
+    const candidate = parseWifiQr(raw);
+    wifiQrCandidates.set(doc, candidate);
+    camSet(doc, "qr-ssid", candidate.ssid);
+    camSet(doc, "qr-security", candidate.security === "nopass" ? "Open" : candidate.security);
+    const password = doc.getElementById("qr-password");
+    password.type = "password";
+    password.value = candidate.pass;
+    doc.getElementById("qr-review").hidden = false;
+    doc.getElementById("qr-fill").disabled = false;
+    camSet(doc, "qr-msg", "QR detected. Review before filling the selected STA profile. Nothing has been saved.", false);
+    return candidate;
+  }
+
+  function wifiQrParse(document) {
+    const doc = document || root.document;
+    const raw = doc.getElementById("qr-payload").value;
+    wifiQrClear(doc);
+    try {
+      return wifiQrReview(doc, raw);
+    } catch (e) {
+      camSet(doc, "qr-msg", "Invalid or unsupported Wi-Fi QR text", true);
+      return null;
+    }
+  }
+
+  async function wifiQrRead(document, fetchFn, decoder) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    if (wifiQrBusy.has(doc)) return null;
+    wifiQrBusy.add(doc);
+    wifiQrClear(doc);
+    const generation = wifiQrGeneration.get(doc);
+    const button = doc.getElementById("qr-read");
+    if (button) button.disabled = true;
+    camSet(doc, "qr-msg", "Reading a fresh image from the MyPi camera...");
+    let bitmap;
+    try {
+      const response = await f(`/api/camera/frame.jpg?qr=1&t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) throw new Error();
+      const blob = await response.blob(), img = doc.getElementById("qr-img");
+      if (wifiQrGeneration.get(doc) !== generation) return null;
+      const url = root.URL.createObjectURL(blob);
+      img.dataset.url = url;
+      img.src = url;
+      if (!decoder) {
+        if (!root.BarcodeDetector || !root.createImageBitmap ||
+            !(await root.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
+          camSet(doc, "qr-msg", "This browser cannot decode QR here (native decoding may require HTTPS). Use the camera image and manual fallback below.", true);
+          return null;
+        }
+        decoder = new root.BarcodeDetector({ formats: ["qr_code"] });
+      }
+      bitmap = await root.createImageBitmap(blob);
+      const codes = await decoder.detect(bitmap);
+      if (wifiQrGeneration.get(doc) !== generation) return null;
+      if (codes.length !== 1) {
+        camSet(doc, "qr-msg", "Show exactly one Wi-Fi QR code to the camera, then try again.", true);
+        return null;
+      }
+      return wifiQrReview(doc, codes[0].rawValue);
+    } catch (e) {
+      if (wifiQrGeneration.get(doc) !== generation) return null;
+      camSet(doc, "qr-msg", "Could not read a supported Wi-Fi QR. Check the camera, try again, or use manual fallback.", true);
+      return null;
+    } finally {
+      if (bitmap) bitmap.close();
+      wifiQrBusy.delete(doc);
+      if (button) button.disabled = false;
+    }
+  }
+
+  function wifiQrFill(document) {
+    const doc = document || root.document, candidate = wifiQrCandidates.get(doc);
+    if (!candidate) return false;
+    doc.getElementById("sn").value = candidate.ssid;
+    const password = doc.getElementById("spw");
+    password.type = "password";
+    password.value = candidate.pass;
+    doc.getElementById("sclr").checked = candidate.security === "nopass";
+    wifiQrClear(doc);
+    camSet(doc, "qr-msg", "Selected STA profile filled, not saved. Review its slot and IP settings, then Save; Connect is separate.", false);
+    return true;
+  }
 
   function cameraUsable(s) {
     return !!(s && s.enabled && ["ready", "streaming", "error"].includes(s.state));
@@ -501,7 +749,7 @@
     cameraLoopRunning = true;
     let failed = false;
     try {
-      while (cameraVisible(doc)) {
+      while (cameraVisible(doc) && cameraLiveEnabled(doc)) {
         let delay = CAMERA_PREVIEW_MS;
         try {
           await cameraFrame(doc, f);
@@ -523,9 +771,24 @@
     }
   }
 
-  function cameraOpen(document) {
+  let cameraOpening = false, cameraOpenTimer;
+
+  async function cameraOpen(document) {
     if (typeof root.fetch !== "function" || !cameraVisible(document)) return;
-    cameraLoad(document).then(() => cameraPreview(document));
+    root.clearTimeout(cameraOpenTimer);
+    if (cameraOpening) return;
+    cameraOpening = true;
+    let settings;
+    try {
+      [, settings] = await Promise.all([cameraLoad(document), cameraSettingsLoad(document)]);
+    } finally {
+      cameraOpening = false;
+    }
+    if (settings) cameraPreview(document);
+    else if (cameraVisible(document)) {
+      camSet(document, "cam-st", "Camera settings unavailable; retrying before starting preview", true);
+      cameraOpenTimer = root.setTimeout(() => cameraOpen(document), CAMERA_RETRY_MS);
+    }
   }
 
   function start(document) {
@@ -535,10 +798,14 @@
     if (isShell) {
       root.addEventListener("hashchange", () => {
         const page = showPage(document, root.location.hash);
+        if (page !== "wifi") wifiQrClear(document);
         if (page === "optimize" && typeof root.fetch === "function") optLoad(document);
         if (page === "camera") cameraOpen(document);
       });
-      if (document.addEventListener) document.addEventListener("visibilitychange", () => cameraOpen(document));
+      if (document.addEventListener) document.addEventListener("visibilitychange", () => {
+        if (document.hidden) wifiQrClear(document);
+        cameraOpen(document);
+      });
       cameraOpen(document);
     }
     if (typeof root.fetch === "function") {
@@ -556,7 +823,9 @@
     OPT_FIELDS, OPT_SELECTS, optDefaults, optRebootRequired, optFillForm, optReadForm, optStatus, sdioStatus, optLoad, optSave, optClearEmergency,
     PROTO_BITS, protoMaskFromChecks, protoSetChecks, protoFilterForBand, protoLabel, protoHint, radioFillForm, radioReadForm,
     radioRebootRequired, cameraUsable, cameraStatusText, cameraStorageText, cameraResultText, cameraPhotoRows,
-    cameraLoad, cameraCapture, cameraDelete, cameraVisible, cameraFrame, cameraPreview };
+    cameraLoad, cameraCapture, cameraDelete, cameraVisible, cameraFrame, cameraPreview,
+    cameraSettingsFill, cameraSettingsLoad, cameraSettingsSave, cameraSettingsReset, cameraLiveChanged,
+    cameraLiveEnabled, cameraOpen, parseWifiQr, wifiQrRead, wifiQrParse, wifiQrFill, wifiQrClear };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {

@@ -205,12 +205,12 @@ menu "MyPi-Hotspot"
         config MYPI_CAMERA_JPEG_QUALITY
             int "JPEG quality of saved photos"
             range 10 100
-            default 85
+            default 95
 
         config MYPI_CAMERA_PREVIEW_QUALITY
             int "JPEG quality of the web preview"
             range 10 100
-            default 50
+            default 95
             help
                 Lower = smaller frames and a faster web preview.
 

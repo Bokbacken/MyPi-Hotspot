@@ -276,6 +276,88 @@ static void test_camera_core(void)
     assert(same[0] == 1 && same[3] == 4 && same[4] == 5 && same[7] == 8);
 }
 
+static void test_camera_settings(void)
+{
+    camera_settings_t s = {
+        .preview_quality = 95, .photo_quality = 95, .idle_stop_s = 10,
+        .max_photos = 20, .reserve_kb = 512, .live_preview = true,
+    };
+    camera_capabilities_t caps = {.modes = {{800, 640}}, .mode_count = 1};
+    assert(camera_settings_valid(&s) && camera_settings_supported(&s, &caps));
+    assert(!camera_settings_valid(NULL));
+    camera_settings_blob_t blob = camera_settings_pack(&s);
+    camera_settings_t loaded = {0};
+    assert(camera_settings_unpack(&blob, sizeof(blob), &loaded));
+    assert(loaded.preview_quality == 95 && loaded.photo_quality == 95 && loaded.live_preview);
+    assert(loaded.idle_stop_s == 10 && loaded.max_photos == 20 && loaded.reserve_kb == 512);
+    assert(!camera_settings_unpack(&blob, sizeof(blob) - 1, &loaded));
+    blob.version++;
+    assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
+    blob = camera_settings_pack(&s);
+    blob.hflip = 2;
+    assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
+    blob = camera_settings_pack(&s);
+    blob.photo_quality = 101;
+    assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
+    assert(loaded.photo_quality == 95); // A rejected blob never changes the active settings.
+
+    s.width = 800; s.height = 640;
+    assert(camera_settings_supported(&s, &caps));
+    s.height = 600;
+    assert(!camera_settings_supported(&s, &caps));
+    s.width = 0; s.height = 640;
+    assert(!camera_settings_valid(&s));
+    s.width = s.height = 0;
+    s.hflip = true;
+    assert(!camera_settings_supported(&s, &caps));
+    caps.hflip = true;
+    assert(camera_settings_supported(&s, &caps));
+    s.vflip = true;
+    assert(!camera_settings_supported(&s, &caps));
+    caps.vflip = true;
+    assert(camera_settings_supported(&s, &caps));
+    int *fields[] = {&s.preview_quality, &s.photo_quality, &s.idle_stop_s, &s.max_photos, &s.reserve_kb};
+    const int lo[] = {10, 10, 2, 1, 0}, hi[] = {100, 100, 600, 500, 2048};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        int saved = *fields[i];
+        *fields[i] = lo[i]; assert(camera_settings_valid(&s));
+        *fields[i] = hi[i]; assert(camera_settings_valid(&s));
+        *fields[i] = lo[i] - 1; assert(!camera_settings_valid(&s));
+        *fields[i] = hi[i] + 1; assert(!camera_settings_valid(&s));
+        *fields[i] = saved;
+    }
+    assert(!camera_storage_ok(UINT32_MAX, UINT32_MAX, 1));
+}
+
+static void test_camera_rgb_conversion(void)
+{
+    // ISP RGB888 uses BGR24 byte order, including row padding that must never become a pixel.
+    const uint8_t rgb[] = {0,0,255, 0,255,0, 255,0,0, 0xaa,0xbb,0xcc,
+                           255,255,255, 0,0,0, 255,0,255, 0xaa,0xbb,0xcc};
+    uint16_t dst[6] = {0};
+    assert(camera_scale_to_rgb565(rgb, 3, 2, 12, 3, sizeof(rgb), dst, 3, 2));
+    assert(dst[0] == 0xf800 && dst[1] == 0x07e0 && dst[2] == 0x001f);
+    assert(dst[3] == 0xffff && dst[4] == 0 && dst[5] == 0xf81f);
+    const uint8_t rgb565[] = {0,0xf8, 0xe0,7, 0x1f,0, 0xff,0xff};
+    assert(camera_scale_to_rgb565(rgb565, 3, 1, 8, 2, sizeof(rgb565), dst, 3, 1));
+    assert(dst[0] == 0xf800 && dst[1] == 0x07e0 && dst[2] == 0x001f);
+    assert(!camera_scale_to_rgb565(rgb, 3, 2, 8, 3, sizeof(rgb), dst, 3, 2));
+    assert(!camera_scale_to_rgb565(rgb, 3, 2, 12, 3, sizeof(rgb) - 1, dst, 3, 2));
+    assert(!camera_frame_valid(3, 2, 12, 4, 24));
+    assert(!camera_frame_valid(0, 2, 0, 3, 24));
+    assert(!camera_frame_valid(1, 2, SIZE_MAX, 3, SIZE_MAX));
+    assert(camera_scale_to_rgb565(rgb, 3, 2, 12, 3, sizeof(rgb), dst, 1, 1));
+    assert(dst[0] == 0x07e0);
+    uint8_t jpeg_pixels[18] = {0};
+    assert(camera_pack_jpeg_pixels(rgb, 3, 2, 12, 3, sizeof(rgb), jpeg_pixels, sizeof(jpeg_pixels)));
+    static const uint8_t bgr[] = {0,0,255, 0,255,0, 255,0,0, 255,255,255, 0,0,0, 255,0,255};
+    assert(memcmp(jpeg_pixels, bgr, sizeof(bgr)) == 0);
+    assert(!camera_pack_jpeg_pixels(rgb, 3, 2, 12, 3, sizeof(rgb), jpeg_pixels, sizeof(jpeg_pixels) - 1));
+    assert(!camera_pack_jpeg_pixels(rgb, 3, 2, 12, 3, sizeof(rgb) - 1, jpeg_pixels, sizeof(jpeg_pixels)));
+    assert(camera_pack_jpeg_pixels(rgb565, 3, 1, 8, 2, sizeof(rgb565), jpeg_pixels, sizeof(jpeg_pixels)));
+    assert(memcmp(jpeg_pixels, rgb565, 6) == 0);
+}
+
 // --- opt_config (v0.9.0): mock NVS key/value store ---
 typedef struct {
     char key[16][16];
@@ -562,6 +644,8 @@ int main(void)
     test_kbd_core();
     test_touch_geometry();
     test_camera_core();
+    test_camera_settings();
+    test_camera_rgb_conversion();
     test_opt_config();
     test_sta_channel();
     puts("UI primitive tests passed");

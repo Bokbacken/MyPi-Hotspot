@@ -511,6 +511,184 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ui.cameraVisible({ hidden: false, querySelector: () => ({ hidden: false }) }), true);
   assert.equal(ui.cameraVisible({ hidden: true, querySelector: () => ({ hidden: false }) }), false);
 
+  // A1 basic settings: render only firmware-reported modes/capabilities, use typed JSON,
+  // preserve the form on save failure, and pause preview without disabling capture.
+  const settings = { width: 800, height: 640, preview_quality: 95, photo_quality: 95,
+    hflip: false, vflip: false, live_preview: false, idle_stop_s: 10, max_photos: 20, reserve_kb: 512 };
+  const caps = { modes: [{ width: 800, height: 640 }], hflip: true, vflip: false };
+  for (const key of Object.keys(settings)) camIds["cam-" + key] = { value: "", checked: false };
+  camIds["cam-resolution"] = {
+    children: [], replaceChildren() { this.children = []; }, appendChild(el) { this.children.push(el); },
+  };
+  for (const id of ["cam-settings", "cam-mode-note", "cam-settings-msg"]) camIds[id] = { textContent: "" };
+  const settingsDoc = { ...camDoc, createElement: () => ({}), querySelector: () => ({ hidden: true }) };
+  const settingPosts = [];
+  let settingsFail = false;
+  const settingsFetch = async (url, opts) => {
+    if (url !== "/api/camera/settings") return camFetch(url, opts);
+    if (opts && opts.method === "POST") {
+      settingPosts.push(JSON.parse(opts.body));
+      if (settingsFail) return { ok: false, json: async () => ({ ok: false }) };
+      Object.assign(settings, JSON.parse(opts.body));
+      return { ok: true, json: async () => ({ ok: true }) };
+    }
+    return { ok: true, json: async () => ({ settings, defaults: { ...settings, preview_quality: 95 }, capabilities: caps }) };
+  };
+  await ui.cameraSettingsLoad(settingsDoc, settingsFetch);
+  assert.equal(camIds["cam-settings"].disabled, false);
+  assert.equal(camIds["cam-preview_quality"].value, "95");
+  assert.deepEqual(camIds["cam-resolution"].children.map((x) => x.value), ["800x640"]);
+  assert.equal(camIds["cam-resolution"].disabled, true);
+  assert.equal(camIds["cam-hflip"].disabled, false);
+  assert.equal(camIds["cam-vflip"].disabled, true);
+  camIds["cam-preview_quality"].value = "98";
+  camIds["cam-hflip"].checked = true;
+  assert.equal((await ui.cameraSettingsSave(settingsDoc, settingsFetch)).ok, true);
+  assert.equal(settingPosts[0].preview_quality, 98);
+  assert.equal(settingPosts[0].hflip, true);
+  assert.equal(settingPosts[0].live_preview, false);
+  assert.equal(ui.cameraLiveEnabled(settingsDoc), false);
+  await ui.cameraPreview({ ...settingsDoc, querySelector: () => ({ hidden: false }) }, () => {
+    throw new Error("Paused preview must not request frames");
+  });
+  settingsFail = true;
+  camIds["cam-preview_quality"].value = "99";
+  assert.equal(await ui.cameraSettingsSave(settingsDoc, settingsFetch), null);
+  assert.equal(camIds["cam-preview_quality"].value, "99");
+  assert.match(camIds["cam-settings-msg"].textContent, /Could not save/);
+  camIds["cam-preview_quality"].value = "";
+  await ui.cameraSettingsSave(settingsDoc, settingsFetch);
+  assert.equal(settingPosts.length, 2);
+  ui.cameraSettingsReset(settingsDoc);
+  assert.equal(camIds["cam-preview_quality"].value, "95");
+  assert.equal(settingPosts.length, 2); // Defaults require explicit Save and apply.
+  await ui.cameraSettingsLoad(settingsDoc, async () => { throw new Error("offline"); });
+  assert.equal(camIds["cam-settings"].disabled, true);
+  const previousFetch = globalThis.fetch, previousTimeout = globalThis.setTimeout;
+  const previousClearTimeout = globalThis.clearTimeout;
+  let retryOpen, settingsAttempts = 0;
+  globalThis.fetch = async (url, opts) => {
+    if (url === "/api/camera/settings" && settingsAttempts++ === 0) throw new Error("transient");
+    return settingsFetch(url, opts);
+  };
+  globalThis.setTimeout = (callback, delay) => {
+    assert.equal(delay, 3000);
+    retryOpen = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+  try {
+    const visibleSettingsDoc = { ...settingsDoc, querySelector: () => ({ hidden: false }) };
+    await ui.cameraOpen(visibleSettingsDoc);
+    assert.equal(typeof retryOpen, "function");
+    assert.match(camIds["cam-st"].textContent, /retrying before starting preview/);
+    await retryOpen();
+    assert.equal(settingsAttempts, 2);
+    assert.equal(camIds["cam-settings"].disabled, false);
+    assert.equal(camIds["cam-live_preview"].checked, false); // Saved pause survives retry.
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.setTimeout = previousTimeout;
+    globalThis.clearTimeout = previousClearTimeout;
+  }
+  assert.equal((webC.match(/\.uri = "\/api\/camera\/settings"/g) || []).length, 2);
+  for (const key of ["resolution", "preview_quality", "photo_quality", "hflip", "vflip",
+    "live_preview", "idle_stop_s", "max_photos", "reserve_kb"]) assert.ok(webC.includes(`id='cam-${key}'`));
+  assert.ok(webC.includes('strcmp(qr, "1") == 0 ? 95 : 0'));
+  assert.ok(webC.includes("camera_snapshot_jpeg(quality, &jpg, &len)"));
+  assert.ok(webC.includes('camera_json_bool(j, "live_preview"'));
+  assert.ok(webC.includes("value->valuedouble != value->valueint"));
+
+  // Wi-Fi QR: escaped delimiters and UTF-8 limits, no WEP/enterprise/hidden or
+  // malformed credentials, and no credential text in errors.
+  const payload = "WIFI:T:WPA;S:My\\;Pi\\:WAN;P:test\\\\pass\\;word;;";
+  assert.deepEqual(ui.parseWifiQr(payload), { ssid: "My;Pi:WAN", pass: "test\\pass;word", security: "WPA" });
+  assert.deepEqual(ui.parseWifiQr("WIFI:S:Open;T:nopass;;"), { ssid: "Open", pass: "", security: "nopass" });
+  assert.equal(ui.parseWifiQr("WIFI:S:<img onerror=x>;T:nopass;;").ssid, "<img onerror=x>");
+  assert.equal(ui.parseWifiQr(`WIFI:S:${"å".repeat(16)};T:nopass;;`).ssid.length, 16);
+  for (const invalid of ["https://example.com", "WIFI:S:X;T:WEP;P:12345678;;",
+    "WIFI:S:X;T:WPA;P:short;;", "WIFI:S:X;T:WPA2-EAP;P:12345678;;",
+    "WIFI:S:X;S:Y;T:nopass;;", "WIFI:S:X;T:nopass;H:true;;", "WIFI:S:X;T:nopass;P:secret;;",
+    "WIFI:S:X;T:nopass", "WIFI:S:X\\", "WIFI:S:X\\q;T:nopass;;",
+    `WIFI:S:${"å".repeat(17)};T:nopass;;`, "WIFI:S:X\u0000;T:nopass;;"]) {
+    assert.throws(() => ui.parseWifiQr(invalid), /^Error: Invalid or unsupported Wi-Fi QR/);
+  }
+  const qrIds = {};
+  for (const id of ["qr-img", "qr-review", "qr-fill", "qr-password", "qr-payload", "qr-ssid",
+    "qr-security", "qr-msg", "qr-read", "sn", "spw", "sclr"]) {
+    qrIds[id] = { value: "", textContent: "", dataset: {}, removeAttribute(name) { delete this[name]; } };
+  }
+  const qrDoc = { getElementById: (id) => qrIds[id] };
+  qrIds["qr-payload"].value = payload;
+  assert.ok(ui.wifiQrParse(qrDoc));
+  assert.equal(qrIds["qr-payload"].value, "");
+  assert.equal(qrIds["qr-password"].type, "password");
+  assert.equal(qrIds["qr-ssid"].textContent, "My;Pi:WAN");
+  assert.equal(qrIds.sn.value, ""); // Detecting does not populate or save a profile.
+  assert.equal(qrIds["qr-fill"].disabled, false);
+  assert.equal(ui.wifiQrFill(qrDoc), true);
+  assert.equal(qrIds.sn.value, "My;Pi:WAN");
+  assert.equal(qrIds.spw.value, "test\\pass;word");
+  assert.equal(qrIds.spw.type, "password");
+  assert.equal(qrIds.sclr.checked, false);
+  assert.equal(qrIds["qr-password"].value, "");
+  assert.equal(qrIds["qr-review"].hidden, true);
+  assert.equal(ui.wifiQrFill(qrDoc), false);
+  qrIds["qr-payload"].value = "WIFI:S:Open;T:nopass;;";
+  ui.wifiQrParse(qrDoc);
+  ui.wifiQrFill(qrDoc);
+  assert.equal(qrIds.sclr.checked, true); // Prevent keeping an old profile password.
+  assert.equal(qrIds.spw.value, "");
+  const qrCalls = [];
+  const qrFetch = async (url, opts) => {
+    qrCalls.push([url, opts]);
+    assert.ok(url.startsWith("/api/camera/frame.jpg?"));
+    assert.ok(url.includes("qr=1"));
+    assert.equal(opts.cache, "no-store");
+    return { ok: true, blob: async () => new Blob(["camera"]) };
+  };
+  const previousBitmap = globalThis.createImageBitmap;
+  const previousDetector = globalThis.BarcodeDetector;
+  let closed = 0;
+  globalThis.createImageBitmap = async () => ({ close: () => closed++ });
+  try {
+    const decoder = { detect: async () => [{ rawValue: payload }] };
+    const result = await ui.wifiQrRead(qrDoc, qrFetch, decoder);
+    assert.equal(result.ssid, "My;Pi:WAN");
+    assert.equal(qrCalls.length, 1); // Only a camera GET, never save/connect.
+    assert.equal(qrIds.sn.value, "Open");
+    assert.equal(closed, 1);
+    ui.wifiQrClear(qrDoc);
+    assert.equal(qrIds["qr-img"].src, undefined);
+    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => [] }), null);
+    assert.match(qrIds["qr-msg"].textContent, /exactly one/);
+    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => [{ rawValue: "not Wi-Fi" }] }), null);
+    assert.equal(qrIds["qr-fill"].disabled, true);
+    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch), null); // Native decoder unavailable in Node.
+    assert.match(qrIds["qr-msg"].textContent, /manual fallback/);
+    globalThis.BarcodeDetector = class {
+      static async getSupportedFormats() { return ["qr_code"]; }
+      constructor(options) { assert.deepEqual(options.formats, ["qr_code"]); }
+      async detect() { return [{ rawValue: payload }]; }
+    };
+    assert.equal((await ui.wifiQrRead(qrDoc, qrFetch)).ssid, "My;Pi:WAN");
+    assert.equal(await ui.wifiQrRead(qrDoc, async () => ({ ok: false })), null);
+    assert.match(qrIds["qr-msg"].textContent, /Check the camera/);
+    await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => {
+      ui.wifiQrClear(qrDoc); // Discard/navigation invalidates an in-flight decode.
+      return [{ rawValue: payload }];
+    } });
+    assert.equal(qrIds["qr-fill"].disabled, true);
+    assert.equal(qrIds["qr-password"].value, "");
+  } finally {
+    ui.wifiQrClear(qrDoc);
+    globalThis.createImageBitmap = previousBitmap;
+    globalThis.BarcodeDetector = previousDetector;
+  }
+  assert.ok(webC.indexOf("id='wan-qr'") < webC.indexOf("data-page='access-point'"));
+  assert.ok(webC.includes("id='qr-password' type='password'"));
+  assert.ok(webC.includes("id='qr-payload' type='password'"));
+
   // Timekeeping: RTC-backed status, immediate timezone control and network-triggered SNTP.
   assert.ok(webC.includes("id='mypi-clock'"));
   assert.ok(webC.includes("id='timezone'"));
