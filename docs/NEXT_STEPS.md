@@ -26,21 +26,26 @@ v0.9.8 is the current main. Flash `mypi-hotspot-v0.9.8-ota.bin` via `/update`
 
 - **Issue:** [espressif/esp-idf#19238](https://github.com/espressif/esp-idf/issues/19238) —
   "TX hang on ESP32-C5 under TCP uplink load".
-- **Symptom:** under sustained TCP upload the C5 stops transmitting; upload drops to ~0 while
-  download may continue. Root cause per the issue comments: EDCA/TX buffers are exhausted.
-- **Status (checked 2026-10-19):** open, reported 2026-10-13, assigned to MaxwellAlan. No fix or
-  PR yet.
-- **Affects:** the ESP-IDF Wi-Fi libraries in **v6.1** (not reported on v5.5). MyPi-Hotspot builds
-  with IDF v6.1, so the C5 slave firmware is affected. This matches our 11ax upload result.
-- **Where a fix will come from:** a new **ESP-IDF release** (Wi-Fi libraries), then a rebuilt C5
-  slave firmware. It will **not** come from ESP-Hosted 3.0.10: the bug is not in esp-hosted.
+- **Reported symptom:** the reporter describes TX stopping during sustained traffic, TCP writes
+  timing out, all static TX buffers remaining outstanding, and RX callbacks continuing. This does
+  not establish that TCP downloads continue. The issue asks whether a lost TX completion or a
+  stalled EDCA state machine is responsible; the root cause is unconfirmed.
+- **Status (checked 2026-10-19):** open, reported 2026-10-13, assigned to MaxwellAlan. No diagnosis,
+  fix, or delivery release has been announced.
+- **Versions:** the reporter reproduced the issue with ESP-IDF **v6.1** but not **v5.5** in their
+  tested setup. MyPi-Hotspot also builds with IDF v6.1, but sharing that version does not establish
+  that our 11ax upload result has the same cause.
+- **Possible fix path:** if an ESP-IDF Wi-Fi-library fix for this issue is confirmed and released,
+  rebuilding the C5 slave with that release may be appropriate. Whether ESP-Hosted 3.0.10 is
+  relevant to this issue is unconfirmed; its separate role in buffer tuning remains under
+  investigation.
 - **Which esp-hosted we use:** the official
   [espressif/esp-hosted](https://components.espressif.com/components/espressif/esp_hosted)
   **v3.0.9** from the IDF Component Registry (pinned in `main/idf_component.yml`). Not
   `esphome/esp-hosted-firmware`, which is a separate ESPHome fork with an ESP-NOW overlay.
-- **Until fixed:** keep 11ax off (not in the default set; the UI warns), use ac/HT20 on 5 GHz.
-- **When a fix lands:** note the IDF release, rebuild the C5 slave on it, flash via `/c5update`,
-  then re-run the upload test with ax ticked and compare with the v0.5.3 baseline.
+- **While unconfirmed:** keep 11ax off (not in the default set; the UI warns), use ac/HT20 on 5 GHz.
+- **If an applicable fix is released:** note the IDF release, rebuild the C5 slave on it, flash via
+  `/c5update`, then re-run the upload test with ax ticked and compare with the v0.5.3 baseline.
 
 ## Hotspot v0.9.5–v0.9.6 — HW-tested (PRs merged)
 

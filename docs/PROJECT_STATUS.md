@@ -181,15 +181,15 @@ P4/C5 OTA paths are unchanged.
 | Item | Details |
 |---|---|
 | Link | <https://github.com/espressif/esp-idf/issues/19238> |
-| Description | Under sustained TCP uplink load the C5 stops transmitting (upload drops to ~0). Root cause per the issue comments: EDCA/TX buffer exhaustion. |
-| Status (2026-10-19) | Open, reported 2026-10-13, assigned to MaxwellAlan; no fix or PR yet |
-| Affects | ESP-IDF Wi-Fi libraries in v6.1 (not reported on v5.5). This project uses IDF v6.1, so it is affected. |
-| Fix path | A new ESP-IDF release, then a C5 slave rebuild. **Not** ESP-Hosted 3.0.10 (the bug is not in esp-hosted). |
+| Reported observations | The reporter describes TX stopping under sustained traffic, TCP writes timing out, all static TX buffers remaining outstanding, and RX callbacks continuing. RX callbacks do not establish that TCP downloads continue. The issue asks whether a lost TX completion or stalled EDCA state machine is responsible; the root cause is unconfirmed. |
+| Status (2026-10-19) | Open, reported 2026-10-13, assigned to MaxwellAlan; no diagnosis, fix, or delivery release announced |
+| Versions | The reporter reproduced on ESP-IDF v6.1 but not v5.5 in their tested setup. This project also uses v6.1, but that alone does not establish that its 11ax upload result has the same cause. |
+| Possible fix path | A C5 rebuild may be appropriate if an applicable ESP-IDF Wi-Fi-library fix is confirmed and released. Whether ESP-Hosted 3.0.10 is relevant to #19238 is unconfirmed; its separate role in buffer tuning remains under investigation. |
 | Our esp-hosted | Official `espressif/esp_hosted` **v3.0.9** from the IDF Component Registry, not the `esphome/esp-hosted-firmware` ESPHome fork |
 | Workaround | 11ax off by default (UI warning); ac/HT20 recommended on 5 GHz |
 
-The ESP-Hosted 3.0.10 hold (buffer tuning, see below) is separate: 3.0.10 may help SDIO
-throughput but will not fix #19238.
+The ESP-Hosted 3.0.10 hold (buffer tuning, see below) is a separate investigation. Its relevance
+to #19238 has not been established.
 
 ## Buffer findings (v0.9.7 investigation — defer tuning until ESP-Hosted 3.0.10+)
 
