@@ -19,6 +19,7 @@
 #include "net.h"
 #include "nvs.h"
 #include "sdkconfig.h"
+#include "time_service.h"
 
 static const char *TAG = "eth";
 
@@ -98,6 +99,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_has_ip = true;
         ESP_LOGI(TAG, "%s got IP " IPSTR " (gw " IPSTR ") - Ethernet is now the uplink", s_rescue ? "Rescue" : "WAN",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
+        time_service_network_connected();
         esp_netif_set_default_netif(s_netif);
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {
         s_has_ip = false;

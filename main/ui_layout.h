@@ -12,8 +12,9 @@
 #define MYPI_UI_MENU_X0     8
 #define MYPI_UI_MENU_X1     231
 #define MYPI_UI_MENU_Y0     40
-#define MYPI_UI_MENU_ROW_H  34
+#define MYPI_UI_MENU_ROW_H  30      // v0.10.0: 34 -> 30 so 7 rows end above the HOME button (y 280)
 #define MYPI_UI_MENU_GAP    3
+#define MYPI_UI_MENU_ITEMS  7
 
 // RSSI color gradient: 20 linear steps from red (step 0, <= -80 dBm) to green (step 19, >= -40 dBm).
 #define MYPI_RSSI_COLOR_STEPS 20

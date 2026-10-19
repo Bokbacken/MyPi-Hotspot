@@ -18,3 +18,8 @@ dependencies:
     version: "^1.7"
   espressif/iperf:
     version: "^1.0"
+  # v0.10.0: MIPI-CSI camera (V4L2 + ISP); pulls esp_cam_sensor (OV5647 driver) and esp_ipa.
+  espressif/esp_video:
+    version: "2.5.*"
+    rules:
+      - if: "target in [esp32p4]"

@@ -47,6 +47,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   letter-spacing: .08em;
   line-height: 1.1;
 }
+#mypi-clock {
+  color: var(--mypi-orange);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .mypi-wifi {
   margin-left: auto;
   display: inline-flex;
@@ -186,6 +191,11 @@ code { overflow-wrap: anywhere; color: var(--mypi-orange); }
 .ok { color: var(--mypi-green) !important; }
 .bad { color: var(--mypi-red) !important; }
 .warn, #msg { color: #ffd17c; }
+
+/* v0.10.0 camera page: preview scales to the page width, keeps the 5:4 sensor aspect. */
+.cam-view { max-width: 800px; background: #000; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+.cam-view img { display: block; width: 100%; height: auto; min-height: 120px; }
+.cam-view p { margin: .5rem; }
 
 @media (max-width: 700px) {
   body { padding: .55rem .55rem 2rem; font-size: 15px; }

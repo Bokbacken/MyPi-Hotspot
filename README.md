@@ -11,11 +11,15 @@ path: the home status viewport is rendered by LVGL with a MyPi font (ASCII, å �
 μ/π), and touch is fed to an LVGL pointer input device. Backend/API, OTA and rescue
 paths are unchanged. See [migration boundaries](docs/ARCHITECTURE.md#lvgl-migration).
 
+**0.10.0** (compile-checked, not hardware-tested): **camera support** for the OV5647 module
+("P5V04A SUNNY") on the NANO's MIPI-CSI connector: an LCD **Camera** page (live preview +
+SHUTTER) and a web **Camera** page (preview, shutter, saved photos). See [Camera](#camera-v0100).
+
 **0.9.8** (builds, not hardware-tested): reverts the v0.9.7 buffer tuning (AP link lost in HW
 test); restores v0.9.6 host/C5 buffer defaults. C5 buffer tuning is deferred until an official
 ESP-Hosted 3.0.10+ release. Use the "3.0.9 tuned" C5 firmware with this P4 image.
 
-Current firmware release: **0.9.8** (see above and [CHANGELOG.md](CHANGELOG.md)).
+Current firmware release: **0.10.0** (see above and [CHANGELOG.md](CHANGELOG.md)).
 v0.9.6 added 5 GHz channel-width control (HT40 / HT20, Optimize page) and an SDIO clock
 option (40 / 50 MHz); v0.8.7 introduced the reusable LVGL scroll-wheel keyboard; v0.8.1
 introduced the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an
@@ -29,13 +33,13 @@ quiet by default and can be switched on at any time with **debug mode** (see [De
 | Action | Result |
 |---|---|
 | Boot | Boot banner on serial, then the LCD status home screen (debug mode: wiring check + color test pattern first) |
-| Tap **OPEN MENU** | Open Wi-Fi, AP, clients, traffic, Ethernet, or system/display views |
+| Tap **OPEN MENU** | Open Wi-Fi, AP, clients, traffic, Ethernet, system/display or camera views |
 | Wi-Fi uplink → scan → network | Saved profiles connect directly; a new network opens the local password character wheel, then saves and requests connection |
 | AP → **STOP AP...** | Show an explicit disconnect confirmation; Back/navigation leaves the AP running |
 | Swipe down during first 10 s | Enter Ethernet emergency mode (>= 60 px, rotation-corrected coordinates) |
 | Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
-| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): pages Overview, Wi-Fi, Access point, Traffic, Ethernet, System (radio, display, OTA links), Debug (pins, touch, log) |
+| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): pages Overview, Wi-Fi, Access point, Traffic, Ethernet, System (time zone, display, OTA links), Camera, Optimize, Debug (pins, touch, log) |
 
 The firmware uses LVGL 9.4.0 on top of `esp_lcd` (built into ESP-IDF), raw I2C for
 touch, and ESP-Hosted for Wi-Fi. [LVGL migration status](docs/ARCHITECTURE.md#lvgl-migration):
@@ -60,9 +64,11 @@ asset could not be accessed for this update, so no substitute logo has been used
 | Part | Details |
 |---|---|
 | MCU board | Waveshare ESP32-P4-NANO-WIFI6-DB — ESP32-P4NRW32X, 32 MB PSRAM, 32 MB flash |
+| RTC | ESP32-P4 internal RTC, with board RTC-battery backup |
 | Wi-Fi | ESP32-C5 co-processor over SDIO 4-bit (CLK=18, CMD=19, D0–D3=14–17, reset=54) via ESP-Hosted |
 | Display | Waveshare 2" LCD, ST7789, 240×320, SPI |
 | Touch | CST816D, I2C address `0x15`, polled (TP_RST pulsed at init, TP_INT read-ready) |
+| Camera (optional) | OV5647 module (e.g. "P5V04A SUNNY", Raspberry Pi camera v1.3 type) on the NANO MIPI-CSI connector (2-lane); SCCB shares the touch I2C bus (GPIO7/8) |
 
 ### Wiring (display module → ESP32-P4-NANO)
 
@@ -142,7 +148,7 @@ MyPi-Hotspot/
 ├── main/
 │   ├── CMakeLists.txt
 │   ├── Kconfig.projbuild Project options (menuconfig → "MyPi-Hotspot")
-│   ├── idf_component.yml Managed components: esp_wifi_remote, esp_hosted, mdns, iperf
+│   ├── idf_component.yml Managed components: lvgl, esp_wifi_remote, esp_hosted, mdns, cjson, iperf, esp_video
 │   ├── main.c            app_main: init, status screen start, touch loop, OTA rollback confirm
 │   ├── pins.h            All GPIO assignments (module pin labels) — VERIFY BEFORE FLASHING
 │   ├── display.h/.c      ST7789 via esp_lcd, 240×320 RGB565 framebuffer in PSRAM, ping-pong DMA flush, test pattern, ID reads
@@ -154,7 +160,9 @@ MyPi-Hotspot/
 │   ├── header_logo.h     Generated μ/π logo: 16 px LCD alpha map + 32 px web PNG (tools/render_header_logo.py)
 │   ├── header_font.h     Generated antialiased LCD `Hotspot` title (tools/render_header_font.py)
 │   ├── rescue.h/.c       Emergency mode (Ethernet rescue): triggers, option state, worker task
-│   ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver)
+│   ├── touch.h/.c        CST816D polling over I2C (new i2c_master driver); bus shared with the camera SCCB
+│   ├── camera.h/.c       OV5647 MIPI-CSI camera (esp_video V4L2 + ISP), preview, HW JPEG, photos in /store/photos
+│   ├── camera_core.h     Host-testable camera helpers (photo names, pruning, scaling)
 │   ├── diag.h/.c         Boot banner, shared status struct, heartbeat task, debug mode (NVS)
 │   ├── logbuf.h/.c       RAM ring buffer mirroring all log output (served at /api/log) + crash tail
 │   ├── logstore.h/.c     Persistent logs on the `storage` FAT partition (OTA always, sessions on demand)
@@ -312,9 +320,27 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | `/api/logstore` | Saved logs in flash: status + list (see [Saved logs](#saved-logs-in-flash)) |
 | `/api/logstore/file?name=L0000012.TXT` | One saved log as text (`&dl=1` downloads it) |
 | `/update` | OTA upload form |
+| Camera API | Status, preview frame, capture, saved photos — see [Camera](#camera-v0100) |
 | Network API | STA/AP profiles, scan, AP clients, Ethernet mode, traffic stats, iperf — see [Network API](#network-api) |
 | `/api/debug?on=1\|0` (POST) | Switch debug mode on/off (saved in NVS) |
 | `/pins` | Wiring diagnostics: boot-time pin check (debug mode only) (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
+
+## Time and timezone
+
+The device restores time from the ESP32-P4 RTC when its RTC backup battery is fitted. If that clock
+is unset, the displayed clock remains unavailable until NTP is reachable. NTP starts when Wi-Fi STA
+or WAN Ethernet obtains an IP address; successful sync updates the system RTC, which then keeps time
+without Internet access. ESP log lines include a local date/time prefix (uptime is used until time is
+valid). The LCD and web header show the clock.
+
+Choose a timezone on **System → Time**. The selection is stored in NVS and applied immediately.
+`GET /api/status` reports `clock`, `time_valid`, `ntp_synced`, and `timezone`; `POST /api/timezone`
+accepts `{"timezone":0..6}`. The choices are UTC, Sweden, UK, Eastern Europe, US Eastern, US Pacific,
+and Japan.
+The traffic CSV also includes a UTC wall-clock timestamp for each sample; its existing elapsed
+`ts` column remains available.
+
+---
 
 ## OTA updates
 
@@ -484,6 +510,62 @@ uplink IP (green, or red *No uplink*), uplink SSID + channel, AP clients + chann
 uplink throughput (live in cyan, peak in yellow, Mbit/s) and the traffic log state once it has been used.
 While the status screen runs, touch drawing is disabled (touch events still appear in the web UI).
 
+## Camera (v0.10.0)
+
+An OV5647 camera module ("P5V04A SUNNY" / Raspberry Pi camera v1.3 type) on the ESP32-P4-NANO
+**CSI camera connector** gets a page on the LCD and on the web.
+
+**Driver stack:** Espressif's [`esp_video`](https://components.espressif.com/components/espressif/esp_video)
+(V4L2 API, MIPI-CSI + ISP with auto exposure/white balance) with the OV5647 driver from
+`esp_cam_sensor`, both pulled in by the component manager (`main/idf_component.yml`). The sensor
+is **auto-detected** over SCCB at boot; the SCCB uses the board I2C bus (GPIO7/8) together with
+the touch controller. Photos are encoded by the P4's **hardware JPEG encoder**.
+
+### Enabling
+
+Camera support is on by default (`sdkconfig.defaults`). Only a fresh configuration picks up new
+defaults: after updating an existing checkout run `idf.py fullclean` or delete `sdkconfig`
+(or set the options below in `idf.py menuconfig`), then build and flash as usual.
+
+| menuconfig | Default | Meaning |
+|---|---|---|
+| MyPi-Hotspot → Camera → MIPI-CSI camera | on | Camera support (off: pages show "disabled", no esp_video code runs) |
+| SCCB (I2C) clock | 100 kHz | Camera control bus speed |
+| Reset / power-down GPIO | -1 | Leave at -1 unless your module wiring needs a reset / power-down pin |
+| Mirror / flip | off | Image orientation |
+| JPEG quality (photos / web preview) | 85 / 50 | Higher = larger files |
+| Photos kept | 20 | The oldest photo is deleted when more would be stored |
+| Storage space kept free for logs | 512 KB | A capture fails with "Storage full" instead |
+| Stop stream after | 10 s | The stream only runs while a preview is shown |
+| Component config → Espressif Camera Sensors Configurations → OV5647 | 800x640 RAW8 | Sensor mode (ISP output RGB565) |
+
+### Using
+
+- **LCD:** **OPEN MENU** → **Camera**. The live preview (240x192) fills the status area;
+  **SHUTTER** saves a photo, the result line shows `Saved IMG00001.JPG (63 KB)` or the reason it
+  failed. **BACK** returns to the menu (the page also returns there after 5 minutes without touch).
+- **Web:** the **Camera** page (`/#camera`) shows a live preview (one JPEG at a time while the page
+  is visible), a **Shutter** button and the saved photos with view / download / delete.
+- Photos are stored as `/store/photos/IMGnnnnn.JPG` (800x640) on the FAT `storage` partition
+  (about 3.9 MB, shared with the [saved logs](#saved-logs-in-flash)); the directory is created on
+  the first capture.
+
+| Endpoint | Result |
+|---|---|
+| `GET /api/camera/status` | `{enabled, state, sensor, width, height, frames, photos_taken, error, last_photo, max_photos, storage{mounted,free_kb,total_kb}, photos[{name,size}]}`; `state` is `disabled`, `starting`, `not_detected`, `ready`, `streaming` or `error` |
+| `GET /api/camera/frame.jpg` | One fresh preview frame (`image/jpeg`); `503` + reason text when the camera fails |
+| `POST /api/camera/capture` | Saves a photo: `{"ok":true,"name":"IMG00001.JPG","size":64512}` or `{"ok":false,"stage":"camera\|capture\|storage","error":"..."}` (HTTP 503 / 500 / 507) |
+| `GET /api/camera/photo?name=IMG00001.JPG` | The photo (`&dl=1` downloads it) |
+| `POST /api/camera/delete?name=IMG00001.JPG` | Deletes a photo |
+
+Errors are shown on both pages with their source: **camera** (not detected / init failed /
+disabled), **capture** (stream, frame timeout or JPEG encoding) and **storage** (not mounted, full,
+write failed). Without a camera the firmware runs normally; the pages show "Camera not detected".
+
+Quick check after flashing: the serial log shows `camera: Camera OV5647 detected, 800x640` at boot;
+open the LCD Camera page and the web Camera page, press the shutter on each, and confirm the new
+photo opens from the web list. `curl -X POST http://mypi-hotspot.local/api/camera/capture` works too.
+
 ### Emergency mode (Ethernet rescue, v0.7.0)
 
 Ethernet-only access when Wi-Fi or the ESP32-C5 is unusable. Runtime only - a
@@ -591,4 +673,7 @@ Check the serial log first — each display step is logged.
 | `AP not found` | Wrong SSID, AP out of range, or AP is 5 GHz-only/hidden — check `CONFIG_MYPI_WIFI_SSID` |
 | Repeated `Disconnected: reason ...` with auth errors | Wrong password — check `CONFIG_MYPI_WIFI_PASSWORD` |
 | `[FAIL] esp_wifi_init` / version cannot be read | C5 not running compatible ESP-Hosted slave firmware, or SDIO problem |
+| `Camera not detected: check the CSI ribbon cable` | Ribbon reversed or loose (contacts must face the connector contacts on both ends), or the module is not an OV5647 (e.g. other sensors need their `esp_cam_sensor` driver enabled in menuconfig) |
+| Camera page shows a frame timeout | Sensor detected but no MIPI data: reseat the ribbon; check the 2-lane module type |
+| `Storage full` / `Storage not mounted` on capture | Delete photos (web Camera page) or saved logs; the `storage` partition must be mounted (see the boot log) |
 | `mypi-hotspot.local` does not resolve | mDNS not supported on the client (some Android/Windows setups) — use the IP from the log |

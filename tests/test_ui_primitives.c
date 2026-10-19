@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "camera_core.h"
 #include "mypi_kbd_core.h"
 #include "opt_config_core.h"
 #include "ui_input.h"
@@ -222,6 +223,57 @@ static void test_touch_geometry(void)
     assert(!mypi_ui_button_hit(231, 316, 8, 268, 231, 315));
     // Touch coordinates are normalized by touch_read() before menu hit-testing.
     assert(mypi_ui_button_hit(239 - 8, 319 - 268, 8, 319 - 315, 231, 319 - 268));
+    // v0.10.0: the 7-row menu (with "Camera") ends above the HOME button (y 280).
+    int stride = MYPI_UI_MENU_ROW_H + MYPI_UI_MENU_GAP;
+    assert(MYPI_UI_MENU_Y0 + (MYPI_UI_MENU_ITEMS - 1) * stride + MYPI_UI_MENU_ROW_H <= 280);
+    assert(mypi_ui_row_hit(MYPI_UI_MENU_Y0 + 6 * stride, MYPI_UI_MENU_Y0, MYPI_UI_MENU_ROW_H, MYPI_UI_MENU_GAP,
+                           MYPI_UI_MENU_ITEMS) == 6);
+    assert(mypi_ui_row_hit(MYPI_UI_MENU_Y0 + 7 * stride, MYPI_UI_MENU_Y0, MYPI_UI_MENU_ROW_H, MYPI_UI_MENU_GAP,
+                           MYPI_UI_MENU_ITEMS) == -1);
+}
+
+static void test_camera_core(void)
+{
+    assert(strcmp(camera_state_name(CAMERA_STATE_NOT_DETECTED), "not_detected") == 0);
+    assert(strcmp(camera_state_name(CAMERA_STATE_STREAMING), "streaming") == 0);
+    assert(camera_state_usable(CAMERA_STATE_READY) && camera_state_usable(CAMERA_STATE_ERROR));
+    assert(!camera_state_usable(CAMERA_STATE_DISABLED) && !camera_state_usable(CAMERA_STATE_NOT_DETECTED));
+    assert(!camera_state_usable(CAMERA_STATE_STARTING));
+    assert(strcmp(camera_stage_name(CAMERA_STAGE_STORAGE), "storage") == 0);
+    assert(strcmp(camera_stage_name(CAMERA_STAGE_NONE), "none") == 0);
+
+    // Photo names: 8.3 FAT names only (no LFN on the storage partition), never a path.
+    assert(camera_photo_name_ok("IMG00001.JPG"));
+    assert(!camera_photo_name_ok("IMG0001.JPG") && !camera_photo_name_ok("img00001.jpg"));
+    assert(!camera_photo_name_ok("IMG0000/.JPG") && !camera_photo_name_ok("../IMG001.J") && !camera_photo_name_ok(NULL));
+    assert(camera_photo_seq("IMG01234.JPG") == 1234 && camera_photo_seq("L0000001.TXT") == -1);
+    char name[CAMERA_PHOTO_NAME_LEN];
+    assert(camera_photo_name(42, name, sizeof(name)) && strcmp(name, "IMG00042.JPG") == 0);
+    assert(camera_photo_name(CAMERA_PHOTO_SEQ_MAX, name, sizeof(name)) && camera_photo_seq(name) == CAMERA_PHOTO_SEQ_MAX);
+    assert(!camera_photo_name(0, name, sizeof(name)) && !camera_photo_name(CAMERA_PHOTO_SEQ_MAX + 1, name, sizeof(name)));
+    assert(!camera_photo_name(1, name, CAMERA_PHOTO_NAME_LEN - 1));
+
+    // Keep at most N photos: delete enough of the oldest to make room for one more.
+    assert(camera_prune_count(0, 20) == 0 && camera_prune_count(19, 20) == 0);
+    assert(camera_prune_count(20, 20) == 1 && camera_prune_count(25, 20) == 6 && camera_prune_count(3, 0) == 3);
+    assert(camera_storage_ok(1000, 100, 512) && !camera_storage_ok(600, 100, 512));
+
+    int w, h;
+    camera_fit(800, 640, 240, 200, &w, &h);
+    assert(w == 240 && h == 192);
+    camera_fit(640, 800, 240, 200, &w, &h);
+    assert(w == 160 && h == 200);
+    camera_fit(0, 0, 240, 200, &w, &h);
+    assert(w == 240 && h == 200);
+
+    // 4x2 -> 2x1 nearest neighbour, source stride 5 pixels (padding never sampled).
+    static const uint16_t src[] = {1, 2, 3, 4, 0xFFFF, 5, 6, 7, 8, 0xFFFF};
+    uint16_t dst[2] = {0};
+    camera_scale_rgb565(src, 4, 2, 5, dst, 2, 1);
+    assert(dst[0] == 2 && dst[1] == 4);
+    uint16_t same[8];
+    camera_scale_rgb565(src, 4, 2, 5, same, 4, 2);
+    assert(same[0] == 1 && same[3] == 4 && same[4] == 5 && same[7] == 8);
 }
 
 // --- opt_config (v0.9.0): mock NVS key/value store ---
@@ -509,6 +561,7 @@ int main(void)
     test_password_utf8_and_length();
     test_kbd_core();
     test_touch_geometry();
+    test_camera_core();
     test_opt_config();
     test_sta_channel();
     puts("UI primitive tests passed");

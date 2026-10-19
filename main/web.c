@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "camera.h"
 #include "cJSON.h"
 #include "diag.h"
 #include "display.h"
@@ -34,6 +35,7 @@
 #include "rescue.h"
 #include "sdkconfig.h"
 #include "wifi.h"
+#include "time_service.h"
 
 static const char *TAG = "web";
 
@@ -57,13 +59,14 @@ extern const char _binary_web_ui_js_end[];
     "<header class='mypi-brand'><div class='mypi-head'>" \
     "<img class='mypi-logo' src='" HEADER_LOGO_URI "' alt='MyPi' width='40' height='32'>" \
     "<span class='mypi-project'>Hotspot</span>" \
+    "<span id='mypi-clock' title='Local time'>--:--</span>" \
     "<span class='mypi-wifi' id='mypi-wifi' title='Wi-Fi uplink (STA) signal'>" \
     "<svg viewBox='0 0 24 18' aria-hidden='true'><path d='M2 7a14 14 0 0 1 20 0M5.5 10.5a9 9 0 0 1 13 0M9 14a4 4 0 0 1 6 0'/>" \
     "<circle cx='12' cy='16.5' r='1.5'/></svg><span>Wi-Fi</span> <b id='mypi-dbm'>&mdash;</b></span></div>" \
     "<div class='mypi-divider'><svg data-text='Hotspot'></svg></div>" \
     "<nav class='mypi-nav' aria-label='MyPi pages'><a href='/#overview'>Overview</a><a href='/#wifi'>Wi-Fi</a>" \
     "<a href='/#access-point'>Access point</a><a href='/#traffic'>Traffic</a><a href='/#ethernet'>Ethernet</a>" \
-    "<a href='/#system'>System</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
+    "<a href='/#system'>System</a><a href='/#camera'>Camera</a><a href='/#optimize'>Optimize</a><a href='/#debug'>Debug</a></nav></header>"
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -110,8 +113,20 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='system'>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
+"<h2>Time</h2><p>Device time: <b id='sys-time'>--</b> <span id='time-status'></span></p>"
+"<p><label for='timezone'>Timezone</label> <select id='timezone' onchange='saveTimezone()'>"
+"<option value='0'>UTC</option><option value='1'>Sweden (CET/CEST)</option><option value='2'>United Kingdom</option>"
+"<option value='3'>Eastern Europe (EET/EEST)</option><option value='4'>US Eastern</option>"
+"<option value='5'>US Pacific</option><option value='6'>Japan</option></select> "
+"<small>(saved and applied immediately)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
+// v0.10.0 Camera page: live preview (one JPEG at a time while the page is visible), shutter, saved
+// photos. Logic in web_ui.js (MyPiSerial.camera*).
+"<section class='page' data-page='camera'><h2>Camera</h2><p id='cam-st'></p>"
+"<div class='cam-view'><img id='cam-img' alt='Camera preview'><p id='cam-err' class='bad' hidden></p></div>"
+"<p><button type='button' id='cam-shutter' onclick='MyPiSerial.cameraCapture()' disabled>Shutter</button> <span id='cam-msg'></span></p>"
+"<h3 style='font-size:1em'>Saved photos</h3><p id='cam-store'></p><table id='cam-photos'></table></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
 // AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
 // width (HT40/HT20) and the SDIO clock (40/50 MHz, auto-fallback) to the radio grid. Checkboxes and
@@ -206,6 +221,8 @@ MYPI_BRAND_HEADER
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
 "let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
+"$('timezone').value=String(st.timezone);$('sys-time').textContent=st.clock;"
+"$('time-status').textContent=st.ntp_synced?'NTP synchronized':(st.time_valid?'RTC holdover':'Waiting for NTP');"
 "if(FL){FL=0;edS(SP[p.active]?p.active:0);edA(0)}"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value=x.pass||'';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
@@ -223,6 +240,7 @@ MYPI_BRAND_HEADER
 "async function apStart(i){if(confirm('Starting this profile may replace the running AP and disconnect clients. Continue?'))await post('/api/ap/start',{slot:i})}"
 "async function apStop(){if(confirm('Stop the access point and disconnect its clients?'))await post('/api/ap/stop')}"
 "async function saveRot(){await post('/api/display',{rotate:$('lrot').checked?1:0})}"
+"async function saveTimezone(){if(await post('/api/timezone',{timezone:+$('timezone').value}))ld()}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
 "async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
@@ -232,6 +250,8 @@ MYPI_BRAND_HEADER
 "n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',esc(e),'bad')}}"
 "let tickBusy=false;async function tick(){if(tickBusy)return;tickBusy=true;try{"
 "let s=await (await fetch('/api/status')).json();"
+"$('mypi-clock').textContent=s.time_valid?s.clock.slice(11,16):'--:--';$('sys-time').textContent=s.clock;"
+"$('time-status').textContent=s.ntp_synced?'NTP synchronized':(s.time_valid?'RTC holdover':'Waiting for NTP');"
 "$('t').innerHTML="
 "row('Firmware',s.firmware)+row('ESP-IDF',s.idf)+row('Chip',s.chip)+row('Reset reason',s.reset_reason)+"
 "row('Uptime',fmtUp(s.uptime_s))+row('Partition',s.partition)+"
@@ -550,6 +570,12 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "chip", chipstr);
     cJSON_AddStringToObject(j, "reset_reason", diag_reset_reason_name());
     cJSON_AddNumberToObject(j, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    time_service_status_t time_status;
+    time_service_get_status(&time_status);
+    cJSON_AddStringToObject(j, "clock", time_status.clock);
+    cJSON_AddBoolToObject(j, "time_valid", time_status.valid);
+    cJSON_AddBoolToObject(j, "ntp_synced", time_status.ntp_synced);
+    cJSON_AddNumberToObject(j, "timezone", time_status.timezone);
     cJSON_AddStringToObject(j, "partition", running ? running->label : "?");
     cJSON_AddNumberToObject(j, "heap_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(j, "heap_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
@@ -1420,6 +1446,18 @@ static esp_err_t api_display_post(httpd_req_t *req)
     return send_result(req, display_set_rotated(rot == 1), rot ? "rotated 180" : "normal orientation", NULL);
 }
 
+// POST /api/timezone {"timezone": 0..TIME_ZONE_COUNT-1}
+static esp_err_t api_timezone_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int timezone = jint(j, "timezone", -1);
+    cJSON_Delete(j);
+    if (timezone < 0 || timezone >= TIME_ZONE_COUNT) {
+        return send_result(req, ESP_ERR_INVALID_ARG, NULL, "invalid timezone");
+    }
+    return send_result(req, time_service_set_timezone((uint8_t)timezone), "timezone applied", NULL);
+}
+
 // POST /api/radio {band_mode (0-2), proto (bitmask, shared by STA and AP)} - missing keys keep the
 // saved value; applied after reboot. Older clients may send sta_proto/ap_proto: merged (STA wins).
 // Width (2.4 GHz HT20 locked / 5 GHz via /api/opt bw_5g), TX power (Optimize) and DTIM (driver default)
@@ -1756,6 +1794,145 @@ static esp_err_t api_logstore_clear_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, err == ESP_OK ? "cleared" : esp_err_to_name(err));
 }
 
+// ---------------------------------------------------------------------------
+// Camera API (v0.10.0): status, preview frame, capture, saved photos (/store/photos)
+// ---------------------------------------------------------------------------
+
+#define CAMERA_LIST_MAX CONFIG_MYPI_CAMERA_MAX_PHOTOS
+
+// GET /api/camera/status
+static esp_err_t api_camera_status_get(httpd_req_t *req)
+{
+    camera_status_t st;
+    camera_get_status(&st);
+    logstore_info_t li;
+    logstore_get_info(&li);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "enabled", st.state != CAMERA_STATE_DISABLED);
+    cJSON_AddStringToObject(j, "state", camera_state_name(st.state));
+    cJSON_AddStringToObject(j, "sensor", st.sensor);
+    cJSON_AddNumberToObject(j, "width", st.width);
+    cJSON_AddNumberToObject(j, "height", st.height);
+    cJSON_AddNumberToObject(j, "frames", st.frames);
+    cJSON_AddNumberToObject(j, "photos_taken", st.photos_taken);
+    cJSON_AddStringToObject(j, "error", st.last_error);
+    cJSON_AddStringToObject(j, "last_photo", st.last_photo);
+    cJSON_AddNumberToObject(j, "max_photos", CONFIG_MYPI_CAMERA_MAX_PHOTOS);
+    cJSON *sto = cJSON_AddObjectToObject(j, "storage");
+    cJSON_AddBoolToObject(sto, "mounted", li.mounted);
+    cJSON_AddNumberToObject(sto, "free_kb", li.free_kb);
+    cJSON_AddNumberToObject(sto, "total_kb", li.total_kb);
+    cJSON *arr = cJSON_AddArrayToObject(j, "photos");
+    camera_photo_t *list = calloc(CAMERA_LIST_MAX, sizeof(camera_photo_t));
+    int n = list ? camera_photo_list(list, CAMERA_LIST_MAX) : 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", list[i].name);
+        cJSON_AddNumberToObject(o, "size", list[i].size);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(list);
+    return send_json(req, j);
+}
+
+// GET /api/camera/frame.jpg: one fresh preview frame; 503 + reason text if the camera fails.
+static esp_err_t api_camera_frame_get(httpd_req_t *req)
+{
+    uint8_t *jpg = NULL;
+    size_t len = 0;
+    esp_err_t err = camera_snapshot_jpeg(CONFIG_MYPI_CAMERA_PREVIEW_QUALITY, &jpg, &len);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (err != ESP_OK) {
+        camera_status_t st;
+        camera_get_status(&st);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, st.last_error[0] ? st.last_error : esp_err_to_name(err));
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    err = httpd_resp_send(req, (const char *)jpg, len);
+    free(jpg);
+    return err;
+}
+
+// POST /api/camera/capture -> {"ok":true,"name":"IMG00001.JPG","size":n} or
+// {"ok":false,"stage":"camera|capture|storage","error":"..."}
+static esp_err_t api_camera_capture_post(httpd_req_t *req)
+{
+    char name[CAMERA_PHOTO_NAME_LEN];
+    uint32_t size = 0;
+    camera_capture_result_t result;
+    esp_err_t err = camera_capture_save(name, sizeof(name), &size, &result);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", err == ESP_OK);
+    if (err == ESP_OK) {
+        cJSON_AddStringToObject(j, "name", name);
+        cJSON_AddNumberToObject(j, "size", size);
+    } else {
+        cJSON_AddStringToObject(j, "stage", camera_stage_name(result.stage));
+        cJSON_AddStringToObject(j, "error", result.error[0] ? result.error : esp_err_to_name(err));
+        httpd_resp_set_status(req, result.stage == CAMERA_STAGE_STORAGE ? "507 Insufficient Storage" :
+                                   (result.stage == CAMERA_STAGE_CAMERA || err == ESP_ERR_TIMEOUT ? "503 Service Unavailable" :
+                                    "500 Internal Server Error"));
+    }
+    return send_json(req, j);
+}
+
+// GET /api/camera/photo?name=IMG00001.JPG  (add &dl=1 to download)
+static esp_err_t api_camera_photo_get(httpd_req_t *req)
+{
+    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "", dl[4] = "", path[48];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "name", name, sizeof(name));
+        httpd_query_key_value(q, "dl", dl, sizeof(dl));
+    }
+    if (!camera_photo_path(name, path, sizeof(path))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "usage: GET /api/camera/photo?name=IMGnnnnn.JPG");
+    }
+    if (!logstore_lock(5000)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "storage busy");
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        logstore_unlock();
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    char disp[64];
+    if (dl[0] == '1') {
+        snprintf(disp, sizeof(disp), "attachment; filename=\"mypi-%s\"", name);
+        httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    }
+    const size_t bs = 4096;
+    char *buf = malloc(bs);
+    esp_err_t err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+    size_t r;
+    while (err == ESP_OK && (r = fread(buf, 1, bs, f)) > 0) {
+        err = httpd_resp_send_chunk(req, buf, r);
+    }
+    fclose(f);
+    logstore_unlock();
+    free(buf);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    return err;
+}
+
+// POST /api/camera/delete?name=IMG00001.JPG
+static esp_err_t api_camera_delete_post(httpd_req_t *req)
+{
+    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        httpd_query_key_value(q, "name", name, sizeof(name));
+    }
+    if (!camera_photo_name_ok(name)) return send_result(req, ESP_ERR_INVALID_ARG, NULL, "name=IMGnnnnn.JPG");
+    esp_err_t err = camera_photo_delete(name);
+    return send_result(req, err, "deleted", err == ESP_ERR_NOT_FOUND ? "photo not found" : NULL);
+}
+
 esp_err_t web_start(void)
 {
     // httpd_sock_err() logs a warning BEFORE it inspects errno; the logging path can clobber
@@ -1809,6 +1986,7 @@ esp_err_t web_start(void)
         { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
         { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
         { .uri = "/api/display",        .method = HTTP_POST, .handler = api_display_post },
+        { .uri = "/api/timezone",      .method = HTTP_POST, .handler = api_timezone_post },
         { .uri = "/api/opt",            .method = HTTP_GET,  .handler = api_opt_get },
         { .uri = "/api/opt",            .method = HTTP_POST, .handler = api_opt_post },
         { .uri = "/api/clear_emergency", .method = HTTP_POST, .handler = api_clear_emergency_post },
@@ -1820,6 +1998,11 @@ esp_err_t web_start(void)
         { .uri = "/api/iperf/start",    .method = HTTP_POST, .handler = api_iperf_start },
         { .uri = "/api/iperf/stop",     .method = HTTP_POST, .handler = api_iperf_stop },
         { .uri = "/api/iperf",          .method = HTTP_GET,  .handler = api_iperf_get },
+        { .uri = "/api/camera/status",  .method = HTTP_GET,  .handler = api_camera_status_get },
+        { .uri = "/api/camera/frame.jpg", .method = HTTP_GET, .handler = api_camera_frame_get },
+        { .uri = "/api/camera/capture", .method = HTTP_POST, .handler = api_camera_capture_post },
+        { .uri = "/api/camera/photo",   .method = HTTP_GET,  .handler = api_camera_photo_get },
+        { .uri = "/api/camera/delete",  .method = HTTP_POST, .handler = api_camera_delete_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);

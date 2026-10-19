@@ -5,9 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "camera.h"
 #include "diag.h"
 #include "display.h"
 #include "display_font.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "eth.h"
 #include "freertos/FreeRTOS.h"
@@ -23,6 +25,7 @@
 #include "ui_serial.h"
 #include "ui_lvgl_port.h"
 #include "wifi.h"
+#include "time_service.h"
 
 static const char *TAG = "display_ui";
 
@@ -37,6 +40,14 @@ static const char *TAG = "display_ui";
 #define CLIENT_MAX      8
 #define MENU_BUTTON_Y0  280
 #define MENU_BUTTON_Y1  315
+// Camera page: BACK left, SHUTTER right in the bottom button row.
+#define CAM_BACK_X1     111
+#define CAM_SHUTTER_X0  120
+#define CAM_STATUS_Y    236
+#define CAM_MSG_Y       250
+// Without a touch for this long the camera page returns to the menu, so a forgotten preview does
+// not keep the sensor/ISP streaming (the stream stops CONFIG_MYPI_CAMERA_IDLE_STOP_S later).
+#define CAM_PAGE_TIMEOUT_MS (5 * 60 * 1000)
 
 typedef enum {
     UI_HOME,
@@ -49,6 +60,7 @@ typedef enum {
     UI_TRAFFIC,
     UI_ETHERNET,
     UI_SYSTEM,
+    UI_CAMERA,
 } ui_view_t;
 
 typedef enum {
@@ -58,6 +70,7 @@ typedef enum {
     UI_JOB_AP_START,
     UI_JOB_AP_STOP,
     UI_JOB_CLIENTS,
+    UI_JOB_CAMERA_CAPTURE,
 } ui_job_type_t;
 
 typedef struct {
@@ -88,6 +101,8 @@ static ui_job_t s_job;
 static bool s_job_pending;
 static bool s_redraw_requested = true;
 static bool s_kbd_open_req;     // Set by the tap handler, consumed by the UI task (LVGL owner)
+static uint16_t *s_cam_preview; // Camera page preview pixels (PSRAM, UI task only)
+static volatile TickType_t s_last_tap;  // Camera page timeout
 
 static void draw_centered(int y, const char *s, uint16_t fg, int scale);
 
@@ -270,6 +285,19 @@ static void ui_worker(void *arg)
             else snprintf(message, sizeof(message), "%d connected clients", count);
             break;
         }
+        case UI_JOB_CAMERA_CAPTURE: {
+            char name[CAMERA_PHOTO_NAME_LEN];
+            uint32_t bytes = 0;
+            camera_capture_result_t result;
+            esp_err_t cerr = camera_capture_save(name, sizeof(name), &bytes, &result);
+            if (cerr == ESP_OK) {
+                snprintf(message, sizeof(message), "Saved %s (%lu KB)", name, (unsigned long)((bytes + 1023) / 1024));
+            } else {
+                snprintf(message, sizeof(message), "%.63s",
+                         result.error[0] ? result.error : esp_err_to_name(cerr));
+            }
+            break;
+        }
         default:
             break;
         }
@@ -350,6 +378,10 @@ static void draw_brand_header(const diag_status_t *d, bool ap_running)
     draw_alpha_bitmap(4, (HEADER_H - HEADER_LOGO_H) / 2, s_header_logo, HEADER_LOGO_W, HEADER_LOGO_H);
     draw_alpha_bitmap(4 + HEADER_LOGO_W + 6, (HEADER_H - HEADER_TITLE_H) / 2,
                       s_header_title, HEADER_TITLE_W, HEADER_TITLE_H);
+    char clock[8];
+    if (time_service_format(clock, sizeof(clock), "%H:%M")) {
+        display_draw_str(158, 5, clock, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    }
     display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4, wifi_signal_color(d, ap_running));
     draw_uart_divider(0, HEADER_H + 2, LCD_H_RES, MYPI_UI_ORANGE);
 }
@@ -472,8 +504,8 @@ static void draw_home(const ui_state_t *ui)
 
 static void draw_menu(void)
 {
-    static const char *items[] = {"Wi-Fi uplink", "Access point", "Connected clients",
-                                  "Traffic", "Ethernet", "System / display"};
+    static const char *items[MYPI_UI_MENU_ITEMS] = {"Wi-Fi uplink", "Access point", "Connected clients",
+                                                    "Traffic", "Ethernet", "System / display", "Camera"};
     display_lock();
     display_fill_screen(MYPI_UI_BG);
     draw_page_title("MyPi menu");
@@ -481,7 +513,7 @@ static void draw_menu(void)
         int y = MYPI_UI_MENU_Y0 + i * (MYPI_UI_MENU_ROW_H + MYPI_UI_MENU_GAP);
         display_fill_rect(MYPI_UI_MENU_X0, y, MYPI_UI_MENU_X1 + 1, y + MYPI_UI_MENU_ROW_H, MYPI_UI_BG);
         display_draw_rect_outline(MYPI_UI_MENU_X0, y, MYPI_UI_MENU_X1, y + MYPI_UI_MENU_ROW_H - 1, MYPI_UI_MUTED);
-        display_draw_str(MYPI_UI_MENU_X0 + 10, y + 13, items[i], MYPI_UI_TEXT, MYPI_UI_BG, 1);
+        display_draw_str(MYPI_UI_MENU_X0 + 10, y + (MYPI_UI_MENU_ROW_H - CHAR_H) / 2, items[i], MYPI_UI_TEXT, MYPI_UI_BG, 1);
     }
     draw_button(8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, "HOME", MYPI_UI_ORANGE);
     display_flush();
@@ -679,10 +711,85 @@ static void draw_system(void)
     display_unlock();
 }
 
+// Camera page (v0.10.0): live preview in the LVGL status viewport (refreshed every UI tick while the
+// page is open), status/result lines and BACK / SHUTTER buttons. The stream stops by itself
+// (camera.c idle timer) after leaving the page. Called on the UI task with display_lock() free:
+// grabbing a frame may block up to ~1 s on a failing camera.
+static void draw_camera(const ui_state_t *ui, bool full)
+{
+    camera_status_t cs;
+    camera_get_status(&cs);
+    if (!s_cam_preview) {
+        s_cam_preview = heap_caps_malloc(LCD_H_RES * MYPI_LVGL_STATUS_HEIGHT * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    }
+    int w = 0, h = 0;
+    esp_err_t err = ESP_ERR_NO_MEM;
+    if (s_cam_preview && camera_state_usable(cs.state)) {
+        err = camera_preview_rgb565(s_cam_preview, LCD_H_RES, MYPI_LVGL_STATUS_HEIGHT, &w, &h);
+        camera_get_status(&cs);
+    }
+    char overlay[CAMERA_ERROR_LEN] = "";
+    uint32_t overlay_rgb = 0xff0000;
+    if (cs.state == CAMERA_STATE_DISABLED) {
+        strlcpy(overlay, "Camera support is disabled in this firmware", sizeof(overlay));
+    } else if (!s_cam_preview) {
+        strlcpy(overlay, "No memory for the preview", sizeof(overlay));
+    } else if (err != ESP_OK) {
+        strlcpy(overlay, cs.last_error[0] ? cs.last_error : esp_err_to_name(err), sizeof(overlay));
+    } else if (ui->busy) {
+        strlcpy(overlay, "Saving photo...", sizeof(overlay));
+        overlay_rgb = 0xffff00;
+    }
+
+    display_lock();
+    if (full) {
+        display_fill_screen(MYPI_UI_BG);
+        draw_page_title("Camera");
+        draw_button(8, MENU_BUTTON_Y0, CAM_BACK_X1, MENU_BUTTON_Y1, "BACK", MYPI_UI_ORANGE);
+    }
+    bool ready = camera_state_usable(cs.state) && !ui->busy;
+    draw_button(CAM_SHUTTER_X0, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1, ui->busy ? "SAVING..." : "SHUTTER",
+                ready ? MYPI_UI_GREEN : MYPI_UI_MUTED);
+    if (!ui_lvgl_port_render_camera(err == ESP_OK ? s_cam_preview : NULL, w, h, overlay, overlay_rgb)) {
+        // LVGL unavailable: copy the preview directly, errors as plain text.
+        display_fill_rect(0, MYPI_LVGL_STATUS_Y, LCD_H_RES, MYPI_LVGL_STATUS_Y + MYPI_LVGL_STATUS_HEIGHT, MYPI_UI_BG);
+        if (err == ESP_OK) {
+            int x0 = (LCD_H_RES - w) / 2, y0 = MYPI_LVGL_STATUS_Y + (MYPI_LVGL_STATUS_HEIGHT - h) / 2;
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) display_draw_pixel(x0 + x, y0 + y, s_cam_preview[y * w + x]);
+            }
+        }
+        if (overlay[0]) display_draw_str(8, MYPI_LVGL_STATUS_Y + 90, overlay, MYPI_UI_RED, MYPI_UI_BG, 1);
+    }
+
+    char line[48];
+    display_fill_rect(0, CAM_STATUS_Y, LCD_H_RES, MENU_BUTTON_Y0 - 1, MYPI_UI_BG);
+    if (camera_state_usable(cs.state)) {
+        snprintf(line, sizeof(line), "%.16s %ux%u %s", cs.sensor[0] ? cs.sensor : "Camera", cs.width, cs.height,
+                 camera_state_name(cs.state));
+    } else {
+        snprintf(line, sizeof(line), "Camera: %s", camera_state_name(cs.state));
+    }
+    display_draw_str(8, CAM_STATUS_Y, line, cs.state == CAMERA_STATE_ERROR || !camera_state_usable(cs.state) ?
+                     MYPI_UI_RED : MYPI_UI_CYAN, MYPI_UI_BG, 1);
+    // Result of the last shutter press (or a hint), wrapped over two lines of 37 characters.
+    const char *msg = ui->busy ? "Capturing..." : (ui->message[0] ? ui->message : "SHUTTER saves a JPEG to /store/photos");
+    bool bad = !ui->busy && ui->message[0] && strncmp(ui->message, "Saved ", 6) != 0;
+    uint16_t color = ui->busy ? MYPI_UI_YELLOW : (bad ? MYPI_UI_RED : (ui->message[0] ? MYPI_UI_GREEN : MYPI_UI_MUTED));
+    for (int i = 0; i < 2 && strlen(msg) > (size_t)i * 37; i++) {
+        char part[38];
+        strlcpy(part, msg + i * 37, sizeof(part));
+        display_draw_str(8, CAM_MSG_Y + i * 12, part, color, MYPI_UI_BG, 1);
+    }
+    display_flush();
+    display_unlock();
+}
+
 void display_ui_handle_tap(int x, int y)
 {
     ui_state_t ui;
     ui_snapshot(&ui);
+    s_last_tap = xTaskGetTickCount();
     switch (ui.view) {
     case UI_HOME:
         if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) ui.view = UI_MENU;
@@ -692,7 +799,7 @@ void display_ui_handle_tap(int x, int y)
             ui.view = UI_HOME;
             break;
         }
-        int row = mypi_ui_row_hit(y, MYPI_UI_MENU_Y0, MYPI_UI_MENU_ROW_H, MYPI_UI_MENU_GAP, 6);
+        int row = mypi_ui_row_hit(y, MYPI_UI_MENU_Y0, MYPI_UI_MENU_ROW_H, MYPI_UI_MENU_GAP, MYPI_UI_MENU_ITEMS);
         if (row < 0 || x < MYPI_UI_MENU_X0 || x > MYPI_UI_MENU_X1) break;
         if (row == 0) {
             ui.view = UI_WIFI_SCAN;
@@ -706,9 +813,22 @@ void display_ui_handle_tap(int x, int y)
             ui_queue_job(UI_JOB_CLIENTS, -1, NULL, NULL);
         } else if (row == 3) ui.view = UI_TRAFFIC;
         else if (row == 4) ui.view = UI_ETHERNET;
-        else ui.view = UI_SYSTEM;
+        else if (row == 5) ui.view = UI_SYSTEM;
+        else {
+            ui.view = UI_CAMERA;
+            portENTER_CRITICAL(&s_ui_mux);
+            s_ui.message[0] = '\0';
+            portEXIT_CRITICAL(&s_ui_mux);
+        }
         break;
     }
+    case UI_CAMERA:
+        if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, CAM_BACK_X1, MENU_BUTTON_Y1)) {
+            ui.view = UI_MENU;
+        } else if (mypi_ui_button_hit(x, y, CAM_SHUTTER_X0, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1) && !ui.busy) {
+            ui_queue_job(UI_JOB_CAMERA_CAPTURE, -1, NULL, NULL);
+        }
+        break;
     case UI_WIFI_SCAN:
         if (mypi_ui_button_hit(x, y, 8, MENU_BUTTON_Y0, 231, MENU_BUTTON_Y1)) {
             ui.view = UI_MENU;
@@ -1032,9 +1152,18 @@ static void ui_task(void *arg)
             redraw = s_redraw_requested;
             s_redraw_requested = false;
             portEXIT_CRITICAL(&s_ui_mux);
-            if (ticks == 0 || redraw) {
-                ui_state_t ui;
-                ui_snapshot(&ui);
+            ui_state_t ui;
+            ui_snapshot(&ui);
+            if (ui.view == UI_CAMERA && !ui.busy &&
+                xTaskGetTickCount() - s_last_tap > pdMS_TO_TICKS(CAM_PAGE_TIMEOUT_MS)) {
+                portENTER_CRITICAL(&s_ui_mux);
+                if (s_ui.view == UI_CAMERA) s_ui.view = UI_MENU;
+                portEXIT_CRITICAL(&s_ui_mux);
+                ui.view = UI_MENU;
+                draw_menu();
+            } else if (ui.view == UI_CAMERA) {
+                draw_camera(&ui, ticks == 0 || redraw);     // Preview: every tick
+            } else if (ticks == 0 || redraw) {
                 switch (ui.view) {
                 case UI_HOME: draw_status(); break;
                 case UI_MENU: draw_menu(); break;
@@ -1046,6 +1175,7 @@ static void ui_task(void *arg)
                 case UI_TRAFFIC: draw_traffic(); break;
                 case UI_ETHERNET: draw_ethernet(); break;
                 case UI_SYSTEM: draw_system(); break;
+                case UI_CAMERA: break;
                 }
             }
             // LVGL timers and pointer indev run on this task only; OTA/rescue views bypass them.
@@ -1070,7 +1200,8 @@ esp_err_t display_ui_init(void)
     display_lock();
     display_fill_screen(COL_BLACK);
     display_unlock();
-    if (xTaskCreate(ui_worker, "display_ui_worker", 4096, NULL, 2, &s_worker_task) != pdPASS) {
+    // 6 KB: camera capture (JPEG encode + FAT write) runs here as well.
+    if (xTaskCreate(ui_worker, "display_ui_worker", 6144, NULL, 2, &s_worker_task) != pdPASS) {
         s_worker_task = NULL;
         ESP_LOGE(TAG, "failed to create local UI worker");
         return ESP_ERR_NO_MEM;
