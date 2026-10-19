@@ -25,6 +25,9 @@ Camera support for the OV5647 module ("P5V04A SUNNY") on the NANO MIPI-CSI conne
   no longer deletes a shared bus.
 - New menuconfig menu **MyPi-Hotspot → Camera**; `sdkconfig.defaults` enables the OV5647 and
   disables the unused DVP video device.
+- Timekeeping: restore the battery-backed ESP32-P4 RTC at boot, sync via SNTP when Wi-Fi or WAN
+  Ethernet gets an IP, persist/apply the selected timezone, and timestamp serial, RAM, saved and
+  traffic logs. The LCD and web UI show the local clock.
 
 ## 0.9.8 — 2026-10-18 (builds, not hardware-tested)
 

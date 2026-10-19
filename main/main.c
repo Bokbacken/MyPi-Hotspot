@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "touch.h"
+#include "time_service.h"
 #include "ui_lvgl_port.h"
 
 static const char *TAG = "main";
@@ -55,7 +56,6 @@ void app_main(void)
     if (logbuf_init(CONFIG_MYPI_LOG_BUFFER_SIZE) != ESP_OK) {
         ESP_LOGW(TAG, "Log ring buffer allocation failed; web log disabled");
     }
-    diag_print_boot_banner();
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -66,6 +66,8 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(err));
     }
+    time_service_init();
+    diag_print_boot_banner();
     diag_debug_load();   // Needs NVS; decides whether the boot-time checks below run
     opt_config_load();   // Needs NVS; Optimize settings (log level now, SDIO clock/TX/NAPT used by wifi.c)
     logstore_init();     // Needs NVS; mounts the FAT log store in the background (OTA logs, opt-in session logs)

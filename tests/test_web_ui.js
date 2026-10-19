@@ -511,5 +511,17 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ui.cameraVisible({ hidden: false, querySelector: () => ({ hidden: false }) }), true);
   assert.equal(ui.cameraVisible({ hidden: true, querySelector: () => ({ hidden: false }) }), false);
 
-  console.log("Web UI serial, routing, signal, Optimize and Camera tests passed");
+  // Timekeeping: RTC-backed status, immediate timezone control and network-triggered SNTP.
+  assert.ok(webC.includes("id='mypi-clock'"));
+  assert.ok(webC.includes("id='timezone'"));
+  assert.ok(webC.includes("id='sys-time'"));
+  assert.ok(webC.includes("time_service_set_timezone((uint8_t)timezone)"));
+  assert.ok(webC.includes(".uri = \"/api/timezone\""));
+  assert.ok(webC.includes("s.ntp_synced?'NTP synchronized'"));
+  assert.ok(fs.readFileSync(path.join(__dirname, "../main/wifi.c"), "utf8").includes("time_service_network_connected();"));
+  assert.ok(fs.readFileSync(path.join(__dirname, "../main/eth.c"), "utf8").includes("time_service_network_connected();"));
+  assert.ok(fs.readFileSync(path.join(__dirname, "../main/logbuf.c"), "utf8").includes("time_service_format(timestamp"));
+  assert.ok(fs.readFileSync(path.join(__dirname, "../main/time_service.c"), "utf8").includes("esp_sntp_init();"));
+
+  console.log("Web UI serial, routing, signal, Optimize, Camera and Time tests passed");
 })().catch((e) => { console.error(e); process.exit(1); });

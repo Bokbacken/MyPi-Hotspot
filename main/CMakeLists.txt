@@ -3,6 +3,7 @@ idf_component_register(
          "profiles.c" "net.c" "eth.c" "display_font.c" "display_ui.c" "rescue.c" "logstore.c"
          "ui_lvgl_port.c" "mypi_ui/lvgl_view.c" "mypi_font_14.c" "mypi_kbd.c" "opt_config.c"
          "sdio_clk.c" "camera.c"
+         "time_service.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES "web_ui.css" "web_ui.js"
     REQUIRES esp_lcd esp_driver_spi esp_driver_i2c esp_driver_gpio esp_hw_support esp_timer

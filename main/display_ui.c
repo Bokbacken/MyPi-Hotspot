@@ -25,6 +25,7 @@
 #include "ui_serial.h"
 #include "ui_lvgl_port.h"
 #include "wifi.h"
+#include "time_service.h"
 
 static const char *TAG = "display_ui";
 
@@ -377,6 +378,10 @@ static void draw_brand_header(const diag_status_t *d, bool ap_running)
     draw_alpha_bitmap(4, (HEADER_H - HEADER_LOGO_H) / 2, s_header_logo, HEADER_LOGO_W, HEADER_LOGO_H);
     draw_alpha_bitmap(4 + HEADER_LOGO_W + 6, (HEADER_H - HEADER_TITLE_H) / 2,
                       s_header_title, HEADER_TITLE_W, HEADER_TITLE_H);
+    char clock[8];
+    if (time_service_format(clock, sizeof(clock), "%H:%M")) {
+        display_draw_str(158, 5, clock, MYPI_UI_ORANGE, MYPI_UI_BG, 1);
+    }
     display_draw_wifi_icon(LCD_H_RES - 14, HEADER_H - 4, wifi_signal_color(d, ap_running));
     draw_uart_divider(0, HEADER_H + 2, LCD_H_RES, MYPI_UI_ORANGE);
 }

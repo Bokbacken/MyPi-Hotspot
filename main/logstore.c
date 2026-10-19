@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "logbuf.h"
 #include "nvs.h"
+#include "time_service.h"
 
 static const char *TAG = "logstore";
 
@@ -141,7 +142,12 @@ static void new_entry_name(char *name, size_t size)
 static void write_header(FILE *f, const char *reason)
 {
     const esp_app_desc_t *app = esp_app_get_description();
-    fprintf(f, "# MyPi log | %s | fw %s | boot %lu | uptime %llu s | free internal heap %u\n", reason,
+    char timestamp[32] = "time unavailable";
+    if (!time_service_format(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %z")) {
+        strlcpy(timestamp, "time unavailable", sizeof(timestamp));
+    }
+    fprintf(f, "# MyPi log | %s | started %s | fw %s | boot %lu | uptime %llu s | free internal heap %u\n", reason,
+            timestamp,
             app->version, (unsigned long)s_boot, (unsigned long long)(esp_timer_get_time() / 1000000),
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
@@ -197,11 +203,16 @@ static void live_commit(const char *end_fmt, ...)
     FILE *f = fopen(path, "a");
     if (f) {
         char line[200];
+        char timestamp[32] = "time unavailable";
+        if (!time_service_format(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %z")) {
+            strlcpy(timestamp, "time unavailable", sizeof(timestamp));
+        }
         va_list ap;
         va_start(ap, end_fmt);
         vsnprintf(line, sizeof(line), end_fmt, ap);
         va_end(ap);
-        fprintf(f, "\n# end: %s (uptime %llu s)\n", line, (unsigned long long)(esp_timer_get_time() / 1000000));
+        fprintf(f, "\n# end: %s | %s (uptime %llu s)\n", line, timestamp,
+                (unsigned long long)(esp_timer_get_time() / 1000000));
         fclose(f);
     }
     new_entry_name(name, sizeof(name));
@@ -226,7 +237,11 @@ static esp_err_t write_entry(const char *reason, const char *text, size_t len, c
     if (!f) return ESP_FAIL;
     write_header(f, reason);
     fwrite(text, 1, len, f);
-    fprintf(f, "\n# end: %s\n", end);
+    char timestamp[32] = "time unavailable";
+    if (!time_service_format(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %z")) {
+        strlcpy(timestamp, "time unavailable", sizeof(timestamp));
+    }
+    fprintf(f, "\n# end: %s | %s\n", end, timestamp);
     fclose(f);
     ESP_LOGI(TAG, "Saved log %s (%s)", name, reason);
     prune();

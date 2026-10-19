@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "time_service.h"
 
 static char *s_buf;
 static size_t s_size;
@@ -34,6 +35,15 @@ static char *s_prev_tail;           // Copy of the previous session's tail (PSRA
 static bool s_prev_flag;
 static vprintf_like_t s_orig_vprintf;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static int output_text(vprintf_like_t output, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    int result = output(fmt, args);
+    va_end(args);
+    return result;
+}
 
 static void ring_write(const char *data, size_t len)
 {
@@ -76,16 +86,36 @@ static int log_hook(const char *fmt, va_list args)
     // Preserve errno: callers such as httpd_sock_err() log first and inspect errno afterwards
     // (EAGAIN -> timeout). vsnprintf/vprintf may clobber it, turning timeouts into hard errors.
     int saved_errno = errno;
-    char line[192];
+    char line[224];
+    char stamped[288];
+    char timestamp[48];
+    if (!time_service_format(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %z")) {
+        uint32_t ms = esp_log_timestamp();
+        snprintf(timestamp, sizeof(timestamp), "uptime+%lu.%03lu",
+                 (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
+    }
+    int prefix_len = snprintf(stamped, sizeof(stamped), "[%s] ", timestamp);
     va_list copy;
     va_copy(copy, args);
     int n = vsnprintf(line, sizeof(line), fmt, copy);
     va_end(copy);
-    if (n > 0 && s_buf) {
-        size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
-        ring_write(line, len);
+    if (prefix_len < 0) prefix_len = 0;
+    if ((size_t)prefix_len >= sizeof(stamped)) prefix_len = sizeof(stamped) - 1;
+    size_t body_len = n > 0 ? (size_t)n : 0;
+    if (body_len >= sizeof(line)) body_len = sizeof(line) - 1;
+    if (body_len > sizeof(stamped) - (size_t)prefix_len - 1) {
+        body_len = sizeof(stamped) - (size_t)prefix_len - 1;
     }
-    int ret = s_orig_vprintf ? s_orig_vprintf(fmt, args) : vprintf(fmt, args);
+    memcpy(stamped + prefix_len, line, body_len);
+    stamped[prefix_len + body_len] = '\0';
+    if (n > 0 && s_buf) {
+        ring_write(stamped, (size_t)prefix_len + body_len);
+    }
+    vprintf_like_t output = s_orig_vprintf ? s_orig_vprintf : vprintf;
+    int ret = output_text(output, "%.*s", prefix_len, stamped);
+    int body_ret = output(fmt, args);
+    if (body_ret < 0) ret = body_ret;
+    else ret += body_ret;
     errno = saved_errno;
     return ret;
 }
@@ -123,6 +153,7 @@ static void tail_takeover(void)
 esp_err_t logbuf_init(size_t size)
 {
     tail_takeover();
+    s_orig_vprintf = esp_log_set_vprintf(log_hook);
     s_buf = heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM);
     if (!s_buf) {
         s_buf = heap_caps_calloc(1, size, MALLOC_CAP_DEFAULT);
@@ -131,7 +162,6 @@ esp_err_t logbuf_init(size_t size)
         return ESP_ERR_NO_MEM;
     }
     s_size = size;
-    s_orig_vprintf = esp_log_set_vprintf(log_hook);
     return ESP_OK;
 }
 

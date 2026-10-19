@@ -68,6 +68,10 @@ partition, endpoint, networking, profile, or update-format changes.
   open (outside display_lock); the capture runs on the UI worker. `camera.c` owns the
   esp_video device, serializes preview/web/capture with one mutex and takes `logstore_lock()`
   (lock order camera -> logstore) for files in `/store/photos`.
+- Timekeeping: `time_service.c` applies the persisted POSIX timezone, starts SNTP after Wi-Fi STA
+  or WAN Ethernet gets an IP, and uses `settimeofday()` on sync so the ESP32-P4 RTC retains time
+  across offline operation when its backup battery is present. `logbuf.c` timestamps every ESP log
+  line; it uses uptime until a valid RTC/NTP clock is available.
 
 The `display_ui` task (8 KiB stack) owns **all** LVGL calls: init/deinit, rendering
 via `lv_refr_now()` at the status cadence (full viewport invalidation on each render

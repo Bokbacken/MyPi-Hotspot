@@ -47,6 +47,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   letter-spacing: .08em;
   line-height: 1.1;
 }
+#mypi-clock {
+  color: var(--mypi-orange);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .mypi-wifi {
   margin-left: auto;
   display: inline-flex;

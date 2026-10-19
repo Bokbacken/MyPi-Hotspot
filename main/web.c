@@ -35,6 +35,7 @@
 #include "rescue.h"
 #include "sdkconfig.h"
 #include "wifi.h"
+#include "time_service.h"
 
 static const char *TAG = "web";
 
@@ -58,6 +59,7 @@ extern const char _binary_web_ui_js_end[];
     "<header class='mypi-brand'><div class='mypi-head'>" \
     "<img class='mypi-logo' src='" HEADER_LOGO_URI "' alt='MyPi' width='40' height='32'>" \
     "<span class='mypi-project'>Hotspot</span>" \
+    "<span id='mypi-clock' title='Local time'>--:--</span>" \
     "<span class='mypi-wifi' id='mypi-wifi' title='Wi-Fi uplink (STA) signal'>" \
     "<svg viewBox='0 0 24 18' aria-hidden='true'><path d='M2 7a14 14 0 0 1 20 0M5.5 10.5a9 9 0 0 1 13 0M9 14a4 4 0 0 1 6 0'/>" \
     "<circle cx='12' cy='16.5' r='1.5'/></svg><span>Wi-Fi</span> <b id='mypi-dbm'>&mdash;</b></span></div>" \
@@ -111,6 +113,12 @@ MYPI_BRAND_HEADER
 "<section class='page' data-page='system'>"
 "<h2>Display</h2><p><label><input type='checkbox' id='lrot' style='width:auto' onchange=saveRot()>Rotate screen &amp; touch 180&deg;</label> "
 "<small>(applied immediately, saved across reboots)</small></p>"
+"<h2>Time</h2><p>Device time: <b id='sys-time'>--</b> <span id='time-status'></span></p>"
+"<p><label for='timezone'>Timezone</label> <select id='timezone' onchange='saveTimezone()'>"
+"<option value='0'>UTC</option><option value='1'>Sweden (CET/CEST)</option><option value='2'>United Kingdom</option>"
+"<option value='3'>Eastern Europe (EET/EEST)</option><option value='4'>US Eastern</option>"
+"<option value='5'>US Pacific</option><option value='6'>Japan</option></select> "
+"<small>(saved and applied immediately)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
 // v0.10.0 Camera page: live preview (one JPEG at a time while the page is visible), shutter, saved
@@ -213,6 +221,8 @@ MYPI_BRAND_HEADER
 "'<button onclick=edA('+x.slot+')>Edit</button><button onclick=apStart('+x.slot+')>Start</button><button onclick=delA('+x.slot+')>Delete</button>'])).join('');"
 "let e=await (await fetch('/api/eth')).json();$('em').value=e.saved_mode;"
 "let st=await (await fetch('/api/status')).json();$('lrot').checked=!!(st.display&&st.display.rotate);"
+"$('timezone').value=String(st.timezone);$('sys-time').textContent=st.clock;"
+"$('time-status').textContent=st.ntp_synced?'NTP synchronized':(st.time_valid?'RTC holdover':'Waiting for NTP');"
 "if(FL){FL=0;edS(SP[p.active]?p.active:0);edA(0)}"
 "}catch(e){$('msg').textContent='load failed: '+e}}"
 "function edS(i){let x=SP[i];$('ss').value=i;$('sn').value=x.ssid;$('spw').value=x.pass||'';$('sclr').checked=!x.has_pass;$('sd').checked=x.dhcp;"
@@ -230,6 +240,7 @@ MYPI_BRAND_HEADER
 "async function apStart(i){if(confirm('Starting this profile may replace the running AP and disconnect clients. Continue?'))await post('/api/ap/start',{slot:i})}"
 "async function apStop(){if(confirm('Stop the access point and disconnect its clients?'))await post('/api/ap/stop')}"
 "async function saveRot(){await post('/api/display',{rotate:$('lrot').checked?1:0})}"
+"async function saveTimezone(){if(await post('/api/timezone',{timezone:+$('timezone').value}))ld()}"
 "async function saveEth(){await post('/api/eth',{mode:$('em').value})}"
 "async function reboot(){if(confirm('Reboot now?'))await post('/api/reboot')}"
 "async function ipStart(){await post('/api/iperf/start',{window_s:+$('iw').value})}"
@@ -239,6 +250,8 @@ MYPI_BRAND_HEADER
 "n.profile>=0?'slot '+n.profile:''])).join('')}catch(e){$('sc').innerHTML=row('Scan failed',esc(e),'bad')}}"
 "let tickBusy=false;async function tick(){if(tickBusy)return;tickBusy=true;try{"
 "let s=await (await fetch('/api/status')).json();"
+"$('mypi-clock').textContent=s.time_valid?s.clock.slice(11,16):'--:--';$('sys-time').textContent=s.clock;"
+"$('time-status').textContent=s.ntp_synced?'NTP synchronized':(s.time_valid?'RTC holdover':'Waiting for NTP');"
 "$('t').innerHTML="
 "row('Firmware',s.firmware)+row('ESP-IDF',s.idf)+row('Chip',s.chip)+row('Reset reason',s.reset_reason)+"
 "row('Uptime',fmtUp(s.uptime_s))+row('Partition',s.partition)+"
@@ -557,6 +570,12 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "chip", chipstr);
     cJSON_AddStringToObject(j, "reset_reason", diag_reset_reason_name());
     cJSON_AddNumberToObject(j, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    time_service_status_t time_status;
+    time_service_get_status(&time_status);
+    cJSON_AddStringToObject(j, "clock", time_status.clock);
+    cJSON_AddBoolToObject(j, "time_valid", time_status.valid);
+    cJSON_AddBoolToObject(j, "ntp_synced", time_status.ntp_synced);
+    cJSON_AddNumberToObject(j, "timezone", time_status.timezone);
     cJSON_AddStringToObject(j, "partition", running ? running->label : "?");
     cJSON_AddNumberToObject(j, "heap_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(j, "heap_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
@@ -1427,6 +1446,18 @@ static esp_err_t api_display_post(httpd_req_t *req)
     return send_result(req, display_set_rotated(rot == 1), rot ? "rotated 180" : "normal orientation", NULL);
 }
 
+// POST /api/timezone {"timezone": 0..TIME_ZONE_COUNT-1}
+static esp_err_t api_timezone_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    int timezone = jint(j, "timezone", -1);
+    cJSON_Delete(j);
+    if (timezone < 0 || timezone >= TIME_ZONE_COUNT) {
+        return send_result(req, ESP_ERR_INVALID_ARG, NULL, "invalid timezone");
+    }
+    return send_result(req, time_service_set_timezone((uint8_t)timezone), "timezone applied", NULL);
+}
+
 // POST /api/radio {band_mode (0-2), proto (bitmask, shared by STA and AP)} - missing keys keep the
 // saved value; applied after reboot. Older clients may send sta_proto/ap_proto: merged (STA wins).
 // Width (2.4 GHz HT20 locked / 5 GHz via /api/opt bw_5g), TX power (Optimize) and DTIM (driver default)
@@ -1955,6 +1986,7 @@ esp_err_t web_start(void)
         { .uri = "/api/radio",          .method = HTTP_GET,  .handler = api_radio_get },
         { .uri = "/api/radio",          .method = HTTP_POST, .handler = api_radio_post },
         { .uri = "/api/display",        .method = HTTP_POST, .handler = api_display_post },
+        { .uri = "/api/timezone",      .method = HTTP_POST, .handler = api_timezone_post },
         { .uri = "/api/opt",            .method = HTTP_GET,  .handler = api_opt_get },
         { .uri = "/api/opt",            .method = HTTP_POST, .handler = api_opt_post },
         { .uri = "/api/clear_emergency", .method = HTTP_POST, .handler = api_clear_emergency_post },

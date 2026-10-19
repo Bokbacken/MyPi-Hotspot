@@ -13,6 +13,7 @@
 #include "lwip/lwip_napt.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+#include "time_service.h"
 
 static const char *TAG = "net";
 
@@ -336,6 +337,7 @@ static void log_add(const float *rx, const float *tx)
         }
         net_log_sample_t *e = &s_log[idx];
         e->ts = (uint32_t)((uint64_t)(xTaskGetTickCount() - s_log_t0) * portTICK_PERIOD_MS / 1000);
+        e->wall_time = time_service_now();
         memcpy(e->rx_mbps, rx, sizeof(e->rx_mbps));
         memcpy(e->tx_mbps, tx, sizeof(e->tx_mbps));
     }
@@ -345,7 +347,7 @@ static void log_add(const float *rx, const float *tx)
 esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx)
 {
     if (!fn) return ESP_ERR_INVALID_ARG;
-    static const char header[] = "ts,sta_rx_mbps,sta_tx_mbps,ap_rx_mbps,ap_tx_mbps,eth_rx_mbps,eth_tx_mbps\n";
+    static const char header[] = "time_utc,ts,sta_rx_mbps,sta_tx_mbps,ap_rx_mbps,ap_tx_mbps,eth_rx_mbps,eth_tx_mbps\n";
     if (!fn(header, sizeof(header) - 1, ctx)) return ESP_FAIL;
     if (!log_lock()) return ESP_ERR_NO_MEM;
     // Rows are batched into a chunk buffer; the lock is held while streaming so
@@ -355,8 +357,13 @@ esp_err_t net_log_write_csv(net_log_write_fn fn, void *ctx)
     esp_err_t err = ESP_OK;
     for (uint32_t i = 0; i < s_log_count && s_log; i++) {
         const net_log_sample_t *e = &s_log[(s_log_head + i) % NET_LOG_MAX_SAMPLES];
-        char row[96];
-        int n = snprintf(row, sizeof(row), "%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", (unsigned long)e->ts,
+        char timestamp[24] = "";
+        if (e->wall_time > 0) {
+            struct tm utc;
+            if (gmtime_r(&e->wall_time, &utc)) strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+        }
+        char row[128];
+        int n = snprintf(row, sizeof(row), "%s,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", timestamp, (unsigned long)e->ts,
                          (double)e->rx_mbps[NET_IF_STA], (double)e->tx_mbps[NET_IF_STA],
                          (double)e->rx_mbps[NET_IF_AP], (double)e->tx_mbps[NET_IF_AP],
                          (double)e->rx_mbps[NET_IF_ETH], (double)e->tx_mbps[NET_IF_ETH]);

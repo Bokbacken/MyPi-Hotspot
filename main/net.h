@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "esp_err.h"
 #include "esp_netif.h"
@@ -29,6 +30,7 @@ void net_stats_reset_peaks(void);
 
 typedef struct {
     uint32_t ts;                        // seconds since the log was started
+    time_t wall_time;                   // absolute sample time, or 0 until RTC/NTP time is valid
     float rx_mbps[NET_IF_COUNT];        // Mbit/s
     float tx_mbps[NET_IF_COUNT];
 } net_log_sample_t;

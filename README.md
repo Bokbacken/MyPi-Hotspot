@@ -39,7 +39,7 @@ quiet by default and can be switched on at any time with **debug mode** (see [De
 | Swipe down during first 10 s | Enter Ethernet emergency mode (>= 60 px, rotation-corrected coordinates) |
 | Any touch event | Shown in the web page touch history; in debug mode also logged on serial at 115200 baud (`DOWN`, `DRAG`, `MOVE`, `UP`, `TAP`) |
 | Every 60 s (5 s in debug mode) | Heartbeat line: uptime, heap/PSRAM, Wi-Fi state/IP/RSSI, touch count, frames flushed, OTA state |
-| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): pages Overview, Wi-Fi, Access point, Traffic, Ethernet, System (radio, display, OTA links), Camera, Optimize, Debug (pins, touch, log) |
+| Wi-Fi connected | Web UI at `http://mypi-hotspot.local/` (or the management address shown on the LCD): pages Overview, Wi-Fi, Access point, Traffic, Ethernet, System (time zone, display, OTA links), Camera, Optimize, Debug (pins, touch, log) |
 
 The firmware uses LVGL 9.4.0 on top of `esp_lcd` (built into ESP-IDF), raw I2C for
 touch, and ESP-Hosted for Wi-Fi. [LVGL migration status](docs/ARCHITECTURE.md#lvgl-migration):
@@ -64,6 +64,7 @@ asset could not be accessed for this update, so no substitute logo has been used
 | Part | Details |
 |---|---|
 | MCU board | Waveshare ESP32-P4-NANO-WIFI6-DB — ESP32-P4NRW32X, 32 MB PSRAM, 32 MB flash |
+| RTC | ESP32-P4 internal RTC, with board RTC-battery backup |
 | Wi-Fi | ESP32-C5 co-processor over SDIO 4-bit (CLK=18, CMD=19, D0–D3=14–17, reset=54) via ESP-Hosted |
 | Display | Waveshare 2" LCD, ST7789, 240×320, SPI |
 | Touch | CST816D, I2C address `0x15`, polled (TP_RST pulsed at init, TP_INT read-ready) |
@@ -323,6 +324,23 @@ When Wi-Fi is connected, open `http://mypi-hotspot.local/` (mDNS) or the IP prin
 | Network API | STA/AP profiles, scan, AP clients, Ethernet mode, traffic stats, iperf — see [Network API](#network-api) |
 | `/api/debug?on=1\|0` (POST) | Switch debug mode on/off (saved in NVS) |
 | `/pins` | Wiring diagnostics: boot-time pin check (debug mode only) (pull test + short detection) and manual HIGH/LOW/input control per pin for multimeter checks (detaches the pin until reboot) |
+
+## Time and timezone
+
+The device restores time from the ESP32-P4 RTC when its RTC backup battery is fitted. If that clock
+is unset, the displayed clock remains unavailable until NTP is reachable. NTP starts when Wi-Fi STA
+or WAN Ethernet obtains an IP address; successful sync updates the system RTC, which then keeps time
+without Internet access. ESP log lines include a local date/time prefix (uptime is used until time is
+valid). The LCD and web header show the clock.
+
+Choose a timezone on **System → Time**. The selection is stored in NVS and applied immediately.
+`GET /api/status` reports `clock`, `time_valid`, `ntp_synced`, and `timezone`; `POST /api/timezone`
+accepts `{"timezone":0..6}`. The choices are UTC, Sweden, UK, Eastern Europe, US Eastern, US Pacific,
+and Japan.
+The traffic CSV also includes a UTC wall-clock timestamp for each sample; its existing elapsed
+`ts` column remains available.
+
+---
 
 ## OTA updates
 

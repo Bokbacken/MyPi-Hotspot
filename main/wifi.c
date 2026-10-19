@@ -28,6 +28,7 @@
 #include "rescue.h"
 #include "sdkconfig.h"
 #include "web.h"
+#include "time_service.h"
 
 static const char *TAG = "wifi";
 
@@ -190,6 +191,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                  IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         ESP_LOGI(TAG, "Web UI: http://%s/  or  http://%s.local/", ip, CONFIG_MYPI_HOSTNAME);
         diag_set_wifi(WIFI_STATE_GOT_IP, ip, 0);
+        time_service_network_connected();
         xEventGroupSetBits(s_events, BIT_GOT_IP | BIT_LOG_RSSI);
     } else if (base == IP_EVENT && id == IP_EVENT_ASSIGNED_IP_TO_CLIENT) {
         ip_event_assigned_ip_to_client_t *ev = data;
