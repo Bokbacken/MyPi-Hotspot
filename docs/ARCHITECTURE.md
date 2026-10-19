@@ -61,6 +61,17 @@ partition, endpoint, networking, profile, or update-format changes.
   status header, menu button, other pages, OTA and rescue continue using the
   transitional renderer. If LVGL cannot be initialized, the home view falls back to
   plain-text status lines; this is not a general out-of-memory recovery guarantee.
+- Camera page (0.10.0): `ui_lvgl_port_render_camera()` shows an RGB565 preview image and an
+  overlay label in the same viewport (y=32..231) instead of the status view, with the same
+  rules (display_lock held, pixels written only during the render call). `display_ui.c`
+  pulls the preview from `camera_preview_rgb565()` on the UI task every tick while the page is
+  open (outside display_lock); the capture runs on the UI worker. `camera.c` owns the
+  esp_video device, serializes preview/web/capture with one mutex and takes `logstore_lock()`
+  (lock order camera -> logstore) for files in `/store/photos`.
+- Timekeeping: `time_service.c` applies the persisted POSIX timezone, starts SNTP after Wi-Fi STA
+  or WAN Ethernet gets an IP, and uses `settimeofday()` on sync so the ESP32-P4 RTC retains time
+  across offline operation when its backup battery is present. `logbuf.c` timestamps every ESP log
+  line; it uses uptime until a valid RTC/NTP clock is available.
 
 The `display_ui` task (8 KiB stack) owns **all** LVGL calls: init/deinit, rendering
 via `lv_refr_now()` at the status cadence (full viewport invalidation on each render
