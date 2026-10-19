@@ -132,10 +132,19 @@ int camera_photo_list(camera_photo_t *out, int max)
     logstore_info_t info;
     logstore_get_info(&info);
     if (!info.mounted || !out || max <= 0 || !logstore_lock(STORE_LOCK_MS)) return 0;
-    int n = scan_photos(out, max, NULL);
+    int count = scan_photos(NULL, 0, NULL);
+    camera_photo_t *list = count > 0 ? calloc((size_t)count, sizeof(*list)) : NULL;
+    if (!list) {
+        logstore_unlock();
+        return 0;
+    }
+    int n = scan_photos(list, count, NULL);
     logstore_unlock();
+    if (n > count) n = count;
+    qsort(list, n, sizeof(list[0]), cmp_newest_first);
     if (n > max) n = max;
-    qsort(out, n, sizeof(out[0]), cmp_newest_first);   // Fixed-width names: newest = highest
+    memcpy(out, list, (size_t)n * sizeof(*out));
+    free(list);
     return n;
 }
 
