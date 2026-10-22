@@ -12,7 +12,7 @@
 // Photos are 8.3 names (FAT without long file names): IMG00001.JPG .. IMG99999.JPG.
 #define CAMERA_PHOTO_NAME_LEN   13
 #define CAMERA_PHOTO_SEQ_MAX    99999
-#define CAMERA_MODE_MAX        1
+#define CAMERA_MODE_MAX        5
 
 typedef struct {
     int preview_quality, photo_quality;
@@ -54,22 +54,69 @@ typedef struct {
     uint32_t version;
     int32_t preview_quality, photo_quality, idle_stop_s, max_photos, reserve_kb;
     uint32_t hflip, vflip, live_preview;
+    int32_t width, height;
 } camera_settings_blob_t;
+
+typedef struct {
+    uint32_t version;
+    int32_t preview_quality, photo_quality, idle_stop_s, max_photos, reserve_kb;
+    uint32_t hflip, vflip, live_preview;
+} camera_settings_blob_v1_t;
 
 static inline camera_settings_blob_t camera_settings_pack(const camera_settings_t *s)
 {
-    return (camera_settings_blob_t){1, s->preview_quality, s->photo_quality, s->idle_stop_s,
-                                   s->max_photos, s->reserve_kb, s->hflip, s->vflip, s->live_preview};
+    return (camera_settings_blob_t){
+        .version = 2, .preview_quality = s->preview_quality, .photo_quality = s->photo_quality,
+        .idle_stop_s = s->idle_stop_s, .max_photos = s->max_photos, .reserve_kb = s->reserve_kb,
+        .hflip = s->hflip, .vflip = s->vflip, .live_preview = s->live_preview,
+        .width = s->width, .height = s->height,
+    };
 }
 
-static inline bool camera_settings_unpack(const camera_settings_blob_t *b, size_t len, camera_settings_t *s)
+static inline bool camera_settings_unpack(const void *blob, size_t len, camera_settings_t *s)
 {
-    if (!b || !s || len != sizeof(*b) || b->version != 1 ||
-        b->hflip > 1 || b->vflip > 1 || b->live_preview > 1) return false;
+    if (!blob || !s || len < sizeof(uint32_t)) return false;
+    uint32_t version;
+    memcpy(&version, blob, sizeof(version));
+    int width = 0, height = 0;
+    int32_t preview_quality, photo_quality, idle_stop_s, max_photos, reserve_kb;
+    uint32_t hflip, vflip, live_preview;
+    if (version == 1) {
+        if (len != sizeof(camera_settings_blob_v1_t)) return false;
+        camera_settings_blob_v1_t v1;
+        memcpy(&v1, blob, sizeof(v1));
+        if (v1.hflip > 1 || v1.vflip > 1 || v1.live_preview > 1) return false;
+        preview_quality = v1.preview_quality;
+        photo_quality = v1.photo_quality;
+        idle_stop_s = v1.idle_stop_s;
+        max_photos = v1.max_photos;
+        reserve_kb = v1.reserve_kb;
+        hflip = v1.hflip;
+        vflip = v1.vflip;
+        live_preview = v1.live_preview;
+    } else if (version == 2) {
+        if (len != sizeof(camera_settings_blob_t)) return false;
+        camera_settings_blob_t v2;
+        memcpy(&v2, blob, sizeof(v2));
+        if (v2.hflip > 1 || v2.vflip > 1 || v2.live_preview > 1) return false;
+        width = v2.width;
+        height = v2.height;
+        preview_quality = v2.preview_quality;
+        photo_quality = v2.photo_quality;
+        idle_stop_s = v2.idle_stop_s;
+        max_photos = v2.max_photos;
+        reserve_kb = v2.reserve_kb;
+        hflip = v2.hflip;
+        vflip = v2.vflip;
+        live_preview = v2.live_preview;
+    } else {
+        return false;
+    }
     camera_settings_t v = {
-        .preview_quality = b->preview_quality, .photo_quality = b->photo_quality,
-        .idle_stop_s = b->idle_stop_s, .max_photos = b->max_photos, .reserve_kb = b->reserve_kb,
-        .hflip = b->hflip, .vflip = b->vflip, .live_preview = b->live_preview,
+        .preview_quality = preview_quality, .photo_quality = photo_quality,
+        .idle_stop_s = idle_stop_s, .max_photos = max_photos, .reserve_kb = reserve_kb,
+        .hflip = hflip, .vflip = vflip, .live_preview = live_preview,
+        .width = width, .height = height,
     };
     if (!camera_settings_valid(&v)) return false;
     *s = v;

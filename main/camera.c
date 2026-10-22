@@ -155,6 +155,7 @@ esp_err_t camera_get_capabilities(camera_capabilities_t *out)
 
 #if CONFIG_MYPI_CAMERA_ENABLE
 static esp_err_t settings_apply_flips(const camera_settings_t *settings);
+static esp_err_t settings_apply_mode(int width, int height);
 #endif
 
 esp_err_t camera_save_settings(const camera_settings_t *in)
@@ -166,17 +167,21 @@ esp_err_t camera_save_settings(const camera_settings_t *in)
         unlock();
         return ESP_ERR_NOT_SUPPORTED;
     }
+    camera_settings_t previous = s_settings;
     camera_settings_t next = *in;
-    next.width = s_st.width;
-    next.height = s_st.height;
+    next.width = in->width ? in->width : s_st.width;
+    next.height = in->height ? in->height : s_st.height;
+    bool mode_changed = next.width != s_st.width || next.height != s_st.height;
     bool flip_changed = next.hflip != s_settings.hflip || next.vflip != s_settings.vflip;
     esp_err_t err = ESP_OK;
     nvs_handle_t h;
     err = nvs_open("camera", NVS_READWRITE, &h);
     if (err == ESP_OK) {
 #if CONFIG_MYPI_CAMERA_ENABLE
-        if (flip_changed) err = settings_apply_flips(&next);
+        if (mode_changed) err = settings_apply_mode(next.width, next.height);
+        if (err == ESP_OK && flip_changed) err = settings_apply_flips(&next);
 #else
+        (void)mode_changed;
         (void)flip_changed;
 #endif
         if (err == ESP_OK) {
@@ -186,8 +191,13 @@ esp_err_t camera_save_settings(const camera_settings_t *in)
         }
         nvs_close(h);
 #if CONFIG_MYPI_CAMERA_ENABLE
+        if (err != ESP_OK && mode_changed) {
+            if (settings_apply_mode(previous.width, previous.height) != ESP_OK) {
+                set_error(ESP_FAIL, "Camera resolution rollback failed");
+            }
+        }
         if (err != ESP_OK && flip_changed) {
-            if (settings_apply_flips(&s_settings) != ESP_OK) {
+            if (settings_apply_flips(&previous) != ESP_OK) {
                 set_error(ESP_FAIL, "Camera flip rollback failed");
             }
         }
@@ -374,11 +384,81 @@ static esp_err_t settings_apply_flips(const camera_settings_t *settings)
     return err;
 }
 
-static bool select_format(int fd, struct v4l2_format *fmt, uint32_t pixel_format)
+static bool select_format(int fd, struct v4l2_format *fmt, uint32_t pixel_format, int width, int height)
 {
+    fmt->fmt.pix.width = width;
+    fmt->fmt.pix.height = height;
     fmt->fmt.pix.pixelformat = pixel_format;
     return ioctl(fd, VIDIOC_S_FMT, fmt) == 0 && ioctl(fd, VIDIOC_G_FMT, fmt) == 0 &&
-           fmt->fmt.pix.pixelformat == pixel_format;
+           fmt->fmt.pix.pixelformat == pixel_format && fmt->fmt.pix.width == (uint32_t)width &&
+           fmt->fmt.pix.height == (uint32_t)height;
+}
+
+static bool capture_format_set(int fd, int width, int height, struct v4l2_format *selected)
+{
+    const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+        struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+        if (ioctl(fd, VIDIOC_G_FMT, &fmt) == 0 &&
+            select_format(fd, &fmt, formats[i], width, height)) {
+            if (selected) *selected = fmt;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void camera_mode_add(camera_capabilities_t *caps, uint32_t width, uint32_t height)
+{
+    if (width < 16 || height < 16 || width > UINT16_MAX || height > UINT16_MAX) return;
+    for (int i = 0; i < caps->mode_count; i++) {
+        if ((uint32_t)caps->modes[i].width == width && (uint32_t)caps->modes[i].height == height) return;
+    }
+    if (caps->mode_count < CAMERA_MODE_MAX) {
+        caps->modes[caps->mode_count++] = (camera_mode_t){(int)width, (int)height};
+    }
+}
+
+static void camera_modes_enumerate(int fd, camera_capabilities_t *caps, uint32_t current_width,
+                                   uint32_t current_height)
+{
+    const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
+    caps->mode_count = 0;
+    for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+        for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+            struct v4l2_frmsizeenum size = {
+                .index = index, .pixel_format = formats[f],
+            };
+            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
+            if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                camera_mode_add(caps, size.discrete.width, size.discrete.height);
+            }
+        }
+        if (caps->mode_count) break;
+    }
+    camera_mode_add(caps, current_width, current_height);
+}
+
+static esp_err_t settings_apply_mode(int width, int height)
+{
+    stream_stop();
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
+    if (fd < 0) {
+        set_error(ESP_FAIL, "Camera open failed while setting resolution (errno %d)", errno);
+        return ESP_FAIL;
+    }
+    struct v4l2_format fmt;
+    bool applied = capture_format_set(fd, width, height, &fmt);
+    close(fd);
+    if (!applied) {
+        set_error(ESP_ERR_NOT_SUPPORTED, "Camera rejected resolution %dx%d", width, height);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    s_st.width = (uint16_t)fmt.fmt.pix.width;
+    s_st.height = (uint16_t)fmt.fmt.pix.height;
+    s_st.state = CAMERA_STATE_READY;
+    clear_error();
+    return ESP_OK;
 }
 
 /** Open the device, prefer full-colour RGB888 and start streaming. Lock held. */
@@ -398,13 +478,11 @@ static esp_err_t stream_start(void)
         set_error(ESP_FAIL, "Camera format query failed (errno %d)", errno);
         goto fail;
     }
-    if (!select_format(fd, &fmt, V4L2_PIX_FMT_RGB24)) {
-        fmt = (struct v4l2_format){.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
-        if (ioctl(fd, VIDIOC_G_FMT, &fmt) != 0 || !select_format(fd, &fmt, V4L2_PIX_FMT_RGB565)) {
-            set_error(ESP_ERR_NOT_SUPPORTED, "Camera cannot output RGB888 or RGB565 (errno %d)", errno);
-            err = ESP_ERR_NOT_SUPPORTED;
-            goto fail;
-        }
+    if (!capture_format_set(fd, s_st.width, s_st.height, &fmt)) {
+        set_error(ESP_ERR_NOT_SUPPORTED, "Camera cannot output %ux%u as RGB888 or RGB565 (errno %d)",
+                  s_st.width, s_st.height, errno);
+        err = ESP_ERR_NOT_SUPPORTED;
+        goto fail;
     }
     if (fmt.fmt.pix.width < 16 || fmt.fmt.pix.height < 16 ||
         fmt.fmt.pix.width != s_st.width || fmt.fmt.pix.height != s_st.height) {
@@ -809,6 +887,7 @@ esp_err_t camera_init(void)
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_caps = (camera_capabilities_t){0};
     settings_load();
 
     // SCCB: the camera connector shares the board I2C bus (GPIO7/8) with the touch controller.
@@ -837,6 +916,16 @@ esp_err_t camera_init(void)
     if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && ioctl(fd, VIDIOC_G_FMT, &fmt) == 0 &&
         fmt.fmt.pix.width >= 16 && fmt.fmt.pix.width <= UINT16_MAX &&
         fmt.fmt.pix.height >= 16 && fmt.fmt.pix.height <= UINT16_MAX) {
+        uint32_t detected_width = fmt.fmt.pix.width, detected_height = fmt.fmt.pix.height;
+        camera_modes_enumerate(fd, &s_caps, detected_width, detected_height);
+        camera_settings_t requested = s_settings;
+        requested.hflip = requested.vflip = false;
+        if ((requested.width || requested.height) &&
+            camera_settings_supported(&requested, &s_caps) &&
+            capture_format_set(fd, requested.width, requested.height, &fmt)) {
+            detected_width = fmt.fmt.pix.width;
+            detected_height = fmt.fmt.pix.height;
+        }
         // QUERYCAP reports the interface ("MIPI-CSI"); the sensor is the one enabled driver
         // that answered the auto-detect (the project enables only OV5647 by default).
 #ifdef CONFIG_CAMERA_OV5647
@@ -844,11 +933,9 @@ esp_err_t camera_init(void)
 #else
         strlcpy(s_st.sensor, (const char *)cap.card, sizeof(s_st.sensor));
 #endif
-        s_st.width = (uint16_t)fmt.fmt.pix.width;
-        s_st.height = (uint16_t)fmt.fmt.pix.height;
+        s_st.width = (uint16_t)detected_width;
+        s_st.height = (uint16_t)detected_height;
         s_st.state = CAMERA_STATE_READY;
-        s_caps.mode_count = 1;
-        s_caps.modes[0] = (camera_mode_t){s_st.width, s_st.height};
         s_caps.hflip = probe_flip(fd, V4L2_CID_HFLIP);
         s_caps.vflip = probe_flip(fd, V4L2_CID_VFLIP);
         if (!s_caps.hflip) s_settings.hflip = false;

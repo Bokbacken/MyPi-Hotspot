@@ -290,6 +290,7 @@ static void test_camera_settings(void)
     assert(camera_settings_unpack(&blob, sizeof(blob), &loaded));
     assert(loaded.preview_quality == 95 && loaded.photo_quality == 95 && loaded.live_preview);
     assert(loaded.idle_stop_s == 10 && loaded.max_photos == 20 && loaded.reserve_kb == 512);
+    assert(loaded.width == 0 && loaded.height == 0);
     assert(!camera_settings_unpack(&blob, sizeof(blob) - 1, &loaded));
     blob.version++;
     assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
@@ -300,6 +301,13 @@ static void test_camera_settings(void)
     blob.photo_quality = 101;
     assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
     assert(loaded.photo_quality == 95); // A rejected blob never changes the active settings.
+
+    camera_settings_blob_v1_t old_blob = {
+        .version = 1, .preview_quality = 95, .photo_quality = 95, .idle_stop_s = 10,
+        .max_photos = 20, .reserve_kb = 512, .live_preview = 1,
+    };
+    assert(camera_settings_unpack(&old_blob, sizeof(old_blob), &loaded));
+    assert(loaded.width == 0 && loaded.height == 0 && loaded.photo_quality == 95);
 
     s.width = 800; s.height = 640;
     assert(camera_settings_supported(&s, &caps));
@@ -316,6 +324,18 @@ static void test_camera_settings(void)
     assert(!camera_settings_supported(&s, &caps));
     caps.vflip = true;
     assert(camera_settings_supported(&s, &caps));
+    caps.modes[1] = (camera_mode_t){800, 800};
+    caps.modes[2] = (camera_mode_t){800, 1280};
+    caps.modes[3] = (camera_mode_t){1280, 960};
+    caps.modes[4] = (camera_mode_t){1920, 1080};
+    caps.mode_count = CAMERA_MODE_MAX;
+    s.width = 1920; s.height = 1080;
+    assert(camera_settings_supported(&s, &caps));
+    blob = camera_settings_pack(&s);
+    assert(camera_settings_unpack(&blob, sizeof(blob), &loaded));
+    assert(loaded.width == 1920 && loaded.height == 1080);
+    s.width = 2592; s.height = 1944;
+    assert(!camera_settings_supported(&s, &caps));
     int *fields[] = {&s.preview_quality, &s.photo_quality, &s.idle_stop_s, &s.max_photos, &s.reserve_kb};
     const int lo[] = {10, 10, 2, 1, 0}, hi[] = {100, 100, 600, 500, 2048};
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {

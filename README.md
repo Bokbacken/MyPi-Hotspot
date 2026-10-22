@@ -537,7 +537,7 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
 | Photos kept | 20 | The oldest photo is deleted when more would be stored |
 | Storage space kept free for logs | 512 KB | A capture fails with "Storage full" instead |
 | Stop stream after | 10 s | The stream only runs while a preview is shown |
-| Component config → Espressif Camera Sensors Configurations → OV5647 | 800x640 RAW8 | Sensor mode; web lists the actual active mode, not invented resolutions |
+| Component config → Espressif Camera Sensors Configurations → OV5647 | 800x640 RAW8 default | Enabled modes are enumerated from the driver and selectable in web settings |
 
 ### Using
 
@@ -549,8 +549,9 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
   **Basic settings** exposes the current resolution, separate preview/photo JPEG quality (10–100),
   driver-supported horizontal/vertical flips, web live preview on/off, idle stop (2–600 s),
   photo retention (1–500), and log storage reserve (0–2048 KB). **Save and apply** persists these
-  in NVS without a reboot; **Load defaults** only fills the form until saved. The current
-  firmware uses a single configured sensor mode, so the resolution list is read-only.
+  in NVS without a reboot; **Load defaults** only fills the form until saved. The firmware enables
+  800x640, 800x800, and 800x1280 RAW8 plus 1280x960 and 1920x1080 RAW10; resolutions are enumerated
+  from the driver and the selection persists across reboots.
   Unsupported flips are disabled. Turning live preview off stops web polling, not shutter,
   LCD preview, or an explicit QR read. Retention applies on the next capture, and the reserve
   prevents new photos consuming the space left for logs.
@@ -558,8 +559,10 @@ defaults: after updating an existing checkout run `idf.py fullclean` or delete `
   of quantizing every web frame to RGB565 first, with RGB565 fallback if the driver cannot supply
   RGB888. JPEG encoding uses 4:4:4 chroma sampling and preserves ESP-IDF's native BGR byte order,
   not just a higher quality number. Only the LCD preview is converted to RGB565 when RGB888 is
-  available. This prioritizes image fidelity over frame rate and uses more PSRAM/bandwidth.
-- Photos are stored as `/store/photos/IMGnnnnn.JPG` (800x640) on the FAT `storage` partition
+  available. The ISP provides automatic exposure and white balance. This prioritizes image fidelity
+  over frame rate and uses more PSRAM/bandwidth; higher resolutions further increase memory and
+  processing load and should be checked on target hardware.
+- Photos are stored as `/store/photos/IMGnnnnn.JPG` at the selected resolution on the FAT `storage` partition
   (about 3.9 MB, shared with the [saved logs](#saved-logs-in-flash)); the directory is created on
   the first capture.
 

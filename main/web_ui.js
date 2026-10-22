@@ -404,7 +404,7 @@
       select.disabled = (caps.modes || []).length < 2;
     }
     camSet(doc, "cam-mode-note", (caps.modes || []).length < 2 ?
-      "Current firmware sensor mode only; no synthetic resolutions." : "Driver-supported modes only.");
+      "Only one driver-supported sensor mode is enabled." : "Driver-supported modes only.");
   }
 
   async function cameraSettingsLoad(document, fetchFn) {

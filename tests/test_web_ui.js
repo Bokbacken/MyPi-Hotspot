@@ -515,7 +515,9 @@ assert.equal(togglePassword(lone, loneBtn), false);
   // preserve the form on save failure, and pause preview without disabling capture.
   const settings = { width: 800, height: 640, preview_quality: 95, photo_quality: 95,
     hflip: false, vflip: false, live_preview: false, idle_stop_s: 10, max_photos: 20, reserve_kb: 512 };
-  const caps = { modes: [{ width: 800, height: 640 }], hflip: true, vflip: false };
+  const caps = { modes: [{ width: 800, height: 640 }, { width: 800, height: 800 },
+    { width: 800, height: 1280 }, { width: 1280, height: 960 }, { width: 1920, height: 1080 }],
+  hflip: true, vflip: false };
   for (const key of Object.keys(settings)) camIds["cam-" + key] = { value: "", checked: false };
   camIds["cam-resolution"] = {
     children: [], replaceChildren() { this.children = []; }, appendChild(el) { this.children.push(el); },
@@ -537,8 +539,9 @@ assert.equal(togglePassword(lone, loneBtn), false);
   await ui.cameraSettingsLoad(settingsDoc, settingsFetch);
   assert.equal(camIds["cam-settings"].disabled, false);
   assert.equal(camIds["cam-preview_quality"].value, "95");
-  assert.deepEqual(camIds["cam-resolution"].children.map((x) => x.value), ["800x640"]);
-  assert.equal(camIds["cam-resolution"].disabled, true);
+  assert.deepEqual(camIds["cam-resolution"].children.map((x) => x.value),
+    ["800x640", "800x800", "800x1280", "1280x960", "1920x1080"]);
+  assert.equal(camIds["cam-resolution"].disabled, false);
   assert.equal(camIds["cam-hflip"].disabled, false);
   assert.equal(camIds["cam-vflip"].disabled, true);
   camIds["cam-preview_quality"].value = "98";
@@ -581,7 +584,8 @@ assert.equal(togglePassword(lone, loneBtn), false);
     const visibleSettingsDoc = { ...settingsDoc, querySelector: () => ({ hidden: false }) };
     await ui.cameraOpen(visibleSettingsDoc);
     assert.equal(typeof retryOpen, "function");
-    assert.match(camIds["cam-st"].textContent, /retrying before starting preview/);
+    assert.equal(camIds["cam-st"].textContent, "Camera not detected");
+    assert.match(camIds["cam-settings-msg"].textContent, /retrying before starting preview/);
     await retryOpen();
     assert.equal(settingsAttempts, 2);
     assert.equal(camIds["cam-settings"].disabled, false);
