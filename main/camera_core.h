@@ -18,7 +18,7 @@ typedef struct {
     int preview_quality, photo_quality;
     int idle_stop_s, max_photos, reserve_kb;
     bool hflip, vflip, live_preview;
-    int width, height;          // Current sensor mode; not runtime-selectable.
+    int width, height;          // Selected sensor mode; 0/0 keeps the detected default.
 } camera_settings_t;
 
 typedef struct { int width, height; } camera_mode_t;

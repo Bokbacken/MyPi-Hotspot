@@ -52,14 +52,14 @@ void camera_get_status(camera_status_t *out);
 void camera_settings_defaults(camera_settings_t *out);
 /** Settings/capability APIs return ESP_ERR_INVALID_STATE until initialization finishes loading. */
 esp_err_t camera_get_settings(camera_settings_t *out);
-/** Validate, apply and atomically persist. Dimensions must be 0/0 or the current mode.
+/** Validate, apply and atomically persist. Dimensions must be 0/0 or an enumerated sensor mode.
  * Unsupported enabled flips/modes return ESP_ERR_NOT_SUPPORTED; bad ranges INVALID_ARG.
  * Quality 10..100, idle 2..600 s, retention 1..500, reserve 0..2048 KB.
  * live_preview is the web client's automatic-preview preference, not a capture gate.
  */
 esp_err_t camera_save_settings(const camera_settings_t *in);
-/** Cached during init; never probes a streaming sensor. Flips require safe readback/write support.
- * Only the current mode is exposed.
+/** Cached during init; never probes a streaming sensor. Flips require safe readback/write support;
+ *  modes are enumerated from the stopped capture device.
  */
 esp_err_t camera_get_capabilities(camera_capabilities_t *out);
 

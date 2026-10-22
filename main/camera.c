@@ -434,7 +434,6 @@ static void camera_modes_enumerate(int fd, camera_capabilities_t *caps, uint32_t
                 camera_mode_add(caps, size.discrete.width, size.discrete.height);
             }
         }
-        if (caps->mode_count) break;
     }
     camera_mode_add(caps, current_width, current_height);
 }
@@ -920,11 +919,13 @@ esp_err_t camera_init(void)
         camera_modes_enumerate(fd, &s_caps, detected_width, detected_height);
         camera_settings_t requested = s_settings;
         requested.hflip = requested.vflip = false;
-        if ((requested.width || requested.height) &&
-            camera_settings_supported(&requested, &s_caps) &&
-            capture_format_set(fd, requested.width, requested.height, &fmt)) {
-            detected_width = fmt.fmt.pix.width;
-            detected_height = fmt.fmt.pix.height;
+        if ((requested.width || requested.height) && camera_settings_supported(&requested, &s_caps)) {
+            if (capture_format_set(fd, requested.width, requested.height, &fmt)) {
+                detected_width = fmt.fmt.pix.width;
+                detected_height = fmt.fmt.pix.height;
+            } else {
+                capture_format_set(fd, detected_width, detected_height, NULL);
+            }
         }
         // QUERYCAP reports the interface ("MIPI-CSI"); the sensor is the one enabled driver
         // that answered the auto-detect (the project enables only OV5647 by default).
