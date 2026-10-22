@@ -786,7 +786,7 @@
     }
     if (settings) cameraPreview(document);
     else if (cameraVisible(document)) {
-      camSet(document, "cam-st", "Camera settings unavailable; retrying before starting preview", true);
+      camSet(document, "cam-settings-msg", "Camera settings unavailable; retrying before starting preview", true);
       cameraOpenTimer = root.setTimeout(() => cameraOpen(document), CAMERA_RETRY_MS);
     }
   }
