@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "logstore.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 #if CONFIG_MYPI_CAMERA_ENABLE
@@ -34,6 +35,9 @@
 static const char *TAG = "camera";
 
 static SemaphoreHandle_t s_lock;
+static camera_settings_t s_settings;
+static camera_capabilities_t s_caps;
+static bool s_settings_ready;
 static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 #if CONFIG_MYPI_CAMERA_ENABLE
 static camera_status_t s_st = {.state = CAMERA_STATE_STARTING};
@@ -55,6 +59,33 @@ static camera_status_t s_status_snapshot = {.state = CAMERA_STATE_DISABLED};
 #define CAM_VFLIP 0
 #endif
 #define STORE_LOCK_MS       5000
+
+void camera_settings_defaults(camera_settings_t *out)
+{
+    if (!out) return;
+    *out = (camera_settings_t){
+        .preview_quality = CONFIG_MYPI_CAMERA_PREVIEW_QUALITY,
+        .photo_quality = CONFIG_MYPI_CAMERA_JPEG_QUALITY,
+        .idle_stop_s = CONFIG_MYPI_CAMERA_IDLE_STOP_S,
+        .max_photos = CONFIG_MYPI_CAMERA_MAX_PHOTOS,
+        .reserve_kb = CONFIG_MYPI_CAMERA_STORAGE_RESERVE_KB,
+        .hflip = CAM_HFLIP, .vflip = CAM_VFLIP, .live_preview = true,
+    };
+}
+
+static void settings_load(void)
+{
+    camera_settings_defaults(&s_settings);
+    nvs_handle_t h;
+    if (nvs_open("camera", NVS_READONLY, &h) != ESP_OK) return;
+    camera_settings_blob_t blob;
+    size_t len = sizeof(blob);
+    if (nvs_get_blob(h, "settings", &blob, &len) == ESP_OK &&
+        !camera_settings_unpack(&blob, len, &s_settings)) {
+        ESP_LOGW(TAG, "Ignoring invalid saved camera settings");
+    }
+    nvs_close(h);
+}
 
 static void set_error(esp_err_t err, const char *fmt, ...)
 {
@@ -85,6 +116,96 @@ static void unlock(void)
     s_status_snapshot = s_st;
     portEXIT_CRITICAL(&s_status_mux);
     xSemaphoreGive(s_lock);
+}
+
+static bool settings_ready(void)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    bool ready = s_settings_ready;
+    portEXIT_CRITICAL(&s_status_mux);
+    return ready;
+}
+
+static void settings_mark_ready(void)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    s_settings_ready = true;
+    portEXIT_CRITICAL(&s_status_mux);
+}
+
+esp_err_t camera_get_settings(camera_settings_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    if (!settings_ready()) return ESP_ERR_INVALID_STATE;
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    *out = s_settings;
+    unlock();
+    return ESP_OK;
+}
+
+esp_err_t camera_get_capabilities(camera_capabilities_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    if (!settings_ready()) return ESP_ERR_INVALID_STATE;
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    *out = s_caps;
+    unlock();
+    return ESP_OK;
+}
+
+#if CONFIG_MYPI_CAMERA_ENABLE
+static esp_err_t settings_apply_flips(const camera_settings_t *settings);
+static esp_err_t settings_apply_mode(int width, int height);
+#endif
+
+esp_err_t camera_save_settings(const camera_settings_t *in)
+{
+    if (!camera_settings_valid(in)) return ESP_ERR_INVALID_ARG;
+    if (!settings_ready()) return ESP_ERR_INVALID_STATE;
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    if (!camera_settings_supported(in, &s_caps)) {
+        unlock();
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    camera_settings_t previous = s_settings;
+    camera_settings_t next = *in;
+    next.width = in->width ? in->width : s_st.width;
+    next.height = in->height ? in->height : s_st.height;
+    bool mode_changed = next.width != s_st.width || next.height != s_st.height;
+    bool flip_changed = next.hflip != s_settings.hflip || next.vflip != s_settings.vflip;
+    esp_err_t err = ESP_OK;
+    nvs_handle_t h;
+    err = nvs_open("camera", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+#if CONFIG_MYPI_CAMERA_ENABLE
+        if (mode_changed) err = settings_apply_mode(next.width, next.height);
+        if (err == ESP_OK && flip_changed) err = settings_apply_flips(&next);
+#else
+        (void)mode_changed;
+        (void)flip_changed;
+#endif
+        if (err == ESP_OK) {
+            camera_settings_blob_t blob = camera_settings_pack(&next);
+            err = nvs_set_blob(h, "settings", &blob, sizeof(blob));
+            if (err == ESP_OK) err = nvs_commit(h);
+        }
+        nvs_close(h);
+#if CONFIG_MYPI_CAMERA_ENABLE
+        if (err != ESP_OK && mode_changed) {
+            if (settings_apply_mode(previous.width, previous.height) != ESP_OK) {
+                set_error(ESP_FAIL, "Camera resolution rollback failed");
+            }
+        }
+        if (err != ESP_OK && flip_changed) {
+            if (settings_apply_flips(&previous) != ESP_OK) {
+                set_error(ESP_FAIL, "Camera flip rollback failed");
+            }
+        }
+#endif
+    }
+    if (err == ESP_OK) s_settings = next;
+    unlock();
+    return err;
 }
 
 void camera_get_status(camera_status_t *out)
@@ -181,7 +302,9 @@ esp_err_t camera_photo_delete(const char *name)
 static volatile int s_fd = -1;     // Read unlocked by idle_task as a cheap pre-check
 static uint8_t *s_buf[CAMERA_BUF_COUNT];
 static size_t s_buf_len[CAMERA_BUF_COUNT];
-static uint32_t s_stride;               // Bytes per line of the RGB565 frames
+static uint32_t s_stride;
+static int s_bpp;
+static uint8_t *s_jpeg_input;
 static int64_t s_stream_start_us;
 static int64_t s_last_use_us;
 static int64_t s_fail_us;
@@ -212,35 +335,158 @@ static void stream_stop(void)
         s_jpeg_out = NULL;
         s_jpeg_out_size = 0;
     }
+    free(s_jpeg_input);
+    s_jpeg_input = NULL;
     if (s_st.state == CAMERA_STATE_STREAMING) s_st.state = CAMERA_STATE_READY;
     ESP_LOGI(TAG, "Stream stopped");
 }
 
-static void apply_flip(int fd)
+static esp_err_t apply_flip(int fd, const camera_settings_t *settings)
 {
     struct v4l2_ext_control ctrl[2] = {
-        {.id = V4L2_CID_HFLIP, .value = CAM_HFLIP},
-        {.id = V4L2_CID_VFLIP, .value = CAM_VFLIP},
+        {.id = V4L2_CID_HFLIP, .value = settings->hflip},
+        {.id = V4L2_CID_VFLIP, .value = settings->vflip},
     };
     for (int i = 0; i < 2; i++) {
+        if (!(i ? s_caps.vflip : s_caps.hflip)) continue;
         struct v4l2_ext_controls ctrls = {
             .ctrl_class = V4L2_CTRL_CLASS_USER,
             .count = 1,
             .controls = &ctrl[i],
         };
-        if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) != 0 && ctrl[i].value) {
-            ESP_LOGW(TAG, "%s not supported by the sensor driver", i ? "VFLIP" : "HFLIP");
+        if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) != 0) return ESP_ERR_NOT_SUPPORTED;
+    }
+    return ESP_OK;
+}
+
+static bool probe_flip(int fd, uint32_t id)
+{
+    // This driver's get_para_value always returns NOT_SUPPORTED; do not trigger error logs.
+    if (strcmp(s_st.sensor, "OV5647") == 0) return false;
+    struct v4l2_ext_control ctrl = {.id = id};
+    struct v4l2_ext_controls ctrls = {
+        .ctrl_class = V4L2_CTRL_CLASS_USER, .count = 1, .controls = &ctrl,
+    };
+    // No readback means no safe validation/rollback (OV5647 currently lacks get_para_value).
+    // Probe once, before any stream exists. Writing the current value verifies writability.
+    return ioctl(fd, VIDIOC_G_EXT_CTRLS, &ctrls) == 0 &&
+           (ctrl.value == 0 || ctrl.value == 1) && ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) == 0;
+}
+
+static esp_err_t settings_apply_flips(const camera_settings_t *settings)
+{
+    // Never open a second handle over an active stream or change controls during a capture.
+    stream_stop();
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
+    if (fd < 0) return ESP_FAIL;
+    esp_err_t err = apply_flip(fd, settings);
+    close(fd);
+    return err;
+}
+
+static bool select_format(int fd, struct v4l2_format *fmt, uint32_t pixel_format, int width, int height)
+{
+    fmt->fmt.pix.width = width;
+    fmt->fmt.pix.height = height;
+    fmt->fmt.pix.pixelformat = pixel_format;
+    return ioctl(fd, VIDIOC_S_FMT, fmt) == 0 && ioctl(fd, VIDIOC_G_FMT, fmt) == 0 &&
+           fmt->fmt.pix.pixelformat == pixel_format && fmt->fmt.pix.width == (uint32_t)width &&
+           fmt->fmt.pix.height == (uint32_t)height;
+}
+
+static bool capture_format_set(int fd, int width, int height, struct v4l2_format *selected)
+{
+    const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+        struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+        if (ioctl(fd, VIDIOC_G_FMT, &fmt) == 0 &&
+            select_format(fd, &fmt, formats[i], width, height)) {
+            if (selected) *selected = fmt;
+            return true;
         }
+    }
+    return false;
+}
+
+static bool sensor_format_set(int fd, int width, int height)
+{
+    for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+        struct v4l2_sensor_format_enum sensor_format = {.index = index};
+        if (ioctl(fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_format) != 0) break;
+        if (sensor_format.format.width == width && sensor_format.format.height == height) {
+            return ioctl(fd, VIDIOC_S_SENSOR_FMT, &sensor_format.format) == 0;
+        }
+    }
+    return false;
+}
+
+static void camera_mode_add(camera_capabilities_t *caps, uint32_t width, uint32_t height)
+{
+    if (width < 16 || height < 16 || width > UINT16_MAX || height > UINT16_MAX) return;
+    for (int i = 0; i < caps->mode_count; i++) {
+        if ((uint32_t)caps->modes[i].width == width && (uint32_t)caps->modes[i].height == height) return;
+    }
+    if (caps->mode_count < CAMERA_MODE_MAX) {
+        caps->modes[caps->mode_count++] = (camera_mode_t){(int)width, (int)height};
     }
 }
 
-/** Open the device, select RGB565 and start streaming. Lock held. */
+static void camera_modes_enumerate(int fd, camera_capabilities_t *caps, uint32_t current_width,
+                                   uint32_t current_height)
+{
+    caps->mode_count = 0;
+    for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+        struct v4l2_sensor_format_enum sensor_format = {.index = index};
+        if (ioctl(fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_format) != 0) break;
+        camera_mode_add(caps, sensor_format.format.width, sensor_format.format.height);
+    }
+    if (caps->mode_count == 0) {
+        const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
+        for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+            for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+                struct v4l2_frmsizeenum size = {
+                    .index = index, .pixel_format = formats[f],
+                };
+                if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
+                if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                    camera_mode_add(caps, size.discrete.width, size.discrete.height);
+                }
+            }
+        }
+    }
+    camera_mode_add(caps, current_width, current_height);
+}
+
+static esp_err_t settings_apply_mode(int width, int height)
+{
+    stream_stop();
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
+    if (fd < 0) {
+        set_error(ESP_FAIL, "Camera open failed while setting resolution (errno %d)", errno);
+        return ESP_FAIL;
+    }
+    struct v4l2_format fmt;
+    bool applied = sensor_format_set(fd, width, height) &&
+                   capture_format_set(fd, width, height, &fmt);
+    close(fd);
+    if (!applied) {
+        set_error(ESP_ERR_NOT_SUPPORTED, "Camera rejected resolution %dx%d", width, height);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    s_st.width = (uint16_t)fmt.fmt.pix.width;
+    s_st.height = (uint16_t)fmt.fmt.pix.height;
+    s_st.state = CAMERA_STATE_READY;
+    clear_error();
+    return ESP_OK;
+}
+
+/** Open the device, prefer full-colour RGB888 and start streaming. Lock held. */
 static esp_err_t stream_start(void)
 {
     if (s_fd >= 0) return ESP_OK;
     if (!camera_state_usable(s_st.state)) return ESP_ERR_INVALID_STATE;
 
-    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
     if (fd < 0) {
         set_error(ESP_FAIL, "Camera open failed (errno %d)", errno);
         return ESP_FAIL;
@@ -251,23 +497,35 @@ static esp_err_t stream_start(void)
         set_error(ESP_FAIL, "Camera format query failed (errno %d)", errno);
         goto fail;
     }
-    if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_RGB565) {
-        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
-        if (ioctl(fd, VIDIOC_S_FMT, &fmt) != 0) {
-            set_error(ESP_ERR_NOT_SUPPORTED, "Camera cannot output RGB565 (errno %d)", errno);
-            err = ESP_ERR_NOT_SUPPORTED;
-            goto fail;
-        }
+    if (!capture_format_set(fd, s_st.width, s_st.height, &fmt)) {
+        set_error(ESP_ERR_NOT_SUPPORTED, "Camera cannot output %ux%u as RGB888 or RGB565 (errno %d)",
+                  s_st.width, s_st.height, errno);
+        err = ESP_ERR_NOT_SUPPORTED;
+        goto fail;
     }
-    if (fmt.fmt.pix.width < 16 || fmt.fmt.pix.height < 16) {
+    if (fmt.fmt.pix.width < 16 || fmt.fmt.pix.height < 16 ||
+        fmt.fmt.pix.width != s_st.width || fmt.fmt.pix.height != s_st.height) {
         set_error(ESP_ERR_INVALID_SIZE, "Camera reported an invalid frame size");
         err = ESP_ERR_INVALID_SIZE;
         goto fail;
     }
     s_st.width = (uint16_t)fmt.fmt.pix.width;
     s_st.height = (uint16_t)fmt.fmt.pix.height;
-    s_stride = fmt.fmt.pix.bytesperline >= fmt.fmt.pix.width * 2 ? fmt.fmt.pix.bytesperline : fmt.fmt.pix.width * 2;
-    apply_flip(fd);
+    s_bpp = fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24 ? 3 : 2;
+    size_t stride;
+    if (!camera_frame_layout(s_st.width, s_st.height, s_bpp, fmt.fmt.pix.bytesperline,
+                             fmt.fmt.pix.sizeimage, &stride) || stride > UINT32_MAX) {
+        set_error(ESP_ERR_INVALID_SIZE, "Camera reported an invalid frame stride/size");
+        err = ESP_ERR_INVALID_SIZE;
+        goto fail;
+    }
+    s_stride = (uint32_t)stride;
+    err = apply_flip(fd, &s_settings);
+    if (err != ESP_OK) {
+        set_error(err, "Camera orientation could not be applied");
+        goto fail;
+    }
+    err = ESP_FAIL;
 
 #ifdef VIDIOC_S_DQBUF_TIMEOUT
     struct timeval tv = {.tv_sec = DQBUF_TIMEOUT_MS / 1000, .tv_usec = (DQBUF_TIMEOUT_MS % 1000) * 1000};
@@ -294,6 +552,11 @@ static esp_err_t stream_start(void)
             set_error(ESP_FAIL, "Camera buffer query failed");
             goto fail;
         }
+        if (!camera_frame_valid(s_st.width, s_st.height, s_stride, s_bpp, buf.length)) {
+            set_error(ESP_ERR_INVALID_SIZE, "Camera buffer is smaller than the frame layout");
+            err = ESP_ERR_INVALID_SIZE;
+            goto fail;
+        }
         s_buf[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
         if (!s_buf[i] || s_buf[i] == MAP_FAILED) {
             s_buf[i] = NULL;
@@ -317,7 +580,7 @@ static esp_err_t stream_start(void)
     s_last_use_us = s_stream_start_us;
     s_st.state = CAMERA_STATE_STREAMING;
     clear_error();
-    ESP_LOGI(TAG, "Stream started: %ux%u RGB565, %d buffers", s_st.width, s_st.height, CAMERA_BUF_COUNT);
+    ESP_LOGI(TAG, "Stream started: %ux%u RGB%d, %d buffers", s_st.width, s_st.height, s_bpp * 8, CAMERA_BUF_COUNT);
     return ESP_OK;
 
 fail:
@@ -344,6 +607,14 @@ static esp_err_t frame_get(struct v4l2_buffer *buf)
         stream_stop();
         set_failed();
         return ESP_ERR_TIMEOUT;
+    }
+    size_t available = buf->bytesused ? buf->bytesused : s_buf_len[buf->index];
+    if (available > s_buf_len[buf->index] ||
+        !camera_frame_valid(s_st.width, s_st.height, s_stride, s_bpp, available)) {
+        set_error(ESP_ERR_INVALID_SIZE, "Camera returned a truncated/invalid frame");
+        stream_stop();
+        set_failed();
+        return ESP_ERR_INVALID_SIZE;
     }
     s_last_use_us = esp_timer_get_time();
     s_st.frames++;
@@ -372,6 +643,12 @@ static esp_err_t frame_get_fresh(struct v4l2_buffer *buf)
 /** Encode the dequeued frame into s_jpeg_out (lock held). */
 static esp_err_t encode(const struct v4l2_buffer *buf, int quality, size_t *len)
 {
+    if (!buf || buf->index >= CAMERA_BUF_COUNT || !s_buf[buf->index] ||
+        !camera_frame_valid(s_st.width, s_st.height, s_stride, s_bpp,
+                            buf->bytesused ? buf->bytesused : s_buf_len[buf->index])) {
+        set_error(ESP_ERR_INVALID_SIZE, "Invalid JPEG input frame");
+        return ESP_ERR_INVALID_SIZE;
+    }
     esp_err_t err = ESP_OK;
     if (!s_jpeg) {
         jpeg_encode_engine_cfg_t cfg = {.timeout_ms = JPEG_TIMEOUT_MS};
@@ -383,27 +660,50 @@ static esp_err_t encode(const struct v4l2_buffer *buf, int quality, size_t *len)
         }
     }
     if (!s_jpeg_out) {
-        // Same size as the RGB565 input (2 bytes per pixel): enough even at quality 100 on a detailed
-        // scene. PSRAM, allocated only while the stream runs.
+        // Allow full-colour, high-quality output plus header/MCU overhead.
         jpeg_encode_memory_alloc_cfg_t mem = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
-        s_jpeg_out = jpeg_alloc_encoder_mem((size_t)s_st.width * s_st.height * 2, &mem, &s_jpeg_out_size);
+        s_jpeg_out = jpeg_alloc_encoder_mem((size_t)s_st.width * s_st.height * 3 + 1024, &mem, &s_jpeg_out_size);
         if (!s_jpeg_out) {
             s_jpeg_out_size = 0;
             set_error(ESP_ERR_NO_MEM, "No memory for the JPEG buffer");
             return ESP_ERR_NO_MEM;
         }
     }
+    size_t row = (size_t)s_st.width * s_bpp;
+    size_t input_len = row * s_st.height;
+    uint8_t *input = s_buf[buf->index];
+    // esp_video's RGB24 is ISP_COLOR_RGB888 = BGR24 (IDF hal/isp_types.h), as JPEG expects.
+    // No colour swap is needed; the JPEG API only requires removal of row padding.
+    if (s_stride != row) {
+        if (!s_jpeg_input) {
+            size_t allocated = 0;
+            jpeg_encode_memory_alloc_cfg_t mem = {.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER};
+            s_jpeg_input = jpeg_alloc_encoder_mem(input_len, &mem, &allocated);
+            if (!s_jpeg_input) {
+                set_error(ESP_ERR_NO_MEM, "No memory for packed JPEG input");
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        if (!camera_pack_jpeg_pixels(input, s_st.width, s_st.height, s_stride, s_bpp,
+                                     buf->bytesused ? buf->bytesused : s_buf_len[buf->index],
+                                     s_jpeg_input, input_len)) {
+            set_error(ESP_ERR_INVALID_SIZE, "Invalid packed JPEG input");
+            return ESP_ERR_INVALID_SIZE;
+        }
+        input = s_jpeg_input;
+    }
     jpeg_encode_cfg_t cfg = {
         .width = s_st.width,
         .height = s_st.height,
-        .src_type = JPEG_ENCODE_IN_FORMAT_RGB565,
-        .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
+        .src_type = s_bpp == 3 ? JPEG_ENCODE_IN_FORMAT_RGB888 : JPEG_ENCODE_IN_FORMAT_RGB565,
+        .sub_sample = JPEG_DOWN_SAMPLING_YUV444,
         .image_quality = quality < 1 ? 1 : (quality > 100 ? 100 : quality),
+        .pixel_reverse = false,
     };
     uint32_t out_len = 0;
-    err = jpeg_encoder_process(s_jpeg, &cfg, s_buf[buf->index], buf->bytesused ? buf->bytesused : s_buf_len[buf->index],
+    err = jpeg_encoder_process(s_jpeg, &cfg, input, input_len,
                                s_jpeg_out, s_jpeg_out_size, &out_len);
-    if (err != ESP_OK || out_len == 0) {
+    if (err != ESP_OK || out_len == 0 || out_len > s_jpeg_out_size) {
         set_error(err != ESP_OK ? err : ESP_FAIL, "JPEG encoding failed");
         return err != ESP_OK ? err : ESP_FAIL;
     }
@@ -431,8 +731,10 @@ esp_err_t camera_preview_rgb565(uint16_t *dst, int max_w, int max_h, int *out_w,
     if (err == ESP_OK) err = frame_get(&buf);
     if (err == ESP_OK) {
         camera_fit(s_st.width, s_st.height, max_w, max_h, out_w, out_h);
-        camera_scale_rgb565((const uint16_t *)s_buf[buf.index], s_st.width, s_st.height, (int)(s_stride / 2),
-                            dst, *out_w, *out_h);
+        if (!camera_scale_to_rgb565(s_buf[buf.index], s_st.width, s_st.height, s_stride, s_bpp,
+                                   buf.bytesused ? buf.bytesused : s_buf_len[buf.index], dst, *out_w, *out_h)) {
+            err = ESP_ERR_INVALID_SIZE;
+        }
         frame_put(&buf);
     }
     unlock();
@@ -450,7 +752,7 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len)
     size_t n = 0;
     if (err == ESP_OK) err = frame_get_fresh(&buf);
     if (err == ESP_OK) {
-        err = encode(&buf, quality, &n);
+        err = encode(&buf, quality == 0 ? s_settings.preview_quality : quality, &n);
         frame_put(&buf);
     }
     if (err == ESP_OK) {
@@ -477,13 +779,13 @@ static esp_err_t prepare_name(char *name, size_t name_size)
     camera_photo_t *list = count > 0 ? calloc((size_t)count, sizeof(camera_photo_t)) : NULL;
     if (count > 0 && !list) return ESP_ERR_NO_MEM;
     int stored = scan_photos(list, count, NULL);
-    int drop = camera_prune_count(count, CONFIG_MYPI_CAMERA_MAX_PHOTOS);
+    int drop = camera_prune_count(count, s_settings.max_photos);
     if (drop > stored) drop = stored;
     if (stored > 1) qsort(list, stored, sizeof(list[0]), cmp_newest_first);
     for (int i = 0; i < drop; i++) {
         char path[48];
         camera_photo_path(list[stored - 1 - i].name, path, sizeof(path));
-        if (unlink(path) == 0) ESP_LOGI(TAG, "Deleted old photo %s (keep %d)", list[stored - 1 - i].name, CONFIG_MYPI_CAMERA_MAX_PHOTOS);
+        if (unlink(path) == 0) ESP_LOGI(TAG, "Deleted old photo %s (keep %d)", list[stored - 1 - i].name, s_settings.max_photos);
     }
     free(list);
     long seq = max_seq + 1;
@@ -514,7 +816,7 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
     size_t len = 0;
     if (err == ESP_OK) err = frame_get_fresh(&buf);
     if (err == ESP_OK) {
-        err = encode(&buf, CONFIG_MYPI_CAMERA_JPEG_QUALITY, &len);
+        err = encode(&buf, s_settings.photo_quality, &len);
         frame_put(&buf);
     }
     if (err != ESP_OK) {
@@ -547,7 +849,7 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
             set_error(err, "No memory to list photos");
         } else {
             logstore_get_info(&info);   // Free space after pruning
-            if (!camera_storage_ok(info.free_kb, need_kb, CONFIG_MYPI_CAMERA_STORAGE_RESERVE_KB)) {
+            if (!camera_storage_ok(info.free_kb, need_kb, s_settings.reserve_kb)) {
                 set_error(ESP_ERR_NO_MEM, "Storage full (%lu KB free, photo %lu KB): delete photos",
                           (unsigned long)info.free_kb, (unsigned long)need_kb);
                 err = ESP_ERR_NO_MEM;
@@ -591,7 +893,7 @@ static void idle_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(IDLE_CHECK_MS));
         if (s_fd < 0) continue;
         if (xSemaphoreTake(s_lock, 0) != pdTRUE) continue;  // In use right now
-        if (s_fd >= 0 && esp_timer_get_time() - s_last_use_us > CONFIG_MYPI_CAMERA_IDLE_STOP_S * 1000000LL) {
+        if (s_fd >= 0 && esp_timer_get_time() - s_last_use_us > s_settings.idle_stop_s * 1000000LL) {
             stream_stop();
         }
         unlock();
@@ -603,6 +905,9 @@ esp_err_t camera_init(void)
     if (s_lock) return ESP_OK;
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_caps = (camera_capabilities_t){0};
+    settings_load();
 
     // SCCB: the camera connector shares the board I2C bus (GPIO7/8) with the touch controller.
     // Reuse the touch driver's bus; create it here only if touch did not.
@@ -624,10 +929,27 @@ esp_err_t camera_init(void)
     esp_video_init_config_t cfg = {.csi = &csi};
 
     esp_err_t err = esp_video_init(&cfg);
-    int fd = err == ESP_OK ? open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY) : -1;
+    int fd = err == ESP_OK ? open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR) : -1;
     struct v4l2_capability cap = {0};
     struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
-    if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && ioctl(fd, VIDIOC_G_FMT, &fmt) == 0) {
+    if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && ioctl(fd, VIDIOC_G_FMT, &fmt) == 0 &&
+        fmt.fmt.pix.width >= 16 && fmt.fmt.pix.width <= UINT16_MAX &&
+        fmt.fmt.pix.height >= 16 && fmt.fmt.pix.height <= UINT16_MAX) {
+        uint32_t detected_width = fmt.fmt.pix.width, detected_height = fmt.fmt.pix.height;
+        camera_modes_enumerate(fd, &s_caps, detected_width, detected_height);
+        camera_settings_t requested = s_settings;
+        requested.hflip = requested.vflip = false;
+        if ((requested.width || requested.height) && camera_settings_supported(&requested, &s_caps) &&
+            (requested.width != (int)detected_width || requested.height != (int)detected_height)) {
+            if (sensor_format_set(fd, requested.width, requested.height) &&
+                capture_format_set(fd, requested.width, requested.height, &fmt)) {
+                detected_width = fmt.fmt.pix.width;
+                detected_height = fmt.fmt.pix.height;
+            } else {
+                sensor_format_set(fd, detected_width, detected_height);
+                capture_format_set(fd, detected_width, detected_height, NULL);
+            }
+        }
         // QUERYCAP reports the interface ("MIPI-CSI"); the sensor is the one enabled driver
         // that answered the auto-detect (the project enables only OV5647 by default).
 #ifdef CONFIG_CAMERA_OV5647
@@ -635,12 +957,19 @@ esp_err_t camera_init(void)
 #else
         strlcpy(s_st.sensor, (const char *)cap.card, sizeof(s_st.sensor));
 #endif
-        s_st.width = (uint16_t)fmt.fmt.pix.width;
-        s_st.height = (uint16_t)fmt.fmt.pix.height;
+        s_st.width = (uint16_t)detected_width;
+        s_st.height = (uint16_t)detected_height;
         s_st.state = CAMERA_STATE_READY;
+        s_caps.hflip = probe_flip(fd, V4L2_CID_HFLIP);
+        s_caps.vflip = probe_flip(fd, V4L2_CID_VFLIP);
+        if (!s_caps.hflip) s_settings.hflip = false;
+        if (!s_caps.vflip) s_settings.vflip = false;
+        s_settings.width = s_st.width;
+        s_settings.height = s_st.height;
         clear_error();
     } else {
         s_st.state = CAMERA_STATE_NOT_DETECTED;
+        s_settings.hflip = s_settings.vflip = false;
         if (err != ESP_OK) {
             set_error(err, "Camera init failed: %s", esp_err_to_name(err));
         } else {
@@ -648,10 +977,9 @@ esp_err_t camera_init(void)
         }
     }
     if (fd >= 0) close(fd);
+    settings_mark_ready();
     if (s_st.state != CAMERA_STATE_READY) {
-        portENTER_CRITICAL(&s_status_mux);
-        s_status_snapshot = s_st;
-        portEXIT_CRITICAL(&s_status_mux);
+        unlock();
         return s_st.last_err;
     }
 
@@ -660,9 +988,7 @@ esp_err_t camera_init(void)
     if (xTaskCreate(idle_task, "camera_idle", 3072, NULL, 1, NULL) != pdPASS) {
         ESP_LOGW(TAG, "Idle-stop task not started; the stream keeps running once started");
     }
-    portENTER_CRITICAL(&s_status_mux);
-    s_status_snapshot = s_st;
-    portEXIT_CRITICAL(&s_status_mux);
+    unlock();
     return ESP_OK;
 }
 
@@ -670,11 +996,15 @@ esp_err_t camera_init(void)
 
 esp_err_t camera_init(void)
 {
-    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+    if (s_lock) return ESP_ERR_NOT_SUPPORTED;
+    s_lock = xSemaphoreCreateMutex();
+    if (!s_lock) return ESP_ERR_NO_MEM;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    settings_load();
+    s_settings.hflip = s_settings.vflip = false;
     set_error(ESP_ERR_NOT_SUPPORTED, "Camera support disabled in menuconfig (MyPi-Hotspot > Camera)");
-    portENTER_CRITICAL(&s_status_mux);
-    s_status_snapshot = s_st;
-    portEXIT_CRITICAL(&s_status_mux);
+    settings_mark_ready();
+    unlock();
     return ESP_ERR_NOT_SUPPORTED;
 }
 

@@ -5,7 +5,7 @@
 //
 // * camera_init() only probes the sensor (SCCB on the shared touch I2C bus, GPIO7/8). No frame
 //   buffers are allocated until a preview or capture is requested.
-// * The stream starts on demand and stops after CONFIG_MYPI_CAMERA_IDLE_STOP_S without use, so the
+// * The stream starts on demand and stops after the runtime idle timeout without use, so the
 //   ISP/CSI do not load PSRAM bandwidth while nobody looks at the camera.
 // * Photos are JPEG files (hardware encoder) in /store/photos on the FAT "storage" partition shared
 //   with the log store (logstore_lock() serializes file access).
@@ -48,18 +48,33 @@ esp_err_t camera_init(void);
 
 void camera_get_status(camera_status_t *out);
 
+/** Defaults from menuconfig; dimensions are 0/0 (keep the detected sensor mode). */
+void camera_settings_defaults(camera_settings_t *out);
+/** Settings/capability APIs return ESP_ERR_INVALID_STATE until initialization finishes loading. */
+esp_err_t camera_get_settings(camera_settings_t *out);
+/** Validate, apply and atomically persist. Dimensions must be 0/0 or an enumerated sensor mode.
+ * Unsupported enabled flips/modes return ESP_ERR_NOT_SUPPORTED; bad ranges INVALID_ARG.
+ * Quality 10..100, idle 2..600 s, retention 1..500, reserve 0..2048 KB.
+ * live_preview is the web client's automatic-preview preference, not a capture gate.
+ */
+esp_err_t camera_save_settings(const camera_settings_t *in);
+/** Cached during init; never probes a streaming sensor. Flips require safe readback/write support;
+ *  modes are enumerated from the stopped capture device.
+ */
+esp_err_t camera_get_capabilities(camera_capabilities_t *out);
+
 /**
  * Grab the newest frame and scale it (aspect kept) into dst, at most max_w x max_h RGB565 pixels.
  * The real size is returned in *out_w / *out_h. Starts the stream if needed.
  */
 esp_err_t camera_preview_rgb565(uint16_t *dst, int max_w, int max_h, int *out_w, int *out_h);
 
-/** Fresh full-resolution JPEG frame (web preview). The caller frees *jpeg with free(). */
+/** Fresh full-resolution JPEG frame; quality=0 uses runtime preview quality. Caller frees *jpeg. */
 esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len);
 
 /**
  * Take a photo and save it as /store/photos/IMGnnnnn.JPG (oldest photos beyond
- * CONFIG_MYPI_CAMERA_MAX_PHOTOS are deleted first). name_out receives the file name.
+ * the runtime max_photos setting are deleted first). name_out receives the file name.
  * Errors: ESP_ERR_INVALID_STATE camera not detected, ESP_ERR_TIMEOUT / ESP_FAIL capture,
  * ESP_ERR_NOT_FOUND storage not mounted, ESP_ERR_NO_MEM storage full or out of memory,
  * ESP_ERR_INVALID_SIZE write failed. result reports this request's failure without changing
