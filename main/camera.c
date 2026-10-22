@@ -377,7 +377,7 @@ static esp_err_t settings_apply_flips(const camera_settings_t *settings)
 {
     // Never open a second handle over an active stream or change controls during a capture.
     stream_stop();
-    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
     if (fd < 0) return ESP_FAIL;
     esp_err_t err = apply_flip(fd, settings);
     close(fd);
@@ -403,6 +403,18 @@ static bool capture_format_set(int fd, int width, int height, struct v4l2_format
             select_format(fd, &fmt, formats[i], width, height)) {
             if (selected) *selected = fmt;
             return true;
+        }
+    }
+    return false;
+}
+
+static bool sensor_format_set(int fd, int width, int height)
+{
+    for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+        struct v4l2_sensor_format_enum sensor_format = {.index = index};
+        if (ioctl(fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_format) != 0) break;
+        if (sensor_format.format.width == width && sensor_format.format.height == height) {
+            return ioctl(fd, VIDIOC_S_SENSOR_FMT, &sensor_format.format) == 0;
         }
     }
     return false;
@@ -448,13 +460,14 @@ static void camera_modes_enumerate(int fd, camera_capabilities_t *caps, uint32_t
 static esp_err_t settings_apply_mode(int width, int height)
 {
     stream_stop();
-    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
     if (fd < 0) {
         set_error(ESP_FAIL, "Camera open failed while setting resolution (errno %d)", errno);
         return ESP_FAIL;
     }
     struct v4l2_format fmt;
-    bool applied = capture_format_set(fd, width, height, &fmt);
+    bool applied = sensor_format_set(fd, width, height) &&
+                   capture_format_set(fd, width, height, &fmt);
     close(fd);
     if (!applied) {
         set_error(ESP_ERR_NOT_SUPPORTED, "Camera rejected resolution %dx%d", width, height);
@@ -473,7 +486,7 @@ static esp_err_t stream_start(void)
     if (s_fd >= 0) return ESP_OK;
     if (!camera_state_usable(s_st.state)) return ESP_ERR_INVALID_STATE;
 
-    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
+    int fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
     if (fd < 0) {
         set_error(ESP_FAIL, "Camera open failed (errno %d)", errno);
         return ESP_FAIL;
@@ -916,7 +929,7 @@ esp_err_t camera_init(void)
     esp_video_init_config_t cfg = {.csi = &csi};
 
     esp_err_t err = esp_video_init(&cfg);
-    int fd = err == ESP_OK ? open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY) : -1;
+    int fd = err == ESP_OK ? open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR) : -1;
     struct v4l2_capability cap = {0};
     struct v4l2_format fmt = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && ioctl(fd, VIDIOC_G_FMT, &fmt) == 0 &&
@@ -926,11 +939,14 @@ esp_err_t camera_init(void)
         camera_modes_enumerate(fd, &s_caps, detected_width, detected_height);
         camera_settings_t requested = s_settings;
         requested.hflip = requested.vflip = false;
-        if ((requested.width || requested.height) && camera_settings_supported(&requested, &s_caps)) {
-            if (capture_format_set(fd, requested.width, requested.height, &fmt)) {
+        if ((requested.width || requested.height) && camera_settings_supported(&requested, &s_caps) &&
+            (requested.width != (int)detected_width || requested.height != (int)detected_height)) {
+            if (sensor_format_set(fd, requested.width, requested.height) &&
+                capture_format_set(fd, requested.width, requested.height, &fmt)) {
                 detected_width = fmt.fmt.pix.width;
                 detected_height = fmt.fmt.pix.height;
             } else {
+                sensor_format_set(fd, detected_width, detected_height);
                 capture_format_set(fd, detected_width, detected_height, NULL);
             }
         }
