@@ -544,11 +544,14 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(camIds["cam-resolution"].disabled, false);
   assert.equal(camIds["cam-hflip"].disabled, false);
   assert.equal(camIds["cam-vflip"].disabled, true);
+  camIds["cam-resolution"].value = "1920x1080";
   camIds["cam-preview_quality"].value = "98";
   camIds["cam-hflip"].checked = true;
   assert.equal((await ui.cameraSettingsSave(settingsDoc, settingsFetch)).ok, true);
   assert.equal(settingPosts[0].preview_quality, 98);
   assert.equal(settingPosts[0].hflip, true);
+  assert.equal(settingPosts[0].width, 1920);
+  assert.equal(settingPosts[0].height, 1080);
   assert.equal(settingPosts[0].live_preview, false);
   assert.equal(ui.cameraLiveEnabled(settingsDoc), false);
   await ui.cameraPreview({ ...settingsDoc, querySelector: () => ({ hidden: false }) }, () => {

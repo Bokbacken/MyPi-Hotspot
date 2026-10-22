@@ -422,16 +422,23 @@ static void camera_mode_add(camera_capabilities_t *caps, uint32_t width, uint32_
 static void camera_modes_enumerate(int fd, camera_capabilities_t *caps, uint32_t current_width,
                                    uint32_t current_height)
 {
-    const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
     caps->mode_count = 0;
-    for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
-        for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
-            struct v4l2_frmsizeenum size = {
-                .index = index, .pixel_format = formats[f],
-            };
-            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
-            if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
-                camera_mode_add(caps, size.discrete.width, size.discrete.height);
+    for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+        struct v4l2_sensor_format_enum sensor_format = {.index = index};
+        if (ioctl(fd, VIDIOC_ENUM_SENSOR_FMT, &sensor_format) != 0) break;
+        camera_mode_add(caps, sensor_format.format.width, sensor_format.format.height);
+    }
+    if (caps->mode_count == 0) {
+        const uint32_t formats[] = {V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_RGB565};
+        for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
+            for (uint32_t index = 0; index < CAMERA_MODE_MAX; index++) {
+                struct v4l2_frmsizeenum size = {
+                    .index = index, .pixel_format = formats[f],
+                };
+                if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) != 0) break;
+                if (size.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                    camera_mode_add(caps, size.discrete.width, size.discrete.height);
+                }
             }
         }
     }
