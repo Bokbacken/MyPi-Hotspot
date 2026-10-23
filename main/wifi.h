@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "profiles.h"
 
 /**
  * Start Wi-Fi (ESP32-C5 co-processor via esp_wifi_remote/ESP-Hosted) in APSTA
@@ -27,6 +28,58 @@ int wifi_scan(wifi_scan_entry_t *out, int max);
 esp_err_t wifi_connect_profile(int slot);
 /** Disconnect and stay disconnected until wifi_connect_profile() is called. */
 esp_err_t wifi_disconnect(void);
+
+// --- v0.11.0: station snapshot, auto-select hold and connect transactions (Wi-Fi QR import) ---
+
+/** The station configuration in use (profile copy incl. DHCP/static settings) and the selection state. */
+typedef struct {
+    bool connected;         // usable IP address on the Wi-Fi uplink
+    bool manual_off;        // the user disconnected (stays off)
+    int pinned_slot;        // -1 = automatic profile selection
+    int slot;               // profile in use, -1 = Kconfig default or none
+    sta_profile_t profile;  // configuration in use (valid=false: none)
+    char ip[16];
+} wifi_sta_snapshot_t;
+void wifi_sta_snapshot(wifi_sta_snapshot_t *out);
+
+/**
+ * RAM-only hold (cleared on reboot): a held profile is skipped by automatic selection and
+ * round robin, so a profile saved without "connect" never triggers a network switch. An explicit
+ * connect to the slot, or "Connect (auto)", releases the hold.
+ */
+void wifi_autoselect_hold(int slot, bool hold);
+uint32_t wifi_autoselect_held(void);
+
+typedef enum {
+    WIFI_TXN_EV_ASSOCIATED,     // associated with the target SSID of this attempt
+    WIFI_TXN_EV_GOT_IP,         // usable IP (DHCP lease or static address applied) in this attempt
+    WIFI_TXN_EV_DISCONNECTED,   // attempt failed / link lost (reason = wifi_err_reason_t)
+    WIFI_TXN_EV_SUPERSEDED,     // the user connected/disconnected meanwhile: transaction is over
+} wifi_txn_ev_type_t;
+
+typedef struct {
+    wifi_txn_ev_type_t type;
+    uint32_t attempt;           // generation from wifi_txn_connect(); stale events carry older ones
+    uint8_t reason;
+} wifi_txn_event_t;
+
+/**
+ * Begin an exclusive station transaction: automatic reconnect/selection pause and the caller
+ * drives connects with wifi_txn_connect(). Returns a token, or 0 if Wi-Fi is not running, the
+ * emergency mode is active or another transaction runs. A user connect/disconnect ends it
+ * (WIFI_TXN_EV_SUPERSEDED).
+ */
+uint32_t wifi_txn_begin(void);
+/** Disconnect the current link and connect to `p` (slot -1 = not a saved profile).
+ *  ESP_ERR_INVALID_STATE: the transaction is no longer active (superseded). */
+esp_err_t wifi_txn_connect(uint32_t txn, const sta_profile_t *p, int slot, uint32_t *attempt_out);
+/** Wait for the next transaction event; false on timeout. */
+bool wifi_txn_next_event(uint32_t txn, wifi_txn_event_t *ev, uint32_t timeout_ms);
+/**
+ * End the transaction and restore the selection state. keep_link=false drops the current link or
+ * attempt (e.g. a cancelled connect). Reconnects automatically unless connected or manual_off.
+ */
+void wifi_txn_end(uint32_t txn, int pinned_slot, bool manual_off, bool keep_link);
 
 // --- Access point ---
 typedef struct {

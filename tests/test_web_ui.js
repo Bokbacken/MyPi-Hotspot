@@ -437,9 +437,10 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(ui.cameraResultText({ ok: false, stage: "capture", error: "JPEG encoding failed" }), "Capture error: JPEG encoding failed");
   assert.equal(ui.cameraResultText({ ok: false, stage: "camera", error: "Camera not detected" }), "Camera error: Camera not detected");
   assert.equal(ui.cameraResultText(null), "Capture failed: device unreachable");
-  assert.equal(ui.cameraStorageText({ storage: { mounted: false } }), "Storage not mounted: photos cannot be saved");
-  assert.equal(ui.cameraStorageText({ storage: { mounted: true, free_kb: 3000, total_kb: 3900 }, photos: [{}], max_photos: 20 }),
-    "/store/photos - 1 of max 20 photos, 3000 KB free of 3900 KB");
+  assert.equal(ui.cameraStorageText({ storage: { type: "psram", available: false } }), "PSRAM unavailable: photos cannot be kept");
+  assert.equal(ui.cameraStorageText({ storage: { type: "psram", volatile: true, available: true, count: 1, max_photos: 20,
+    used_bytes: 51300, budget_bytes: 4096 * 1024, psram_free_kb: 20000 } }),
+  "PSRAM (cleared on reboot) - 1 of max 20 photos, 51 KB used of 4096 KB budget, 20000 KB PSRAM free");
   const rows = ui.cameraPhotoRows([{ name: "IMG00002.JPG", size: 2048 }, { name: "<img onerror=x>", size: 1 }]);
   assert.match(rows, /IMG00002\.JPG<\/td><td>2 KB/);
   assert.match(rows, /\/api\/camera\/photo\?name=IMG00002\.JPG&dl=1/);
@@ -455,7 +456,8 @@ assert.equal(togglePassword(lone, loneBtn), false);
     const method = (opts && opts.method) || "GET";
     if (url === "/api/camera/status") {
       return { json: async () => ({ enabled: true, state: cam.state, sensor: "OV5647", width: 800, height: 640,
-        storage: { mounted: true, free_kb: 3000, total_kb: 3900 }, max_photos: 20, photos: cam.photos }) };
+        storage: { type: "psram", available: true, count: cam.photos.length, max_photos: 20, used_bytes: 0,
+          budget_bytes: 4194304, psram_free_kb: 20000 }, max_photos: 20, photos: cam.photos }) };
     }
     if (url === "/api/camera/capture" && method === "POST") {
       if (cam.fail) return { json: async () => ({ ok: false, ...cam.fail }) };
@@ -491,10 +493,10 @@ assert.equal(togglePassword(lone, loneBtn), false);
   assert.equal(camIds["cam-msg"].textContent, "Saved IMG00001.JPG (40 KB)");
   assert.equal(camIds["cam-msg"].classList.has("ok"), true);
   assert.match(camIds["cam-photos"].innerHTML, /IMG00001\.JPG/);
-  cam.fail = { stage: "storage", error: "Storage not mounted (FAT partition 'storage')" };
+  cam.fail = { stage: "storage", error: "PSRAM photo store full" };
   jr = await ui.cameraCapture(camDoc, camFetch);
   assert.equal(jr.ok, false);
-  assert.equal(camIds["cam-msg"].textContent, "Storage error: Storage not mounted (FAT partition 'storage')");
+  assert.equal(camIds["cam-msg"].textContent, "Storage error: PSRAM photo store full");
   assert.equal(camIds["cam-msg"].classList.has("bad"), true);
   jr = await ui.cameraDelete("IMG00001.JPG", camDoc, camFetch);
   assert.equal(jr.ok, true);
@@ -514,7 +516,7 @@ assert.equal(togglePassword(lone, loneBtn), false);
   // A1 basic settings: render only firmware-reported modes/capabilities, use typed JSON,
   // preserve the form on save failure, and pause preview without disabling capture.
   const settings = { width: 800, height: 640, preview_quality: 95, photo_quality: 95,
-    hflip: false, vflip: false, live_preview: false, idle_stop_s: 10, max_photos: 20, reserve_kb: 512 };
+    hflip: false, vflip: false, live_preview: false, idle_stop_s: 10, max_photos: 20, store_kb: 4096 };
   const caps = { modes: [{ width: 800, height: 640 }, { width: 800, height: 800 },
     { width: 800, height: 1280 }, { width: 1280, height: 960 }, { width: 1920, height: 1080 }],
   hflip: true, vflip: false };
@@ -600,100 +602,127 @@ assert.equal(togglePassword(lone, loneBtn), false);
   }
   assert.equal((webC.match(/\.uri = "\/api\/camera\/settings"/g) || []).length, 2);
   for (const key of ["resolution", "preview_quality", "photo_quality", "hflip", "vflip",
-    "live_preview", "idle_stop_s", "max_photos", "reserve_kb"]) assert.ok(webC.includes(`id='cam-${key}'`));
+    "live_preview", "idle_stop_s", "max_photos", "store_kb"]) assert.ok(webC.includes(`id='cam-${key}'`));
   assert.ok(webC.includes('strcmp(qr, "1") == 0 ? 95 : 0'));
   assert.ok(webC.includes("camera_snapshot_jpeg(quality, &jpg, &len)"));
   assert.ok(webC.includes('camera_json_bool(j, "live_preview"'));
   assert.ok(webC.includes("value->valuedouble != value->valueint"));
 
-  // Wi-Fi QR: escaped delimiters and UTF-8 limits, no WEP/enterprise/hidden or
-  // malformed credentials, and no credential text in errors.
-  const payload = "WIFI:T:WPA;S:My\\;Pi\\:WAN;P:test\\\\pass\\;word;;";
-  assert.deepEqual(ui.parseWifiQr(payload), { ssid: "My;Pi:WAN", pass: "test\\pass;word", security: "WPA" });
-  assert.deepEqual(ui.parseWifiQr("WIFI:S:Open;T:nopass;;"), { ssid: "Open", pass: "", security: "nopass" });
-  assert.equal(ui.parseWifiQr("WIFI:S:<img onerror=x>;T:nopass;;").ssid, "<img onerror=x>");
-  assert.equal(ui.parseWifiQr(`WIFI:S:${"å".repeat(16)};T:nopass;;`).ssid.length, 16);
-  for (const invalid of ["https://example.com", "WIFI:S:X;T:WEP;P:12345678;;",
-    "WIFI:S:X;T:WPA;P:short;;", "WIFI:S:X;T:WPA2-EAP;P:12345678;;",
-    "WIFI:S:X;S:Y;T:nopass;;", "WIFI:S:X;T:nopass;H:true;;", "WIFI:S:X;T:nopass;P:secret;;",
-    "WIFI:S:X;T:nopass", "WIFI:S:X\\", "WIFI:S:X\\q;T:nopass;;",
-    `WIFI:S:${"å".repeat(17)};T:nopass;;`, "WIFI:S:X\u0000;T:nopass;;"]) {
-    assert.throws(() => ui.parseWifiQr(invalid), /^Error: Invalid or unsupported Wi-Fi QR/);
-  }
-  const qrIds = {};
-  for (const id of ["qr-img", "qr-review", "qr-fill", "qr-password", "qr-payload", "qr-ssid",
-    "qr-security", "qr-msg", "qr-read", "sn", "spw", "sclr"]) {
-    qrIds[id] = { value: "", textContent: "", dataset: {}, removeAttribute(name) { delete this[name]; } };
-  }
-  const qrDoc = { getElementById: (id) => qrIds[id] };
-  qrIds["qr-payload"].value = payload;
-  assert.ok(ui.wifiQrParse(qrDoc));
-  assert.equal(qrIds["qr-payload"].value, "");
-  assert.equal(qrIds["qr-password"].type, "password");
-  assert.equal(qrIds["qr-ssid"].textContent, "My;Pi:WAN");
-  assert.equal(qrIds.sn.value, ""); // Detecting does not populate or save a profile.
-  assert.equal(qrIds["qr-fill"].disabled, false);
-  assert.equal(ui.wifiQrFill(qrDoc), true);
-  assert.equal(qrIds.sn.value, "My;Pi:WAN");
-  assert.equal(qrIds.spw.value, "test\\pass;word");
-  assert.equal(qrIds.spw.type, "password");
-  assert.equal(qrIds.sclr.checked, false);
-  assert.equal(qrIds["qr-password"].value, "");
-  assert.equal(qrIds["qr-review"].hidden, true);
-  assert.equal(ui.wifiQrFill(qrDoc), false);
-  qrIds["qr-payload"].value = "WIFI:S:Open;T:nopass;;";
-  ui.wifiQrParse(qrDoc);
-  ui.wifiQrFill(qrDoc);
-  assert.equal(qrIds.sclr.checked, true); // Prevent keeping an old profile password.
-  assert.equal(qrIds.spw.value, "");
-  const qrCalls = [];
-  const qrFetch = async (url, opts) => {
-    qrCalls.push([url, opts]);
-    assert.ok(url.startsWith("/api/camera/frame.jpg?"));
-    assert.ok(url.includes("qr=1"));
-    assert.equal(opts.cache, "no-store");
-    return { ok: true, blob: async () => new Blob(["camera"]) };
+  // Wi-Fi QR import (v0.11.0): on-device decoding and a server-side flow. The page never sees the
+  // password, escapes every decoded string, and only saves/connects on an explicit commit.
+  const qrStatus = {
+    state: "review", busy: false, seq: 3, message: "Wi-Fi QR code read", progress: "", cancellable: false,
+    candidate: { ssid: "<img onerror=x>", security: "wpa2", type: "WPA", hidden: true, password_len: 12,
+      psk: false, wpa3_required: false, ignored: "", expires_s: 590, existing_slot: -1 },
+    prior: { connected: true, ssid: "Home", slot: 1, source: "profile", dhcp: true, ip: "192.168.1.20",
+      pinned_slot: -1, manual_off: false },
+    visibility: { state: "not_seen" },
+    slots: [{ slot: 0, valid: true, ssid: "Office", held: false }, { slot: 1, valid: true, ssid: "Home", held: false },
+      { slot: 2, valid: false, ssid: "", held: false }],
   };
-  const previousBitmap = globalThis.createImageBitmap;
-  const previousDetector = globalThis.BarcodeDetector;
-  let closed = 0;
-  globalThis.createImageBitmap = async () => ({ close: () => closed++ });
-  try {
-    const decoder = { detect: async () => [{ rawValue: payload }] };
-    const result = await ui.wifiQrRead(qrDoc, qrFetch, decoder);
-    assert.equal(result.ssid, "My;Pi:WAN");
-    assert.equal(qrCalls.length, 1); // Only a camera GET, never save/connect.
-    assert.equal(qrIds.sn.value, "Open");
-    assert.equal(closed, 1);
-    ui.wifiQrClear(qrDoc);
-    assert.equal(qrIds["qr-img"].src, undefined);
-    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => [] }), null);
-    assert.match(qrIds["qr-msg"].textContent, /exactly one/);
-    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => [{ rawValue: "not Wi-Fi" }] }), null);
-    assert.equal(qrIds["qr-fill"].disabled, true);
-    assert.equal(await ui.wifiQrRead(qrDoc, qrFetch), null); // Native decoder unavailable in Node.
-    assert.match(qrIds["qr-msg"].textContent, /manual fallback/);
-    globalThis.BarcodeDetector = class {
-      static async getSupportedFormats() { return ["qr_code"]; }
-      constructor(options) { assert.deepEqual(options.formats, ["qr_code"]); }
-      async detect() { return [{ rawValue: payload }]; }
-    };
-    assert.equal((await ui.wifiQrRead(qrDoc, qrFetch)).ssid, "My;Pi:WAN");
-    assert.equal(await ui.wifiQrRead(qrDoc, async () => ({ ok: false })), null);
-    assert.match(qrIds["qr-msg"].textContent, /Check the camera/);
-    await ui.wifiQrRead(qrDoc, qrFetch, { detect: async () => {
-      ui.wifiQrClear(qrDoc); // Discard/navigation invalidates an in-flight decode.
-      return [{ rawValue: payload }];
-    } });
-    assert.equal(qrIds["qr-fill"].disabled, true);
-    assert.equal(qrIds["qr-password"].value, "");
-  } finally {
-    ui.wifiQrClear(qrDoc);
-    globalThis.createImageBitmap = previousBitmap;
-    globalThis.BarcodeDetector = previousDetector;
+  const infoRows = ui.wifiQrInfoRows(qrStatus);
+  assert.equal(infoRows.includes("<img"), false);
+  assert.ok(infoRows.includes("&lt;img onerror=x&gt;"));
+  assert.match(infoRows, /hidden \(12 characters\)/);
+  assert.match(infoRows, /WPA2\/WPA3 personal/);
+  assert.match(infoRows, /hidden network \(does not broadcast its name\)/);
+  assert.match(infoRows, /&quot;Home&quot; \(profile 1, DHCP, 192\.168\.1\.20\)/);
+  assert.equal(ui.wifiQrVisibilityText({ visibility: { state: "visible", rssi: -61, channel: 6, ap_security: "wpa2",
+    matches: 2, security_ok: false } }), "Visible (-61 dBm, channel 6, wpa2), 2 access points - its security does not match the QR code");
+  assert.match(ui.wifiQrVisibilityText({ visibility: { state: "scan_failed" } }), /scan failed/);
+  assert.match(ui.wifiQrVisibilityText({ candidate: { hidden: false }, visibility: { state: "not_seen" } }), /out of range/);
+  assert.equal(ui.wifiQrPriorText({ connected: false }), "None (not connected)");
+  assert.equal(ui.wifiQrPriorText({ manual_off: true }), "None (Wi-Fi uplink switched off)");
+  assert.match(ui.wifiQrPriorText({ connected: true, ssid: "D", source: "default", dhcp: false, ip: "" }), /built-in default, static IP/);
+  assert.deepEqual(ui.wifiQrSlotOptions(qrStatus).map((o) => o.value), ["-1", "0", "1", "2"]);
+  assert.equal(ui.wifiQrSlotOptions({ ...qrStatus, candidate: { ...qrStatus.candidate, existing_slot: 0 } })[0].text,
+    "Automatic (update slot 0)");
+  assert.match(ui.wifiQrInfoRows({ ...qrStatus, candidate: { ...qrStatus.candidate, security: "open", password_len: 0 } }),
+    /<td>Password<\/td><td>none<\/td>/);
+
+  const qrIds = {};
+  for (const id of ["qr-img", "qr-review", "qr-info", "qr-msg", "qr-progress", "qr-read", "qr-save", "qr-connect",
+    "qr-rescan", "qr-cancel", "qr-payload", "qr-overwrite"]) {
+    const cls = new Set();
+    qrIds[id] = { value: "", textContent: "", innerHTML: "", hidden: true, disabled: false, checked: false, dataset: {},
+      classList: { toggle(n, on) { if (on) cls.add(n); else cls.delete(n); }, has: (n) => cls.has(n) },
+      removeAttribute(name) { delete this[name]; } };
   }
+  qrIds["qr-slot"] = { value: "", children: [], replaceChildren() { this.children = []; }, appendChild(el) { this.children.push(el); } };
+  const qrDoc = { hidden: false, getElementById: (id) => qrIds[id] || null, createElement: () => ({}) };
+  ui.wifiQrRender(qrDoc, qrStatus);
+  assert.equal(qrIds["qr-review"].hidden, false);
+  assert.equal(qrIds["qr-save"].disabled, false);
+  assert.equal(qrIds["qr-connect"].disabled, false);
+  assert.equal(qrIds["qr-cancel"].hidden, true);
+  assert.deepEqual(qrIds["qr-slot"].children.map((o) => o.value), ["-1", "0", "1", "2"]);
+  assert.equal(qrIds["qr-slot"].value, "-1");
+  qrIds["qr-slot"].value = "2";
+  ui.wifiQrRender(qrDoc, qrStatus); // Polling keeps the user's slot choice.
+  assert.equal(qrIds["qr-slot"].value, "2");
+  ui.wifiQrRender(qrDoc, { ...qrStatus, state: "connecting", busy: true, cancellable: true, progress: "Connecting (try 1 of 2)" });
+  assert.equal(qrIds["qr-connect"].disabled, true);
+  assert.equal(qrIds["qr-read"].disabled, true);
+  assert.equal(qrIds["qr-cancel"].hidden, false);
+  assert.equal(qrIds["qr-progress"].textContent, "Connecting (try 1 of 2)");
+
+  // Server flow: status polls tolerate a dropped management link and stop when the step ends.
+  const qrCalls = [];
+  let qrPolls = [];
+  const qrFetch = async (url, opts) => {
+    qrCalls.push({ url, opts });
+    assert.equal(url.includes("pass"), false);
+    if (url === "/api/wifiqr/status") {
+      const next = qrPolls.shift();
+      if (next === "drop") throw new Error("network switching");
+      return { json: async () => next || qrStatus };
+    }
+    if (url.startsWith("/api/wifiqr/")) return { json: async () => ({ ok: true }) };
+    throw new Error(`unexpected ${url}`);
+  };
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); };
+  qrIds["qr-slot"].value = "2";
+  qrIds["qr-overwrite"].checked = true;
+  qrPolls = [{ ...qrStatus, state: "connecting", busy: true, cancellable: true }, "drop",
+    { state: "done", busy: false, seq: 3, message: "Connected to the new network", result: { outcome: "connected" } }];
+  const done = await ui.wifiQrCommit(true, qrDoc, qrFetch, sleep);
+  assert.equal(done.state, "done");
+  assert.deepEqual(JSON.parse(qrCalls[0].opts.body), { connect: true, slot: 2, overwrite: true });
+  assert.equal(qrCalls[0].url, "/api/wifiqr/commit");
+  assert.deepEqual(sleeps, [700, 2000]);
+  assert.equal(qrIds["qr-review"].hidden, true);
+  assert.equal(qrIds["qr-msg"].classList.has("bad"), false);
+  qrIds["qr-slot"].value = "-1";
+  qrIds["qr-overwrite"].checked = false;
+  qrCalls.length = 0;
+  qrPolls = [{ state: "done", busy: false, seq: 4, message: "Saved", result: { outcome: "saved" } }];
+  await ui.wifiQrCommit(false, qrDoc, qrFetch, sleep);
+  assert.deepEqual(JSON.parse(qrCalls[0].opts.body), { connect: false, slot: -1, overwrite: false });
+  qrPolls = [{ state: "done", busy: false, seq: 5, message: "New network failed; previous restored",
+    result: { outcome: "failed_restored" } }];
+  await ui.wifiQrScan(qrDoc, qrFetch, sleep);
+  assert.equal(qrIds["qr-msg"].classList.has("bad"), true);
+  // Manual text goes in a POST body only and the input is cleared immediately.
+  qrCalls.length = 0;
+  qrIds["qr-payload"].value = "WIFI:S:Lab;T:WPA;P:secret12;;";
+  await ui.wifiQrSubmitText(qrDoc, qrFetch, sleep);
+  assert.equal(qrIds["qr-payload"].value, "");
+  assert.equal(qrCalls[0].url, "/api/wifiqr/payload");
+  assert.equal(JSON.parse(qrCalls[0].opts.body).payload, "WIFI:S:Lab;T:WPA;P:secret12;;");
+  assert.equal(await ui.wifiQrSubmitText(qrDoc, qrFetch, sleep), null);
+  // A refused request (e.g. busy) reports the device error and does not poll.
+  qrCalls.length = 0;
+  await ui.wifiQrRescan(qrDoc, async (url) => { qrCalls.push(url); return { json: async () => ({ ok: false, error: "Busy" }) }; });
+  assert.deepEqual(qrCalls, ["/api/wifiqr/rescan"]);
+  assert.equal(qrIds["qr-msg"].textContent, "Busy");
+  assert.equal(ui.htmlEsc(`<a href="x">'&`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;");
+  // The firmware exposes every route the page uses; the old browser-only decoder is gone.
+  for (const uri of ["status", "scan", "payload", "rescan", "commit", "cancel", "discard"]) {
+    assert.ok(webC.includes(`.uri = "/api/wifiqr/${uri}"`), uri);
+  }
+  assert.equal(fs.readFileSync(path.join(__dirname, "../main/web_ui.js"), "utf8").includes("BarcodeDetector"), false);
   assert.ok(webC.indexOf("id='wan-qr'") < webC.indexOf("data-page='access-point'"));
-  assert.ok(webC.includes("id='qr-password' type='password'"));
   assert.ok(webC.includes("id='qr-payload' type='password'"));
 
   // Timekeeping: RTC-backed status, immediate timezone control and network-triggered SNTP.

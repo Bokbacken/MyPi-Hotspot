@@ -62,6 +62,8 @@ void profiles_load(void)
             if (!p->valid) continue;
             snprintf(k, sizeof(k), "s%dssid", i); get_str(h, k, p->ssid, sizeof(p->ssid));
             snprintf(k, sizeof(k), "s%dpass", i); get_str(h, k, p->pass, sizeof(p->pass));
+            snprintf(k, sizeof(k), "s%dsec", i);  p->security = get_u8(h, k, STA_SEC_AUTO);
+            if (p->security > STA_SEC_WPA3) p->security = STA_SEC_AUTO;
             snprintf(k, sizeof(k), "s%ddhcp", i); p->dhcp = get_u8(h, k, 1);
             snprintf(k, sizeof(k), "s%dip", i);   get_str(h, k, p->ip, sizeof(p->ip));
             snprintf(k, sizeof(k), "s%dsn", i);   get_str(h, k, p->mask, sizeof(p->mask));
@@ -119,6 +121,7 @@ static esp_err_t write_sta(nvs_handle_t h, int i, const sta_profile_t *p)
     snprintf(k, sizeof(k), "s%dv", i);    e |= nvs_set_u8(h, k, p->valid);
     snprintf(k, sizeof(k), "s%dssid", i); e |= nvs_set_str(h, k, p->ssid);
     snprintf(k, sizeof(k), "s%dpass", i); e |= nvs_set_str(h, k, p->pass);
+    snprintf(k, sizeof(k), "s%dsec", i);  e |= nvs_set_u8(h, k, p->security);
     snprintf(k, sizeof(k), "s%ddhcp", i); e |= nvs_set_u8(h, k, p->dhcp);
     snprintf(k, sizeof(k), "s%dip", i);   e |= nvs_set_str(h, k, p->ip);
     snprintf(k, sizeof(k), "s%dsn", i);   e |= nvs_set_str(h, k, p->mask);
@@ -145,6 +148,10 @@ esp_err_t sta_profile_save(int slot, const sta_profile_t *in)
     if (slot < 0 || slot >= STA_PROFILE_MAX || !in || !in->ssid[0]) return ESP_ERR_INVALID_ARG;
     size_t pl = strlen(in->pass);
     if (pl > 0 && pl < 8) return ESP_ERR_INVALID_ARG;
+    if (in->security > STA_SEC_WPA3 || (in->security == STA_SEC_OPEN && pl) ||
+        (in->security > STA_SEC_OPEN && !pl)) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!in->dhcp && (!valid_ip(in->ip) || !valid_ip(in->mask) || !valid_ip(in->gw))) return ESP_ERR_INVALID_ARG;
     sta_profile_t p = *in;
     p.valid = true;
