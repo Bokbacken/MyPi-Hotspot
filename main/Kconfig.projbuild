@@ -172,9 +172,11 @@ menu "MyPi-Hotspot"
             help
                 Camera on the ESP32-P4-NANO CSI connector via espressif/esp_video (V4L2, CSI +
                 ISP) with the OV5647 driver from esp_cam_sensor (auto-detected over SCCB).
-                Adds the LCD "Camera" page and the web "Camera" tab. Photos are saved as
-                JPEG in /store/photos (FAT 'storage' partition). Without a camera the
-                firmware runs normally and both pages show "Camera not detected".
+                Adds the LCD "Camera" page and the web "Camera" tab. Photos are JPEGs kept
+                only in PSRAM (never written to flash; the list is empty after a reboot).
+                The web Wi-Fi tab can read Wi-Fi QR codes with it (decoded on the device).
+                Without a camera the firmware runs normally and both pages show
+                "Camera not detected".
 
         config MYPI_CAMERA_SCCB_KHZ
             int "SCCB (I2C) clock (kHz)"
@@ -215,19 +217,22 @@ menu "MyPi-Hotspot"
                 Lower = smaller frames and a faster web preview.
 
         config MYPI_CAMERA_MAX_PHOTOS
-            int "Photos kept in /store/photos"
+            int "Photos kept in PSRAM"
             range 1 500
             default 20
             help
-                The oldest photo is deleted when a new one would exceed this count. The
-                storage partition is about 3.9 MB and shared with the log store.
+                The oldest photo is dropped when a new one would exceed this count.
+                Photos are volatile: they are lost on reboot.
 
-        config MYPI_CAMERA_STORAGE_RESERVE_KB
-            int "Storage space kept free for logs (KB)"
-            range 0 2048
-            default 512
+        config MYPI_CAMERA_PSRAM_STORE_KB
+            int "PSRAM budget for photos (KB)"
+            range 256 12288
+            default 4096
             help
-                A capture fails with "Storage full" instead of using this space.
+                Total JPEG bytes kept in PSRAM; the oldest photos are dropped to stay
+                within it. The camera stream itself needs up to ~19 MB of the 32 MB PSRAM
+                at 1920x1080, and 1 MB of PSRAM is always left free: a capture fails with
+                "Out of PSRAM" (keeping the existing photos) rather than using it.
 
         config MYPI_CAMERA_IDLE_STOP_S
             int "Stop the camera stream after (seconds without use)"

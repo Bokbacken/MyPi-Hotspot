@@ -375,7 +375,7 @@
   const CAMERA_PREVIEW_MS = 300, CAMERA_RETRY_MS = 3000;
   const CAMERA_STAGES = { camera: "Camera", capture: "Capture", storage: "Storage" };
   const CAMERA_PHOTO_RE = /^IMG\d{5}\.JPG$/;
-  const CAMERA_NUMBERS = ["preview_quality", "photo_quality", "idle_stop_s", "max_photos", "reserve_kb"];
+  const CAMERA_NUMBERS = ["preview_quality", "photo_quality", "idle_stop_s", "max_photos", "store_kb"];
   const CAMERA_BOOLEANS = ["hflip", "vflip", "live_preview"];
   const cameraForms = new WeakMap();
 
@@ -477,151 +477,234 @@
     if (cameraLiveEnabled(doc) && cameraVisible(doc)) cameraPreview(doc);
   }
 
-  // Decode only the WIFI payload subset the STA profile supports. Never include raw credentials
-  // in error messages, URLs, logs, HTML, or persistent browser storage.
-  function parseWifiQr(raw) {
-    const invalid = () => { throw new Error("Invalid or unsupported Wi-Fi QR (use WPA/WPA2 or an open, visible network)"); };
-    if (typeof raw !== "string" || raw.length > 2048 || !raw.startsWith("WIFI:")) return invalid();
-    const fields = Object.create(null);
-    let part = "", escaped = false;
-    for (const char of raw.slice(5)) {
-      if (escaped) {
-        if (!"\\;,:\"".includes(char)) return invalid();
-        part += char;
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === ";") {
-        if (part) {
-          const colon = part.indexOf(":");
-          const key = part.slice(0, colon);
-          if (colon < 1 || Object.hasOwn(fields, key)) return invalid();
-          fields[key] = part.slice(colon + 1);
-        }
-        part = "";
-      } else {
-        part += char;
-      }
-    }
-    if (escaped || part) return invalid();
-    const ssid = fields.S, security = fields.T || "nopass", pass = fields.P || "";
-    const bytes = (value) => new TextEncoder().encode(value).length;
-    if (!ssid || bytes(ssid) > 32 || /[\u0000-\u001f\u007f]/.test(ssid + pass)) return invalid();
-    if (fields.H && fields.H.toLowerCase() !== "false") return invalid();
-    if (!["WPA", "WPA2", "nopass"].includes(security)) return invalid();
-    if (security !== "nopass" &&
-        !((bytes(pass) >= 8 && bytes(pass) <= 63) || /^[0-9a-fA-F]{64}$/.test(pass))) return invalid();
-    if (security === "nopass" && pass) return invalid();
-    return { ssid, pass, security };
+  // Wi-Fi QR import (v0.11.0). The MyPi decodes the QR code itself (POST /api/wifiqr/scan, quirc on
+  // the device - no browser decoder, works over plain HTTP) and keeps the password server-side; this
+  // page shows SSID, security, visibility and the password length only, and polls the status so a
+  // brief loss of the management connection while the uplink switches is tolerated. Credentials are
+  // never put in URLs, logs or browser storage.
+  const WIFIQR_POLL_MS = 700, WIFIQR_RETRY_MS = 2000;
+  const WIFIQR_SECURITY = {
+    open: "Open (no password)", wpa: "WPA/WPA2/WPA3 personal", wpa2: "WPA2/WPA3 personal (WPA2 minimum)",
+    wpa3: "WPA3 personal (SAE) only",
+  };
+  const wifiQrLoops = new WeakSet();
+  const wifiQrSlotKeys = new WeakMap();
+
+  function htmlEsc(value) {
+    return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   }
 
-  const wifiQrCandidates = new WeakMap();
-  const wifiQrBusy = new WeakSet();
-  const wifiQrGeneration = new WeakMap();
+  function wifiQrVisibilityText(st) {
+    const v = st && st.visibility, c = st && st.candidate;
+    if (!v) return "";
+    if (v.state === "visible") {
+      let text = `Visible (${v.rssi} dBm, channel ${v.channel}, ${v.ap_security})`;
+      if (v.matches > 1) text += `, ${v.matches} access points`;
+      if (!v.security_ok) text += " - its security does not match the QR code";
+      return text;
+    }
+    if (v.state === "not_seen") {
+      return c && c.hidden ? "Not seen: hidden network (does not broadcast its name); connecting can still work" :
+        "Not seen in the scan (out of range, other band, or hidden)";
+    }
+    if (v.state === "scan_failed") return "Network scan failed: use Scan networks again";
+    return "Not scanned yet";
+  }
 
+  function wifiQrPriorText(p) {
+    if (!p) return "";
+    if (p.manual_off) return "None (Wi-Fi uplink switched off)";
+    if (!p.connected) return "None (not connected)";
+    const source = p.source === "default" ? "built-in default" : `profile ${p.slot}`;
+    return `"${p.ssid}" (${source}, ${p.dhcp ? "DHCP" : "static IP"}${p.ip ? ", " + p.ip : ""})`;
+  }
+
+  function wifiQrInfoRows(st) {
+    const c = st && st.candidate;
+    if (!c) return "";
+    const row = (k, v) => `<tr><td>${htmlEsc(k)}</td><td>${htmlEsc(v)}</td></tr>`;
+    const pass = c.security === "open" ? "none" :
+      `hidden (${c.password_len} ${c.psk ? "hex digits, raw PSK" : "characters"})`;
+    let rows = row("Network (SSID)", c.ssid) + row("Security", WIFIQR_SECURITY[c.security] || c.security) +
+      row("Password", pass) + row("Hidden network", c.hidden ? "yes" : "no");
+    if (c.ignored) rows += row("Ignored QR fields", c.ignored);
+    if (c.existing_slot >= 0) rows += row("Saved profile", `already in slot ${c.existing_slot}: it is updated`);
+    return rows + row("Current connection", wifiQrPriorText(st.prior)) + row("Visibility", wifiQrVisibilityText(st));
+  }
+
+  function wifiQrSlotOptions(st) {
+    const c = st && st.candidate;
+    const options = [{ value: "-1", text: c && c.existing_slot >= 0 ?
+      `Automatic (update slot ${c.existing_slot})` : "Automatic (first free slot)" }];
+    for (const s of (st && st.slots) || []) {
+      options.push({ value: String(s.slot),
+        text: `Slot ${s.slot}: ${s.valid ? s.ssid + (s.held ? " (saved only)" : "") : "(empty)"}` });
+    }
+    return options;
+  }
+
+  function wifiQrRender(doc, st) {
+    if (!st) return;
+    const review = st.state === "review" && !!st.candidate && !st.busy;
+    camSet(doc, "qr-msg", st.message || "", st.state === "error" ||
+      (st.result && st.state === "done" && !["connected", "saved"].includes(st.result.outcome)));
+    camSet(doc, "qr-progress", st.busy ? (st.progress || "Working...") : "");
+    const panel = doc.getElementById("qr-review");
+    if (panel) panel.hidden = !st.candidate;
+    const info = doc.getElementById("qr-info");
+    if (info) info.innerHTML = wifiQrInfoRows(st);
+    for (const id of ["qr-save", "qr-connect", "qr-rescan"]) {
+      const el = doc.getElementById(id);
+      if (el) el.disabled = !review;
+    }
+    const read = doc.getElementById("qr-read");
+    if (read) read.disabled = !!st.busy;
+    const cancel = doc.getElementById("qr-cancel");
+    if (cancel) cancel.hidden = !st.cancellable;
+    const select = doc.getElementById("qr-slot");
+    const key = st.candidate ? `${st.seq}:${JSON.stringify(st.slots || [])}` : "";
+    if (select && key && wifiQrSlotKeys.get(doc) !== key && doc.createElement) {
+      wifiQrSlotKeys.set(doc, key);
+      const keep = select.value;
+      select.replaceChildren();
+      for (const o of wifiQrSlotOptions(st)) {
+        const option = doc.createElement("option");
+        option.value = o.value;
+        option.textContent = o.text;
+        select.appendChild(option);
+      }
+      select.value = keep && wifiQrSlotOptions(st).some((o) => o.value === keep) ? keep : "-1";
+    }
+  }
+
+  async function wifiQrPoll(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    let st = null;
+    try {
+      const r = await f("/api/wifiqr/status", { cache: "no-store" });
+      st = await r.json();
+    } catch (e) {
+      st = null;
+    }
+    if (!st) {
+      camSet(doc, "qr-progress", "Waiting for the MyPi (the network connection may be switching)...", true);
+      return null;
+    }
+    wifiQrRender(doc, st);
+    return st;
+  }
+
+  // Poll until the current step finishes (status retained on the device across connection drops).
+  async function wifiQrFollow(document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const wait = sleep || ((ms) => new Promise((resolve) => root.setTimeout(resolve, ms)));
+    if (wifiQrLoops.has(doc)) return null;
+    wifiQrLoops.add(doc);
+    try {
+      for (;;) {
+        const st = await wifiQrPoll(doc, f);
+        if ((st && !st.busy) || doc.hidden) return st;
+        await wait(st ? WIFIQR_POLL_MS : WIFIQR_RETRY_MS);
+      }
+    } finally {
+      wifiQrLoops.delete(doc);
+    }
+  }
+
+  async function wifiQrPost(doc, f, url, body) {
+    try {
+      const r = await f(url, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}) });
+      const j = await r.json();
+      if (!j.ok) camSet(doc, "qr-msg", j.error || "Request failed", true);
+      return j;
+    } catch (e) {
+      camSet(doc, "qr-msg", "Device unreachable", true);
+      return null;
+    }
+  }
+
+  async function wifiQrAction(doc, f, url, body, sleep) {
+    const j = await wifiQrPost(doc, f, url, body);
+    if (j && j.ok) return wifiQrFollow(doc, f, sleep);
+    return null;
+  }
+
+  function wifiQrScan(document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    camSet(doc, "qr-msg", "Looking for a QR code in the MyPi camera image...", false);
+    return wifiQrAction(doc, f, "/api/wifiqr/scan", {}, sleep);
+  }
+
+  function wifiQrSubmitText(document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const input = doc.getElementById("qr-payload");
+    const payload = input ? input.value : "";
+    if (input) input.value = "";
+    if (!payload.trim()) {
+      camSet(doc, "qr-msg", "Paste the WIFI: text first", true);
+      return Promise.resolve(null);
+    }
+    return wifiQrAction(doc, f, "/api/wifiqr/payload", { payload }, sleep);
+  }
+
+  function wifiQrRescan(document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    return wifiQrAction(doc, f, "/api/wifiqr/rescan", {}, sleep);
+  }
+
+  function wifiQrCommit(connect, document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const select = doc.getElementById("qr-slot"), overwrite = doc.getElementById("qr-overwrite");
+    const slot = select && select.value !== "" ? Number(select.value) : -1;
+    return wifiQrAction(doc, f, "/api/wifiqr/commit",
+      { connect: !!connect, slot: Number.isInteger(slot) ? slot : -1, overwrite: !!(overwrite && overwrite.checked) }, sleep);
+  }
+
+  function wifiQrCancel(document, fetchFn, sleep) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    return wifiQrAction(doc, f, "/api/wifiqr/cancel", {}, sleep);
+  }
+
+  async function wifiQrDiscard(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    const j = await wifiQrPost(doc, f, "/api/wifiqr/discard", {});
+    if (j && j.ok) await wifiQrPoll(doc, f);
+    return j;
+  }
+
+  // One fresh high-quality frame (independent of the preview settings) to aim the MyPi camera.
+  async function wifiQrAim(document, fetchFn) {
+    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
+    try {
+      const r = await f(`/api/camera/frame.jpg?qr=1&t=${Date.now()}`, { cache: "no-store" });
+      if (!r.ok) throw new Error((r.text && (await r.text())) || `HTTP ${r.status}`);
+      const blob = await r.blob(), img = doc.getElementById("qr-img");
+      if (!img || !root.URL || !root.URL.createObjectURL) return true;
+      const old = img.dataset && img.dataset.url;
+      const url = root.URL.createObjectURL(blob);
+      img.src = url;
+      if (img.dataset) img.dataset.url = url;
+      if (old) root.URL.revokeObjectURL(old);
+      return true;
+    } catch (e) {
+      camSet(doc, "qr-msg", `Camera image unavailable: ${e && e.message ? e.message : e}`, true);
+      return false;
+    }
+  }
+
+  // Leaving the page clears local inputs/images only; a decoded candidate stays on the device (it
+  // expires after 10 minutes) so navigation does not interrupt a running step.
   function wifiQrClear(document) {
     const doc = document || root.document;
-    wifiQrGeneration.set(doc, (wifiQrGeneration.get(doc) || 0) + 1);
-    wifiQrCandidates.delete(doc);
-    for (const id of ["qr-password", "qr-payload"]) {
-      const input = doc.getElementById(id);
-      if (input) input.value = "";
-    }
-    const review = doc.getElementById("qr-review"), fill = doc.getElementById("qr-fill");
-    if (review) review.hidden = true;
-    if (fill) fill.disabled = true;
-    camSet(doc, "qr-ssid", "");
-    camSet(doc, "qr-security", "");
+    const input = doc.getElementById("qr-payload");
+    if (input) input.value = "";
     const img = doc.getElementById("qr-img");
-    if (img && img.dataset.url) {
+    if (img && img.dataset && img.dataset.url) {
       root.URL.revokeObjectURL(img.dataset.url);
       delete img.dataset.url;
       img.removeAttribute("src");
     }
-  }
-
-  function wifiQrReview(doc, raw) {
-    const candidate = parseWifiQr(raw);
-    wifiQrCandidates.set(doc, candidate);
-    camSet(doc, "qr-ssid", candidate.ssid);
-    camSet(doc, "qr-security", candidate.security === "nopass" ? "Open" : candidate.security);
-    const password = doc.getElementById("qr-password");
-    password.type = "password";
-    password.value = candidate.pass;
-    doc.getElementById("qr-review").hidden = false;
-    doc.getElementById("qr-fill").disabled = false;
-    camSet(doc, "qr-msg", "QR detected. Review before filling the selected STA profile. Nothing has been saved.", false);
-    return candidate;
-  }
-
-  function wifiQrParse(document) {
-    const doc = document || root.document;
-    const raw = doc.getElementById("qr-payload").value;
-    wifiQrClear(doc);
-    try {
-      return wifiQrReview(doc, raw);
-    } catch (e) {
-      camSet(doc, "qr-msg", "Invalid or unsupported Wi-Fi QR text", true);
-      return null;
-    }
-  }
-
-  async function wifiQrRead(document, fetchFn, decoder) {
-    const doc = document || root.document, f = fetchFn || root.fetch.bind(root);
-    if (wifiQrBusy.has(doc)) return null;
-    wifiQrBusy.add(doc);
-    wifiQrClear(doc);
-    const generation = wifiQrGeneration.get(doc);
-    const button = doc.getElementById("qr-read");
-    if (button) button.disabled = true;
-    camSet(doc, "qr-msg", "Reading a fresh image from the MyPi camera...");
-    let bitmap;
-    try {
-      const response = await f(`/api/camera/frame.jpg?qr=1&t=${Date.now()}`, { cache: "no-store" });
-      if (!response.ok) throw new Error();
-      const blob = await response.blob(), img = doc.getElementById("qr-img");
-      if (wifiQrGeneration.get(doc) !== generation) return null;
-      const url = root.URL.createObjectURL(blob);
-      img.dataset.url = url;
-      img.src = url;
-      if (!decoder) {
-        if (!root.BarcodeDetector || !root.createImageBitmap ||
-            !(await root.BarcodeDetector.getSupportedFormats()).includes("qr_code")) {
-          camSet(doc, "qr-msg", "This browser cannot decode QR here (native decoding may require HTTPS). Use the camera image and manual fallback below.", true);
-          return null;
-        }
-        decoder = new root.BarcodeDetector({ formats: ["qr_code"] });
-      }
-      bitmap = await root.createImageBitmap(blob);
-      const codes = await decoder.detect(bitmap);
-      if (wifiQrGeneration.get(doc) !== generation) return null;
-      if (codes.length !== 1) {
-        camSet(doc, "qr-msg", "Show exactly one Wi-Fi QR code to the camera, then try again.", true);
-        return null;
-      }
-      return wifiQrReview(doc, codes[0].rawValue);
-    } catch (e) {
-      if (wifiQrGeneration.get(doc) !== generation) return null;
-      camSet(doc, "qr-msg", "Could not read a supported Wi-Fi QR. Check the camera, try again, or use manual fallback.", true);
-      return null;
-    } finally {
-      if (bitmap) bitmap.close();
-      wifiQrBusy.delete(doc);
-      if (button) button.disabled = false;
-    }
-  }
-
-  function wifiQrFill(document) {
-    const doc = document || root.document, candidate = wifiQrCandidates.get(doc);
-    if (!candidate) return false;
-    doc.getElementById("sn").value = candidate.ssid;
-    const password = doc.getElementById("spw");
-    password.type = "password";
-    password.value = candidate.pass;
-    doc.getElementById("sclr").checked = candidate.security === "nopass";
-    wifiQrClear(doc);
-    camSet(doc, "qr-msg", "Selected STA profile filled, not saved. Review its slot and IP settings, then Save; Connect is separate.", false);
-    return true;
   }
 
   function cameraUsable(s) {
@@ -638,10 +721,13 @@
     return `${base} - ${s.state === "streaming" ? "streaming" : "ready"}`;
   }
 
+  // v0.11.0: photos live in PSRAM only (volatile: cleared on reboot), never on flash.
   function cameraStorageText(s) {
     const st = s && s.storage;
-    if (!st || !st.mounted) return "Storage not mounted: photos cannot be saved";
-    return `/store/photos - ${(s.photos || []).length} of max ${s.max_photos} photos, ${st.free_kb} KB free of ${st.total_kb} KB`;
+    if (!st || !st.available) return "PSRAM unavailable: photos cannot be kept";
+    const kb = (bytes) => Math.ceil((bytes || 0) / 1024);
+    return `PSRAM (cleared on reboot) - ${st.count} of max ${st.max_photos} photos, ${kb(st.used_bytes)} KB used of ` +
+      `${kb(st.budget_bytes)} KB budget, ${st.psram_free_kb} KB PSRAM free`;
   }
 
   function cameraResultText(j) {
@@ -681,7 +767,7 @@
     }
     const usable = cameraUsable(s);
     camSet(doc, "cam-st", cameraStatusText(s), !usable || s.state === "error");
-    const store = camSet(doc, "cam-store", cameraStorageText(s), !(s && s.storage && s.storage.mounted));
+    const store = camSet(doc, "cam-store", cameraStorageText(s), !(s && s.storage && s.storage.available));
     if (store && !s) store.textContent = "";
     const btn = doc.getElementById("cam-shutter");
     if (btn) btn.disabled = !usable;
@@ -799,14 +885,21 @@
       root.addEventListener("hashchange", () => {
         const page = showPage(document, root.location.hash);
         if (page !== "wifi") wifiQrClear(document);
+        else if (typeof root.fetch === "function") wifiQrFollow(document);
         if (page === "optimize" && typeof root.fetch === "function") optLoad(document);
         if (page === "camera") cameraOpen(document);
       });
       if (document.addEventListener) document.addEventListener("visibilitychange", () => {
         if (document.hidden) wifiQrClear(document);
+        else if (pageFromHash(root.location && root.location.hash) === "wifi" && typeof root.fetch === "function") {
+          wifiQrFollow(document);
+        }
         cameraOpen(document);
       });
       cameraOpen(document);
+      if (pageFromHash(root.location && root.location.hash) === "wifi" && typeof root.fetch === "function") {
+        wifiQrFollow(document);
+      }
     }
     if (typeof root.fetch === "function") {
       updateWifi(document, root.fetch.bind(root));
@@ -825,7 +918,9 @@
     radioRebootRequired, cameraUsable, cameraStatusText, cameraStorageText, cameraResultText, cameraPhotoRows,
     cameraLoad, cameraCapture, cameraDelete, cameraVisible, cameraFrame, cameraPreview,
     cameraSettingsFill, cameraSettingsLoad, cameraSettingsSave, cameraSettingsReset, cameraLiveChanged,
-    cameraLiveEnabled, cameraOpen, parseWifiQr, wifiQrRead, wifiQrParse, wifiQrFill, wifiQrClear };
+    cameraLiveEnabled, cameraOpen, htmlEsc, wifiQrVisibilityText, wifiQrPriorText, wifiQrInfoRows, wifiQrSlotOptions,
+    wifiQrRender, wifiQrPoll, wifiQrFollow, wifiQrScan, wifiQrSubmitText, wifiQrRescan, wifiQrCommit, wifiQrCancel,
+    wifiQrDiscard, wifiQrAim, wifiQrClear };
   root.MyPiSerial = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root.document) {

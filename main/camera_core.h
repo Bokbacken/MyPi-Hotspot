@@ -1,7 +1,7 @@
 #pragma once
 
 // Camera helpers without ESP-IDF dependencies (host-tested in tests/test_ui_primitives.c):
-// photo file names, preview geometry/scaling, storage reserve and pruning, state names.
+// settings, photo names, preview geometry/scaling, grayscale conversion for QR decoding, state names.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,14 +9,18 @@
 #include <stdio.h>
 #include <string.h>
 
-// Photos are 8.3 names (FAT without long file names): IMG00001.JPG .. IMG99999.JPG.
+// Photo names: IMG00001.JPG .. IMG99999.JPG (v0.11.0: photos live in PSRAM only, see photo_store.h).
 #define CAMERA_PHOTO_NAME_LEN   13
 #define CAMERA_PHOTO_SEQ_MAX    99999
 #define CAMERA_MODE_MAX        5
+// PSRAM photo store budget (store_kb): the camera itself needs ~19 MB of the 32 MB PSRAM at 1080p.
+#define CAMERA_STORE_KB_MIN     256
+#define CAMERA_STORE_KB_MAX     12288
 
 typedef struct {
     int preview_quality, photo_quality;
-    int idle_stop_s, max_photos, reserve_kb;
+    int idle_stop_s, max_photos;
+    int store_kb;               // v0.11.0: PSRAM photo budget (replaces the flash reserve_kb)
     bool hflip, vflip, live_preview;
     int width, height;          // Selected sensor mode; 0/0 keeps the detected default.
 } camera_settings_t;
@@ -35,7 +39,7 @@ static inline bool camera_settings_valid(const camera_settings_t *s)
            s->photo_quality >= 10 && s->photo_quality <= 100 &&
            s->idle_stop_s >= 2 && s->idle_stop_s <= 600 &&
            s->max_photos >= 1 && s->max_photos <= 500 &&
-           s->reserve_kb >= 0 && s->reserve_kb <= 2048 &&
+           s->store_kb >= CAMERA_STORE_KB_MIN && s->store_kb <= CAMERA_STORE_KB_MAX &&
            ((s->width == 0 && s->height == 0) || (s->width > 0 && s->height > 0));
 }
 
@@ -50,12 +54,20 @@ static inline bool camera_settings_supported(const camera_settings_t *s, const c
 }
 
 // Fixed-width versioned NVS representation: no structure padding or C bool representation.
+// v3 (v0.11.0) has the layout of v2 with store_kb in place of the flash reserve_kb.
+typedef struct {
+    uint32_t version;
+    int32_t preview_quality, photo_quality, idle_stop_s, max_photos, store_kb;
+    uint32_t hflip, vflip, live_preview;
+    int32_t width, height;
+} camera_settings_blob_t;
+
 typedef struct {
     uint32_t version;
     int32_t preview_quality, photo_quality, idle_stop_s, max_photos, reserve_kb;
     uint32_t hflip, vflip, live_preview;
     int32_t width, height;
-} camera_settings_blob_t;
+} camera_settings_blob_v2_t;
 
 typedef struct {
     uint32_t version;
@@ -66,20 +78,21 @@ typedef struct {
 static inline camera_settings_blob_t camera_settings_pack(const camera_settings_t *s)
 {
     return (camera_settings_blob_t){
-        .version = 2, .preview_quality = s->preview_quality, .photo_quality = s->photo_quality,
-        .idle_stop_s = s->idle_stop_s, .max_photos = s->max_photos, .reserve_kb = s->reserve_kb,
+        .version = 3, .preview_quality = s->preview_quality, .photo_quality = s->photo_quality,
+        .idle_stop_s = s->idle_stop_s, .max_photos = s->max_photos, .store_kb = s->store_kb,
         .hflip = s->hflip, .vflip = s->vflip, .live_preview = s->live_preview,
         .width = s->width, .height = s->height,
     };
 }
 
+/** v1/v2 blobs (flash reserve_kb, ignored) keep the store_kb already in *s (the defaults). */
 static inline bool camera_settings_unpack(const void *blob, size_t len, camera_settings_t *s)
 {
     if (!blob || !s || len < sizeof(uint32_t)) return false;
     uint32_t version;
     memcpy(&version, blob, sizeof(version));
     int width = 0, height = 0;
-    int32_t preview_quality, photo_quality, idle_stop_s, max_photos, reserve_kb;
+    int32_t preview_quality, photo_quality, idle_stop_s, max_photos, store_kb = s->store_kb;
     uint32_t hflip, vflip, live_preview;
     if (version == 1) {
         if (len != sizeof(camera_settings_blob_v1_t)) return false;
@@ -90,13 +103,12 @@ static inline bool camera_settings_unpack(const void *blob, size_t len, camera_s
         photo_quality = v1.photo_quality;
         idle_stop_s = v1.idle_stop_s;
         max_photos = v1.max_photos;
-        reserve_kb = v1.reserve_kb;
         hflip = v1.hflip;
         vflip = v1.vflip;
         live_preview = v1.live_preview;
-    } else if (version == 2) {
+    } else if (version == 2 || version == 3) {
         if (len != sizeof(camera_settings_blob_t)) return false;
-        camera_settings_blob_t v2;
+        camera_settings_blob_t v2;      // v2 and v3 share the layout
         memcpy(&v2, blob, sizeof(v2));
         if (v2.hflip > 1 || v2.vflip > 1 || v2.live_preview > 1) return false;
         width = v2.width;
@@ -105,7 +117,7 @@ static inline bool camera_settings_unpack(const void *blob, size_t len, camera_s
         photo_quality = v2.photo_quality;
         idle_stop_s = v2.idle_stop_s;
         max_photos = v2.max_photos;
-        reserve_kb = v2.reserve_kb;
+        if (version == 3) store_kb = v2.store_kb;
         hflip = v2.hflip;
         vflip = v2.vflip;
         live_preview = v2.live_preview;
@@ -114,7 +126,7 @@ static inline bool camera_settings_unpack(const void *blob, size_t len, camera_s
     }
     camera_settings_t v = {
         .preview_quality = preview_quality, .photo_quality = photo_quality,
-        .idle_stop_s = idle_stop_s, .max_photos = max_photos, .reserve_kb = reserve_kb,
+        .idle_stop_s = idle_stop_s, .max_photos = max_photos, .store_kb = store_kb,
         .hflip = hflip, .vflip = vflip, .live_preview = live_preview,
         .width = width, .height = height,
     };
@@ -183,7 +195,7 @@ typedef enum {
     CAMERA_STAGE_NONE,          // No failure
     CAMERA_STAGE_CAMERA,        // Camera disabled / not detected / init failed
     CAMERA_STAGE_CAPTURE,       // Stream, frame or JPEG encoding failed
-    CAMERA_STAGE_STORAGE,       // Storage not mounted, full or the write failed
+    CAMERA_STAGE_STORAGE,       // PSRAM photo store: photo larger than the budget or out of PSRAM
 } camera_stage_t;
 
 static inline const char *camera_stage_name(camera_stage_t stage)
@@ -227,19 +239,6 @@ static inline bool camera_photo_name(long seq, char *dst, size_t dst_size)
     if (!dst || dst_size < CAMERA_PHOTO_NAME_LEN || seq < 1 || seq > CAMERA_PHOTO_SEQ_MAX) return false;
     snprintf(dst, dst_size, "IMG%05ld.JPG", seq);
     return true;
-}
-
-/** Number of oldest photos to delete before saving one more, so at most `keep` remain. */
-static inline int camera_prune_count(int count, int keep)
-{
-    if (keep < 1) keep = 1;
-    return count >= keep ? count - keep + 1 : 0;
-}
-
-/** Enough free space for a photo of need_kb while leaving reserve_kb for the log store. */
-static inline bool camera_storage_ok(uint32_t free_kb, uint32_t need_kb, uint32_t reserve_kb)
-{
-    return free_kb >= reserve_kb && free_kb - reserve_kb >= need_kb;
 }
 
 /** Largest size with the source aspect ratio that fits into max_w x max_h (at least 1x1). */
@@ -292,6 +291,40 @@ static inline bool camera_scale_to_rgb565(const uint8_t *src, int src_w, int src
             const uint8_t *p = row + sx * bpp;
             *dst++ = bpp == 2 ? (uint16_t)(p[0] | (uint16_t)p[1] << 8) :
                        (uint16_t)((p[2] & 0xf8) << 8 | (p[1] & 0xfc) << 3 | p[0] >> 3);
+        }
+    }
+    return true;
+}
+
+/** Subsampling step for QR decoding: frames wider than 1280 px are halved (bounded decode time). */
+static inline int camera_gray_step(int w, int h)
+{
+    return (w > 1280 || h > 1280) ? 2 : 1;
+}
+
+/**
+ * Luma (BT.601, Y = (77 R + 150 G + 29 B) >> 8) of every step-th pixel into dst (dst_w x dst_h,
+ * packed), dst_w = w / step, dst_h = h / step. RGB888 frames are B,G,R bytes; RGB565 is little-endian.
+ */
+static inline bool camera_frame_to_gray(const uint8_t *src, int w, int h, size_t stride, int bpp,
+                                        size_t available, int step, uint8_t *dst, int dst_w, int dst_h)
+{
+    if (!src || !dst || step < 1 || !camera_frame_valid(w, h, stride, bpp, available) ||
+        dst_w != w / step || dst_h != h / step || dst_w < 1 || dst_h < 1) return false;
+    for (int y = 0; y < dst_h; y++) {
+        const uint8_t *row = src + (size_t)y * step * stride;
+        for (int x = 0; x < dst_w; x++) {
+            const uint8_t *p = row + (size_t)x * step * bpp;
+            unsigned r, g, b;
+            if (bpp == 3) {
+                b = p[0]; g = p[1]; r = p[2];
+            } else {
+                unsigned v = p[0] | (unsigned)p[1] << 8;
+                r = (v >> 11) & 0x1f; r = (r << 3) | (r >> 2);
+                g = (v >> 5) & 0x3f;  g = (g << 2) | (g >> 4);
+                b = v & 0x1f;         b = (b << 3) | (b >> 2);
+            }
+            *dst++ = (uint8_t)((77 * r + 150 * g + 29 * b) >> 8);
         }
     }
     return true;

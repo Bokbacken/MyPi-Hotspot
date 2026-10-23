@@ -1,28 +1,28 @@
 #include "camera.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_psram.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "logstore.h"
 #include "nvs.h"
+#include "photo_store.h"
 #include "sdkconfig.h"
 
 #if CONFIG_MYPI_CAMERA_ENABLE
 #include <sys/ioctl.h>
 #include "driver/jpeg_encode.h"
-#include "esp_heap_caps.h"
 #include "esp_video_device.h"
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
@@ -58,7 +58,42 @@ static camera_status_t s_status_snapshot = {.state = CAMERA_STATE_DISABLED};
 #else
 #define CAM_VFLIP 0
 #endif
-#define STORE_LOCK_MS       5000
+// PSRAM that must stay free after a photo is stored (camera restarts, LVGL, HTTP, Wi-Fi buffers).
+#define PSRAM_HEADROOM      (1024 * 1024)
+
+// --- Volatile photo store (v0.11.0): JPEGs in PSRAM only, nothing on flash ---
+static SemaphoreHandle_t s_store_lock;
+EXT_RAM_BSS_ATTR static photo_store_t s_store;     // 4 KB index, photos are separate PSRAM blocks
+
+static void *store_alloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    if (!esp_psram_is_initialized()) return NULL;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < size + PSRAM_HEADROOM) return NULL;
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void store_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    heap_caps_free(ptr);
+}
+
+static void store_lock(void *ctx) { (void)ctx; xSemaphoreTake(s_store_lock, portMAX_DELAY); }
+static void store_unlock(void *ctx) { (void)ctx; xSemaphoreGive(s_store_lock); }
+
+static const photo_store_ops_t STORE_OPS = {store_alloc, store_free, store_lock, store_unlock, NULL};
+
+static bool store_ready(void) { return s_store_lock != NULL; }
+
+static void store_init(void)
+{
+    if (s_store_lock) return;
+    SemaphoreHandle_t m = xSemaphoreCreateMutex();
+    if (!m) return;
+    photo_store_init(&s_store, &STORE_OPS);
+    s_store_lock = m;
+}
 
 void camera_settings_defaults(camera_settings_t *out)
 {
@@ -68,7 +103,7 @@ void camera_settings_defaults(camera_settings_t *out)
         .photo_quality = CONFIG_MYPI_CAMERA_JPEG_QUALITY,
         .idle_stop_s = CONFIG_MYPI_CAMERA_IDLE_STOP_S,
         .max_photos = CONFIG_MYPI_CAMERA_MAX_PHOTOS,
-        .reserve_kb = CONFIG_MYPI_CAMERA_STORAGE_RESERVE_KB,
+        .store_kb = CONFIG_MYPI_CAMERA_PSRAM_STORE_KB,
         .hflip = CAM_HFLIP, .vflip = CAM_VFLIP, .live_preview = true,
     };
 }
@@ -205,6 +240,10 @@ esp_err_t camera_save_settings(const camera_settings_t *in)
     }
     if (err == ESP_OK) s_settings = next;
     unlock();
+    if (err == ESP_OK && store_ready()) {
+        int pruned = photo_store_trim(&s_store, next.max_photos, (size_t)next.store_kb * 1024);
+        if (pruned) ESP_LOGI(TAG, "Dropped %d old photo(s) for the new retention limits", pruned);
+    }
     return err;
 }
 
@@ -220,74 +259,70 @@ void camera_get_status(camera_status_t *out)
     }
 }
 
-bool camera_photo_path(const char *name, char *dst, size_t dst_size)
-{
-    if (!camera_photo_name_ok(name) || !dst) return false;
-    return snprintf(dst, dst_size, CAMERA_PHOTO_DIR "/%s", name) < (int)dst_size;
-}
-
-/** Photos in the directory (any order); logstore lock held by the caller. */
-static int scan_photos(camera_photo_t *out, int max, long *max_seq)
-{
-    int n = 0;
-    if (max_seq) *max_seq = 0;
-    DIR *d = opendir(CAMERA_PHOTO_DIR);
-    if (!d) return 0;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        long seq = camera_photo_seq(e->d_name);
-        if (seq < 0) continue;
-        if (max_seq && seq > *max_seq) *max_seq = seq;
-        if (out && n < max) {
-            strlcpy(out[n].name, e->d_name, sizeof(out[n].name));
-            char path[48];
-            struct stat st;
-            camera_photo_path(e->d_name, path, sizeof(path));
-            out[n].size = stat(path, &st) == 0 ? (uint32_t)st.st_size : 0;
-        }
-        n++;
-    }
-    closedir(d);
-    return n;
-}
-
-static int cmp_newest_first(const void *a, const void *b)
-{
-    return strcmp(((const camera_photo_t *)b)->name, ((const camera_photo_t *)a)->name);
-}
-
 int camera_photo_list(camera_photo_t *out, int max)
 {
-    logstore_info_t info;
-    logstore_get_info(&info);
-    if (!info.mounted || !out || max <= 0 || !logstore_lock(STORE_LOCK_MS)) return 0;
-    int count = scan_photos(NULL, 0, NULL);
-    camera_photo_t *list = count > 0 ? calloc((size_t)count, sizeof(*list)) : NULL;
-    if (!list) {
-        logstore_unlock();
-        return 0;
+    if (!store_ready() || !out || max <= 0) return 0;
+    if (max > PHOTO_STORE_MAX) max = PHOTO_STORE_MAX;
+    photo_store_info_t *list = calloc((size_t)max, sizeof(*list));
+    if (!list) return 0;
+    int n = photo_store_list(&s_store, list, max);
+    for (int i = 0; i < n; i++) {
+        strlcpy(out[i].name, list[i].name, sizeof(out[i].name));
+        out[i].size = list[i].size;
     }
-    int n = scan_photos(list, count, NULL);
-    logstore_unlock();
-    if (n > count) n = count;
-    qsort(list, n, sizeof(list[0]), cmp_newest_first);
-    if (n > max) n = max;
-    memcpy(out, list, (size_t)n * sizeof(*out));
     free(list);
     return n;
 }
 
 esp_err_t camera_photo_delete(const char *name)
 {
-    char path[48];
-    if (!camera_photo_path(name, path, sizeof(path))) return ESP_ERR_INVALID_ARG;
-    logstore_info_t info;
-    logstore_get_info(&info);
-    if (!info.mounted) return ESP_ERR_NOT_FOUND;
-    if (!logstore_lock(STORE_LOCK_MS)) return ESP_ERR_TIMEOUT;
-    int r = unlink(path);
-    logstore_unlock();
-    return r == 0 ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (!camera_photo_name_ok(name)) return ESP_ERR_INVALID_ARG;
+    if (!store_ready()) return ESP_ERR_NOT_FOUND;
+    return photo_store_delete(&s_store, name) == PHOTO_STORE_OK ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t camera_photo_open(const char *name, camera_photo_ref_t **ref, const uint8_t **data, size_t *len)
+{
+    if (!ref || !data || !len) return ESP_ERR_INVALID_ARG;
+    *ref = NULL;
+    *data = NULL;
+    *len = 0;
+    if (!camera_photo_name_ok(name)) return ESP_ERR_INVALID_ARG;
+    photo_blob_t *b = store_ready() ? photo_store_get(&s_store, name) : NULL;
+    if (!b) return ESP_ERR_NOT_FOUND;
+    *ref = b;
+    *data = photo_blob_data(b);
+    *len = photo_blob_len(b);
+    return ESP_OK;
+}
+
+void camera_photo_close(camera_photo_ref_t *ref)
+{
+    if (ref && store_ready()) photo_store_put(&s_store, ref);
+}
+
+void camera_store_info(camera_store_info_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->psram = esp_psram_is_initialized();
+    // Plain int reads (no camera lock): the status must not wait for a running capture.
+    camera_settings_t st;
+    if (settings_ready()) st = s_settings;
+    else camera_settings_defaults(&st);
+    out->max_photos = st.max_photos;
+    out->budget_bytes = (uint32_t)st.store_kb * 1024;
+    if (store_ready()) {
+        photo_store_stats_t ps;
+        photo_store_stats(&s_store, &ps);
+        out->count = ps.count;
+        out->used_bytes = (uint32_t)ps.used_bytes;
+        out->pending_bytes = (uint32_t)ps.pending_bytes;
+    }
+    if (out->psram) {
+        out->psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        out->psram_largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    }
 }
 
 #if CONFIG_MYPI_CAMERA_ENABLE
@@ -770,27 +805,31 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len)
     return err;
 }
 
-/** Make room (count limit) and pick the next file name. logstore lock held. */
-static esp_err_t prepare_name(char *name, size_t name_size)
+esp_err_t camera_snapshot_gray(camera_gray_alloc_t alloc, void *ctx, int *w_out, int *h_out)
 {
-    mkdir(CAMERA_PHOTO_DIR, 0775);
-    long max_seq = 0;
-    int count = scan_photos(NULL, 0, &max_seq);
-    camera_photo_t *list = count > 0 ? calloc((size_t)count, sizeof(camera_photo_t)) : NULL;
-    if (count > 0 && !list) return ESP_ERR_NO_MEM;
-    int stored = scan_photos(list, count, NULL);
-    int drop = camera_prune_count(count, s_settings.max_photos);
-    if (drop > stored) drop = stored;
-    if (stored > 1) qsort(list, stored, sizeof(list[0]), cmp_newest_first);
-    for (int i = 0; i < drop; i++) {
-        char path[48];
-        camera_photo_path(list[stored - 1 - i].name, path, sizeof(path));
-        if (unlink(path) == 0) ESP_LOGI(TAG, "Deleted old photo %s (keep %d)", list[stored - 1 - i].name, s_settings.max_photos);
+    if (!alloc || !w_out || !h_out) return ESP_ERR_INVALID_ARG;
+    *w_out = *h_out = 0;
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    esp_err_t err = check_usable();
+    struct v4l2_buffer buf;
+    if (err == ESP_OK) err = frame_get_fresh(&buf);
+    if (err == ESP_OK) {
+        int step = camera_gray_step(s_st.width, s_st.height);
+        int w = s_st.width / step, h = s_st.height / step;
+        uint8_t *dst = alloc(w, h, ctx);
+        if (!dst) {
+            err = ESP_ERR_NO_MEM;
+        } else if (!camera_frame_to_gray(s_buf[buf.index], s_st.width, s_st.height, s_stride, s_bpp,
+                                         buf.bytesused ? buf.bytesused : s_buf_len[buf.index], step, dst, w, h)) {
+            err = ESP_ERR_INVALID_SIZE;
+        } else {
+            *w_out = w;
+            *h_out = h;
+        }
+        frame_put(&buf);
     }
-    free(list);
-    long seq = max_seq + 1;
-    if (!camera_photo_name(seq, name, name_size)) return ESP_ERR_INVALID_SIZE;
-    return ESP_OK;
+    unlock();
+    return err;
 }
 
 esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_out,
@@ -830,44 +869,20 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
     }
     s_st.capture_stage = CAMERA_STAGE_STORAGE;
 
-    // Storage: the FAT partition is shared with the log store.
-    logstore_info_t info;
-    logstore_get_info(&info);
-    uint32_t need_kb = (uint32_t)(len / 1024) + 1;
+    // Storage: a copy in PSRAM only (never flash). Allocation happens before old photos are dropped.
+    unsigned long kb = (unsigned long)(len + 1023) / 1024;
     char name[CAMERA_PHOTO_NAME_LEN] = "";
-    if (!info.mounted) {
-        set_error(ESP_ERR_NOT_FOUND, "Storage not mounted (FAT partition 'storage')");
-        err = ESP_ERR_NOT_FOUND;
-    } else if (!logstore_lock(STORE_LOCK_MS)) {
-        set_error(ESP_ERR_TIMEOUT, "Storage busy, try again");
-        err = ESP_ERR_TIMEOUT;
-    } else {
-        err = prepare_name(name, sizeof(name));
-        if (err == ESP_ERR_INVALID_SIZE) {
-            set_error(err, "Photo numbering full: delete photos");
-        } else if (err != ESP_OK) {
-            set_error(err, "No memory to list photos");
-        } else {
-            logstore_get_info(&info);   // Free space after pruning
-            if (!camera_storage_ok(info.free_kb, need_kb, s_settings.reserve_kb)) {
-                set_error(ESP_ERR_NO_MEM, "Storage full (%lu KB free, photo %lu KB): delete photos",
-                          (unsigned long)info.free_kb, (unsigned long)need_kb);
-                err = ESP_ERR_NO_MEM;
-            } else {
-                char path[48];
-                camera_photo_path(name, path, sizeof(path));
-                FILE *f = fopen(path, "wb");
-                size_t written = f ? fwrite(s_jpeg_out, 1, len, f) : 0;
-                bool closed = f && fclose(f) == 0;
-                if (!f || written != len || !closed) {
-                    int e = errno;
-                    unlink(path);
-                    set_error(ESP_ERR_INVALID_SIZE, "Write failed: %s (errno %d)", name, e);
-                    err = ESP_ERR_INVALID_SIZE;
-                }
-            }
-        }
-        logstore_unlock();
+    photo_store_err_t pe = store_ready() ?
+        photo_store_add(&s_store, s_jpeg_out, len, s_settings.max_photos, (size_t)s_settings.store_kb * 1024, name) :
+        PHOTO_STORE_ERR_NO_MEM;
+    if (pe == PHOTO_STORE_ERR_TOO_LARGE) {
+        set_error(ESP_ERR_INVALID_SIZE, "Photo (%lu KB) exceeds the PSRAM photo budget (%d KB)", kb, s_settings.store_kb);
+        err = ESP_ERR_INVALID_SIZE;
+    } else if (pe != PHOTO_STORE_OK) {
+        set_error(ESP_ERR_NO_MEM, esp_psram_is_initialized() ?
+                  "Out of PSRAM for the photo (%lu KB): delete photos or lower quality/resolution" :
+                  "No PSRAM: photos cannot be stored (%lu KB)", kb);
+        err = ESP_ERR_NO_MEM;
     }
     if (err == ESP_OK) {
         clear_error();
@@ -876,7 +891,7 @@ esp_err_t camera_capture_save(char *name_out, size_t name_size, uint32_t *bytes_
         strlcpy(s_st.last_photo, name, sizeof(s_st.last_photo));
         if (name_out) strlcpy(name_out, name, name_size);
         if (bytes_out) *bytes_out = (uint32_t)len;
-        ESP_LOGI(TAG, "Saved %s/%s (%u bytes, %ux%u)", CAMERA_PHOTO_DIR, name, (unsigned)len, s_st.width, s_st.height);
+        ESP_LOGI(TAG, "Stored %s in PSRAM (%u bytes, %ux%u)", name, (unsigned)len, s_st.width, s_st.height);
     } else if (result) {
         result->stage = s_st.capture_stage;
         strlcpy(result->error, s_st.last_error[0] ? s_st.last_error : esp_err_to_name(err),
@@ -903,6 +918,7 @@ static void idle_task(void *arg)
 esp_err_t camera_init(void)
 {
     if (s_lock) return ESP_OK;
+    store_init();
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -997,6 +1013,7 @@ esp_err_t camera_init(void)
 esp_err_t camera_init(void)
 {
     if (s_lock) return ESP_ERR_NOT_SUPPORTED;
+    store_init();
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -1019,6 +1036,14 @@ esp_err_t camera_snapshot_jpeg(int quality, uint8_t **jpeg, size_t *len)
     (void)quality;
     if (jpeg) *jpeg = NULL;
     if (len) *len = 0;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t camera_snapshot_gray(camera_gray_alloc_t alloc, void *ctx, int *w_out, int *h_out)
+{
+    (void)alloc; (void)ctx;
+    if (w_out) *w_out = 0;
+    if (h_out) *h_out = 0;
     return ESP_ERR_NOT_SUPPORTED;
 }
 

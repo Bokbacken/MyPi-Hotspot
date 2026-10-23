@@ -16,6 +16,7 @@
 #include "eth.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mdns.h"
@@ -36,6 +37,7 @@ static const char *TAG = "wifi";
 #define BIT_DISCONNECTED    BIT1
 #define BIT_LOG_RSSI        BIT2
 #define BIT_CONNECT_REQ     BIT3
+#define BIT_TXN_DISC        BIT4    // any STA disconnect while a transaction drains the old link
 
 #define LOCK_TIMEOUT_MS     10000
 #define SCAN_MAX            32
@@ -59,6 +61,30 @@ static volatile bool s_ap_ch_dirty;                 // STA_CONNECTED -> wifi_tas
 static volatile bool s_ch_hint_ok = true;           // false after an attempt with the hint failed
 static sta_profile_t s_cur;                 // profile currently in use
 static int s_rr;                            // round robin index for blind attempts
+
+// v0.11.0 connect transaction (Wi-Fi QR import): while s_txn_id != 0 the automatic reconnect /
+// selection is paused and STA events go, tagged with the attempt generation, to s_txn_q.
+static QueueHandle_t s_txn_q;
+static volatile uint32_t s_txn_id;          // active transaction token, 0 = none
+static uint32_t s_txn_seq;
+static volatile uint32_t s_txn_attempt;     // generation of the current connect, 0 = draining
+static uint32_t s_txn_gen;
+static volatile bool s_txn_assoc;           // associated with the target in this attempt
+static char s_txn_ssid[33];
+static volatile uint32_t s_hold_mask;       // profiles skipped by automatic selection (RAM only)
+
+static void txn_push(wifi_txn_ev_type_t type, uint32_t attempt, uint8_t reason)
+{
+    if (!s_txn_q) return;
+    wifi_txn_event_t ev = {.type = type, .attempt = attempt, .reason = reason};
+    if (xQueueSend(s_txn_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "transaction event queue full");
+}
+
+static bool txn_ssid_match(const uint8_t *ssid, size_t len)
+{
+    if (len == 0) return true;  // some failure events carry no SSID: still this attempt's target
+    return len == strlen(s_txn_ssid) && memcmp(ssid, s_txn_ssid, len) == 0;
+}
 
 // AP state
 static bool s_apsta_ok = true;
@@ -115,6 +141,8 @@ static void apply_static_ip(void)
     if (err == ESP_OK) {
         diag_set_wifi(WIFI_STATE_GOT_IP, s_cur.ip, 0);
         xEventGroupSetBits(s_events, BIT_GOT_IP | BIT_LOG_RSSI);
+        uint32_t attempt = s_txn_attempt;
+        if (s_txn_id && attempt && s_txn_assoc) txn_push(WIFI_TXN_EV_GOT_IP, attempt, 0);
     }
 }
 
@@ -135,6 +163,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_ap_ch_dirty = true;
             ESP_LOGI(TAG, "Associated with \"%.*s\" on channel %d", ev->ssid_len, (const char *)ev->ssid, ev->channel);
             diag_set_wifi(WIFI_STATE_CONNECTED, NULL, 0);
+            uint32_t attempt = s_txn_attempt;
+            if (s_txn_id && attempt && txn_ssid_match(ev->ssid, ev->ssid_len)) {
+                s_txn_assoc = true;
+                txn_push(WIFI_TXN_EV_ASSOCIATED, attempt, 0);
+            }
             if (s_cur.valid && !s_cur.dhcp) apply_static_ip();
             break;
         }
@@ -145,7 +178,16 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_sta_channel = 0;
             diag_set_wifi(WIFI_STATE_DISCONNECTED, "0.0.0.0", 0);
             xEventGroupClearBits(s_events, BIT_GOT_IP);
-            if (s_ignore_disc) {
+            if (s_txn_id) {
+                // Transaction: the worker decides about retries/rollback; no automatic reconnect.
+                s_ignore_disc = false;
+                xEventGroupSetBits(s_events, BIT_TXN_DISC);
+                uint32_t attempt = s_txn_attempt;
+                if (attempt && txn_ssid_match(ev->ssid, ev->ssid_len)) {
+                    s_txn_assoc = false;
+                    txn_push(WIFI_TXN_EV_DISCONNECTED, attempt, ev->reason);
+                }
+            } else if (s_ignore_disc) {
                 s_ignore_disc = false;
             } else {
                 xEventGroupSetBits(s_events, BIT_DISCONNECTED);
@@ -193,6 +235,8 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         diag_set_wifi(WIFI_STATE_GOT_IP, ip, 0);
         time_service_network_connected();
         xEventGroupSetBits(s_events, BIT_GOT_IP | BIT_LOG_RSSI);
+        uint32_t attempt = s_txn_attempt;
+        if (s_txn_id && attempt && s_txn_assoc) txn_push(WIFI_TXN_EV_GOT_IP, attempt, 0);
     } else if (base == IP_EVENT && id == IP_EVENT_ASSIGNED_IP_TO_CLIENT) {
         ip_event_assigned_ip_to_client_t *ev = data;
         ESP_LOGI(TAG, "DHCP lease on %s: " MACSTR " -> " IPSTR, esp_netif_get_desc(ev->esp_netif), MAC2STR(ev->mac), IP2STR(&ev->ip));
@@ -365,7 +409,12 @@ static bool pick_profile(int forced, sta_profile_t *out, int *slot)
         *slot = forced;
         return sta_profile_get(forced, out) && out->valid;
     }
-    if (sta_profile_count() == 0) {
+    uint32_t hold = s_hold_mask;
+    int eligible = 0;
+    for (int i = 0; i < STA_PROFILE_MAX; i++) {
+        if (!(hold & (1u << i)) && sta_profile_get(i, out) && out->valid) eligible++;
+    }
+    if (eligible == 0) {    // v0.11.0: held (saved-only) profiles do not replace the Kconfig default
         *slot = -1;
         kconfig_profile(out);
         return out->valid;
@@ -376,7 +425,7 @@ static bool pick_profile(int forced, sta_profile_t *out, int *slot)
         int n = scan_locked(recs, SCAN_MAX);
         for (int i = 0; i < n; i++) {
             int s = sta_profile_find((const char *)recs[i].ssid);
-            if (s >= 0 && recs[i].rssi > best_rssi) {
+            if (s >= 0 && !(hold & (1u << s)) && recs[i].rssi > best_rssi) {
                 best = s;
                 best_rssi = recs[i].rssi;
             }
@@ -391,7 +440,7 @@ static bool pick_profile(int forced, sta_profile_t *out, int *slot)
     // Nothing visible (or hidden SSIDs): try the saved profiles in turn.
     for (int i = 0; i < STA_PROFILE_MAX; i++) {
         int idx = (s_rr + i) % STA_PROFILE_MAX;
-        if (sta_profile_get(idx, out) && out->valid) {
+        if (!(hold & (1u << idx)) && sta_profile_get(idx, out) && out->valid) {
             s_rr = idx + 1;
             *slot = idx;
             ESP_LOGI(TAG, "No saved network visible; trying profile %d \"%s\"", idx, out->ssid);
@@ -401,24 +450,28 @@ static bool pick_profile(int forced, sta_profile_t *out, int *slot)
     return false;
 }
 
-static void connect_now(int forced)
+/** Minimum auth mode for a profile (v0.11.0: explicit security from a Wi-Fi QR code). */
+static wifi_auth_mode_t profile_authmode(const sta_profile_t *p)
 {
-    if (!lock()) {
-        xEventGroupSetBits(s_events, BIT_DISCONNECTED);
-        return;
+    switch (p->security) {
+    case STA_SEC_OPEN: return WIFI_AUTH_OPEN;
+    case STA_SEC_WPA:  return WIFI_AUTH_WPA_PSK;
+    case STA_SEC_WPA2: return WIFI_AUTH_WPA2_PSK;
+    case STA_SEC_WPA3: return WIFI_AUTH_WPA3_PSK;
+    default:           return p->pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
     }
-    sta_profile_t p;
-    int slot = -1;
-    if (!pick_profile(forced, &p, &slot)) {
-        ESP_LOGW(TAG, "No STA profile to connect to (add one in the web UI)");
-        unlock();
-        xEventGroupSetBits(s_events, BIT_DISCONNECTED);
-        return;
-    }
+}
+
+/** Configure the STA for profile p and start connecting; caller holds the lock. */
+static esp_err_t connect_profile_locked(const sta_profile_t *pp, int slot)
+{
+    sta_profile_t p = *pp;
     wifi_config_t w = {0};
-    strlcpy((char *)w.sta.ssid, p.ssid, sizeof(w.sta.ssid));
-    strlcpy((char *)w.sta.password, p.pass, sizeof(w.sta.password));
-    w.sta.threshold.authmode = p.pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    // v0.11.0: memcpy, not strlcpy - a 32-byte SSID fills the whole (unterminated) field.
+    memcpy(w.sta.ssid, p.ssid, strnlen(p.ssid, sizeof(w.sta.ssid)));
+    // v0.11.0: memcpy, not strlcpy - a 64 hex-digit PSK fills the whole (unterminated) field.
+    memcpy(w.sta.password, p.pass, strnlen(p.pass, sizeof(w.sta.password)));
+    w.sta.threshold.authmode = profile_authmode(&p);
     w.sta.pmf_cfg.capable = true;
     w.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     // v0.9.3: scan hint = last known STA channel (the scan starts there; 0 = full scan). Only a
@@ -440,6 +493,28 @@ static void connect_now(int forced)
                  p.dhcp ? "DHCP" : "static IP");
         err = esp_wifi_connect();
     }
+    return err;
+}
+
+static void connect_now(int forced)
+{
+    if (!lock()) {
+        xEventGroupSetBits(s_events, BIT_DISCONNECTED);
+        return;
+    }
+    if (s_txn_id) {     // a connect transaction owns the station; it restarts the loop when done
+        unlock();
+        return;
+    }
+    sta_profile_t p;
+    int slot = -1;
+    if (!pick_profile(forced, &p, &slot)) {
+        ESP_LOGW(TAG, "No STA profile to connect to (add one in the web UI)");
+        unlock();
+        xEventGroupSetBits(s_events, BIT_DISCONNECTED);
+        return;
+    }
+    esp_err_t err = connect_profile_locked(&p, slot);
     unlock();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "connect: %s", esp_err_to_name(err));
@@ -467,6 +542,19 @@ int wifi_scan(wifi_scan_entry_t *out, int max)
     return n < 0 ? n : cnt;
 }
 
+/** A user connect/disconnect ends a running transaction (its worker stops without rollback). */
+static void txn_supersede(void)
+{
+    if (!s_txn_id || !lock()) return;
+    if (s_txn_id) {
+        ESP_LOGI(TAG, "Connect transaction superseded by a user request");
+        s_txn_id = 0;
+        s_txn_attempt = 0;
+        txn_push(WIFI_TXN_EV_SUPERSEDED, 0, 0);
+    }
+    unlock();
+}
+
 esp_err_t wifi_connect_profile(int slot)
 {
     if (!s_events) return ESP_ERR_INVALID_STATE;
@@ -474,6 +562,9 @@ esp_err_t wifi_connect_profile(int slot)
         sta_profile_t p;
         if (!sta_profile_get(slot, &p) || !p.valid) return ESP_ERR_NOT_FOUND;
     }
+    txn_supersede();
+    // An explicit connect releases the auto-select hold of that slot; "auto" releases all.
+    s_hold_mask = slot >= 0 ? (s_hold_mask & ~(1u << slot)) : 0;
     s_manual_off = false;
     s_pinned_slot = slot;
     if (xEventGroupGetBits(s_events) & BIT_GOT_IP) {
@@ -487,9 +578,139 @@ esp_err_t wifi_connect_profile(int slot)
 esp_err_t wifi_disconnect(void)
 {
     if (!s_events) return ESP_ERR_INVALID_STATE;
+    txn_supersede();
     s_manual_off = true;
     ESP_LOGI(TAG, "STA disconnect requested (stays off until connect)");
     return esp_wifi_disconnect();
+}
+
+void wifi_sta_snapshot(wifi_sta_snapshot_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->slot = -1;
+    out->pinned_slot = s_pinned_slot;
+    out->manual_off = s_manual_off;
+    if (!s_events || !lock()) return;
+    out->connected = (xEventGroupGetBits(s_events) & BIT_GOT_IP) != 0;
+    out->slot = s_cur_slot;
+    out->profile = s_cur;
+    unlock();
+    esp_netif_ip_info_t ip;
+    if (out->connected && s_sta && esp_netif_get_ip_info(s_sta, &ip) == ESP_OK) {
+        snprintf(out->ip, sizeof(out->ip), IPSTR, IP2STR(&ip.ip));
+    }
+}
+
+void wifi_autoselect_hold(int slot, bool hold)
+{
+    if (slot < 0 || slot >= STA_PROFILE_MAX) return;
+    if (hold) s_hold_mask |= 1u << slot;
+    else s_hold_mask &= ~(1u << slot);
+}
+
+uint32_t wifi_autoselect_held(void) { return s_hold_mask; }
+
+uint32_t wifi_txn_begin(void)
+{
+    if (!s_events || !s_sta || !s_cp.wifi_init_ok || rescue_active()) return 0;
+    if (!s_txn_q) {
+        QueueHandle_t q = xQueueCreate(16, sizeof(wifi_txn_event_t));
+        if (!q) return 0;
+        if (!lock()) {
+            vQueueDelete(q);
+            return 0;
+        }
+        if (!s_txn_q) s_txn_q = q;
+        else vQueueDelete(q);
+        unlock();
+    }
+    if (!lock()) return 0;
+    uint32_t id = 0;
+    if (!s_txn_id) {
+        if (++s_txn_seq == 0) s_txn_seq = 1;
+        id = s_txn_seq;
+        s_txn_attempt = 0;
+        s_txn_assoc = false;
+        s_ignore_disc = false;
+        xQueueReset(s_txn_q);
+        s_txn_id = id;
+        ESP_LOGI(TAG, "Connect transaction %lu started (automatic reconnect paused)", (unsigned long)id);
+    }
+    unlock();
+    return id;
+}
+
+esp_err_t wifi_txn_connect(uint32_t txn, const sta_profile_t *p, int slot, uint32_t *attempt_out)
+{
+    *attempt_out = 0;
+    if (!txn || !p || !p->valid) return ESP_ERR_INVALID_ARG;
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    if (s_txn_id != txn) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Drain: events of the old link/attempt are dropped while s_txn_attempt == 0.
+    s_txn_attempt = 0;
+    s_txn_assoc = false;
+    xEventGroupClearBits(s_events, BIT_TXN_DISC);
+    bool linked = s_sta_channel != 0 || (xEventGroupGetBits(s_events) & BIT_GOT_IP);
+    esp_wifi_disconnect();      // also aborts a connect in progress; "not connected" is fine
+    unlock();
+    if (linked) {
+        xEventGroupWaitBits(s_events, BIT_TXN_DISC, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    if (!lock()) return ESP_ERR_TIMEOUT;
+    if (s_txn_id != txn) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (++s_txn_gen == 0) s_txn_gen = 1;
+    strlcpy(s_txn_ssid, p->ssid, sizeof(s_txn_ssid));
+    s_txn_assoc = false;
+    s_txn_attempt = s_txn_gen;
+    esp_err_t err = connect_profile_locked(p, slot);
+    if (err == ESP_OK) *attempt_out = s_txn_attempt;
+    else s_txn_attempt = 0;
+    unlock();
+    if (err != ESP_OK) ESP_LOGW(TAG, "transaction connect: %s", esp_err_to_name(err));
+    return err;
+}
+
+bool wifi_txn_next_event(uint32_t txn, wifi_txn_event_t *ev, uint32_t timeout_ms)
+{
+    if (!s_txn_q) return false;
+    if (s_txn_id != txn) {      // superseded: report it even if the queue event was consumed
+        ev->type = WIFI_TXN_EV_SUPERSEDED;
+        ev->attempt = 0;
+        ev->reason = 0;
+        return true;
+    }
+    return xQueueReceive(s_txn_q, ev, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void wifi_txn_end(uint32_t txn, int pinned_slot, bool manual_off, bool keep_link)
+{
+    if (!txn) return;
+    while (!lock()) {}  // must not leave automatic reconnect paused: wait out a long RPC
+    if (s_txn_id != txn) {
+        unlock();
+        return;
+    }
+    s_txn_id = 0;
+    s_txn_attempt = 0;
+    s_pinned_slot = pinned_slot;
+    s_manual_off = manual_off;
+    bool up = keep_link && (xEventGroupGetBits(s_events) & BIT_GOT_IP) != 0;
+    if (!keep_link || manual_off) {
+        // Stop a link/attempt that must not survive the transaction. Its disconnect event (if
+        // any) arrives outside the transaction and simply triggers the normal reconnect.
+        esp_wifi_disconnect();
+    }
+    unlock();
+    ESP_LOGI(TAG, "Connect transaction %lu ended (%s)", (unsigned long)txn, up ? "connected" : "not connected");
+    if (!up && !manual_off) xEventGroupSetBits(s_events, BIT_DISCONNECTED);    // resume normal reconnect
 }
 
 void wifi_get_sta_extra(wifi_sta_extra_t *out)

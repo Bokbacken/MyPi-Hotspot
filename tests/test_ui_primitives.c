@@ -242,7 +242,7 @@ static void test_camera_core(void)
     assert(strcmp(camera_stage_name(CAMERA_STAGE_STORAGE), "storage") == 0);
     assert(strcmp(camera_stage_name(CAMERA_STAGE_NONE), "none") == 0);
 
-    // Photo names: 8.3 FAT names only (no LFN on the storage partition), never a path.
+    // Photo names: fixed IMGnnnnn.JPG names only (PSRAM store keys), never a path.
     assert(camera_photo_name_ok("IMG00001.JPG"));
     assert(!camera_photo_name_ok("IMG0001.JPG") && !camera_photo_name_ok("img00001.jpg"));
     assert(!camera_photo_name_ok("IMG0000/.JPG") && !camera_photo_name_ok("../IMG001.J") && !camera_photo_name_ok(NULL));
@@ -252,11 +252,6 @@ static void test_camera_core(void)
     assert(camera_photo_name(CAMERA_PHOTO_SEQ_MAX, name, sizeof(name)) && camera_photo_seq(name) == CAMERA_PHOTO_SEQ_MAX);
     assert(!camera_photo_name(0, name, sizeof(name)) && !camera_photo_name(CAMERA_PHOTO_SEQ_MAX + 1, name, sizeof(name)));
     assert(!camera_photo_name(1, name, CAMERA_PHOTO_NAME_LEN - 1));
-
-    // Keep at most N photos: delete enough of the oldest to make room for one more.
-    assert(camera_prune_count(0, 20) == 0 && camera_prune_count(19, 20) == 0);
-    assert(camera_prune_count(20, 20) == 1 && camera_prune_count(25, 20) == 6 && camera_prune_count(3, 0) == 3);
-    assert(camera_storage_ok(1000, 100, 512) && !camera_storage_ok(600, 100, 512));
 
     int w, h;
     camera_fit(800, 640, 240, 200, &w, &h);
@@ -280,7 +275,7 @@ static void test_camera_settings(void)
 {
     camera_settings_t s = {
         .preview_quality = 95, .photo_quality = 95, .idle_stop_s = 10,
-        .max_photos = 20, .reserve_kb = 512, .live_preview = true,
+        .max_photos = 20, .store_kb = 4096, .live_preview = true,
     };
     camera_capabilities_t caps = {.modes = {{800, 640}}, .mode_count = 1};
     assert(camera_settings_valid(&s) && camera_settings_supported(&s, &caps));
@@ -289,7 +284,8 @@ static void test_camera_settings(void)
     camera_settings_t loaded = {0};
     assert(camera_settings_unpack(&blob, sizeof(blob), &loaded));
     assert(loaded.preview_quality == 95 && loaded.photo_quality == 95 && loaded.live_preview);
-    assert(loaded.idle_stop_s == 10 && loaded.max_photos == 20 && loaded.reserve_kb == 512);
+    assert(blob.version == 3);
+    assert(loaded.idle_stop_s == 10 && loaded.max_photos == 20 && loaded.store_kb == 4096);
     assert(loaded.width == 0 && loaded.height == 0);
     assert(!camera_settings_unpack(&blob, sizeof(blob) - 1, &loaded));
     blob.version++;
@@ -302,12 +298,23 @@ static void test_camera_settings(void)
     assert(!camera_settings_unpack(&blob, sizeof(blob), &loaded));
     assert(loaded.photo_quality == 95); // A rejected blob never changes the active settings.
 
+    // Older blobs carry the flash reserve_kb: it is ignored and store_kb keeps the caller's default.
     camera_settings_blob_v1_t old_blob = {
         .version = 1, .preview_quality = 95, .photo_quality = 95, .idle_stop_s = 10,
         .max_photos = 20, .reserve_kb = 512, .live_preview = 1,
     };
+    loaded.store_kb = 2048;
     assert(camera_settings_unpack(&old_blob, sizeof(old_blob), &loaded));
-    assert(loaded.width == 0 && loaded.height == 0 && loaded.photo_quality == 95);
+    assert(loaded.width == 0 && loaded.height == 0 && loaded.photo_quality == 95 && loaded.store_kb == 2048);
+    camera_settings_blob_v2_t v2_blob = {
+        .version = 2, .preview_quality = 80, .photo_quality = 90, .idle_stop_s = 10,
+        .max_photos = 30, .reserve_kb = 0, .live_preview = 0, .width = 800, .height = 640,
+    };
+    loaded.store_kb = 1024;
+    assert(camera_settings_unpack(&v2_blob, sizeof(v2_blob), &loaded));
+    assert(loaded.max_photos == 30 && loaded.width == 800 && loaded.store_kb == 1024 && !loaded.live_preview);
+    v2_blob.reserve_kb = 4096;      // Out of the old 0..2048 range, but ignored now
+    assert(camera_settings_unpack(&v2_blob, sizeof(v2_blob), &loaded) && loaded.store_kb == 1024);
 
     s.width = 800; s.height = 640;
     assert(camera_settings_supported(&s, &caps));
@@ -336,8 +343,8 @@ static void test_camera_settings(void)
     assert(loaded.width == 1920 && loaded.height == 1080);
     s.width = 2592; s.height = 1944;
     assert(!camera_settings_supported(&s, &caps));
-    int *fields[] = {&s.preview_quality, &s.photo_quality, &s.idle_stop_s, &s.max_photos, &s.reserve_kb};
-    const int lo[] = {10, 10, 2, 1, 0}, hi[] = {100, 100, 600, 500, 2048};
+    int *fields[] = {&s.preview_quality, &s.photo_quality, &s.idle_stop_s, &s.max_photos, &s.store_kb};
+    const int lo[] = {10, 10, 2, 1, CAMERA_STORE_KB_MIN}, hi[] = {100, 100, 600, 500, CAMERA_STORE_KB_MAX};
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
         int saved = *fields[i];
         *fields[i] = lo[i]; assert(camera_settings_valid(&s));
@@ -346,7 +353,23 @@ static void test_camera_settings(void)
         *fields[i] = hi[i] + 1; assert(!camera_settings_valid(&s));
         *fields[i] = saved;
     }
-    assert(!camera_storage_ok(UINT32_MAX, UINT32_MAX, 1));
+}
+
+static void test_camera_gray(void)
+{
+    // 2x2 RGB888 frame stored B,G,R with a 1-byte row pad: white, black / red, blue.
+    static const uint8_t bgr[] = {255, 255, 255, 0, 0, 0, 0xEE,
+                                  0, 0, 255, 255, 0, 0, 0xEE};
+    uint8_t g[4];
+    assert(camera_frame_to_gray(bgr, 2, 2, 7, 3, sizeof(bgr), 1, g, 2, 2));
+    assert(g[0] == 255 && g[1] == 0 && g[2] == (77 * 255) >> 8 && g[3] == (29 * 255) >> 8);
+    assert(camera_frame_to_gray(bgr, 2, 2, 7, 3, sizeof(bgr), 2, g, 1, 1) && g[0] == 255);
+    assert(!camera_frame_to_gray(bgr, 2, 2, 7, 3, sizeof(bgr) - 1, 1, g, 2, 2));    // Truncated
+    assert(!camera_frame_to_gray(bgr, 2, 2, 7, 3, sizeof(bgr), 1, g, 1, 1));        // Wrong size
+    // RGB565 little-endian: pure green 0x07E0.
+    static const uint8_t rgb565[] = {0xE0, 0x07};
+    assert(camera_frame_to_gray(rgb565, 1, 1, 2, 2, sizeof(rgb565), 1, g, 1, 1) && g[0] == (150 * 255) >> 8);
+    assert(camera_gray_step(1280, 960) == 1 && camera_gray_step(1920, 1080) == 2 && camera_gray_step(800, 640) == 1);
 }
 
 static void test_camera_rgb_conversion(void)
@@ -684,6 +707,7 @@ int main(void)
     test_touch_geometry();
     test_camera_core();
     test_camera_settings();
+    test_camera_gray();
     test_camera_rgb_conversion();
     test_opt_config();
     test_sta_channel();

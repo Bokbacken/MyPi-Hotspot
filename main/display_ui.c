@@ -1200,7 +1200,7 @@ esp_err_t display_ui_init(void)
     display_lock();
     display_fill_screen(COL_BLACK);
     display_unlock();
-    // 6 KB: camera capture (JPEG encode + FAT write) runs here as well.
+    // 6 KB: camera capture (JPEG encode + copy into the PSRAM photo store) runs here as well.
     if (xTaskCreate(ui_worker, "display_ui_worker", 6144, NULL, 2, &s_worker_task) != pdPASS) {
         s_worker_task = NULL;
         ESP_LOGE(TAG, "failed to create local UI worker");

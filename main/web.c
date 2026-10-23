@@ -35,6 +35,7 @@
 #include "rescue.h"
 #include "sdkconfig.h"
 #include "wifi.h"
+#include "wifi_prov.h"
 #include "time_service.h"
 
 static const char *TAG = "web";
@@ -93,23 +94,31 @@ MYPI_BRAND_HEADER
 "Password <input id='spw' type='password' placeholder='empty = keep'> <label><input type='checkbox' id='sclr' style='width:auto'>open (no password)</label><br>"
 "<label><input type='checkbox' id='sd' style='width:auto' checked>DHCP</label> IP <input id='sip'> Mask <input id='smk' value='255.255.255.0'> "
 "Gateway <input id='sgw'> DNS <input id='sdn'> <button onclick='saveSta()'>Save</button></fieldset>"
-"<fieldset id='wan-qr'><legend>Wi-Fi uplink / WAN QR helper</legend>"
-"<p>Read a Wi-Fi QR code using the connected MyPi camera, not this browser's camera. "
-"Nothing is saved or connected automatically.</p>"
-"<button type='button' id='qr-read' onclick='MyPiSerial.wifiQrRead()'>Read Wi-Fi QR from camera</button> "
-"<a href='#camera'>Camera settings</a><p id='qr-msg' role='status'></p>"
-"<div class='cam-view'><img id='qr-img' alt='MyPi camera image for Wi-Fi QR reading'></div>"
-"<details><summary>Manual fallback (browsers without QR decoding)</summary>"
-"<p>Decode the camera image locally with a trusted QR reader, then paste its WIFI: text here. "
-"Do not upload credentials to an online decoder.</p>"
+// v0.11.0 Wi-Fi QR import: decoded on the MyPi (quirc), reviewed here; logic in web_ui.js (MyPiSerial.wifiQr*).
+"<fieldset id='wan-qr'><legend>Add network from Wi-Fi QR code (MyPi camera)</legend>"
+"<p>Hold a Wi-Fi QR code (WIFI:...) in front of the MyPi camera, not this browser's camera. The MyPi decodes it "
+"itself; the password stays on the device. Nothing is saved or connected until you choose below.</p>"
+"<div class='cam-view'><img id='qr-img' alt='MyPi camera image for aiming at the Wi-Fi QR code'></div>"
+"<p><button type='button' id='qr-aim' onclick='MyPiSerial.wifiQrAim()'>Show camera image</button> "
+"<button type='button' id='qr-read' onclick='MyPiSerial.wifiQrScan()'>Scan QR code</button> "
+"<a href='#camera'>Camera settings</a></p><p id='qr-msg' role='status'></p>"
+"<details><summary>Manual entry (WIFI: text from another trusted reader)</summary>"
+"<p>Do not use online decoders for Wi-Fi codes.</p>"
 "<label>Wi-Fi QR text <input id='qr-payload' type='password' autocomplete='off'></label> "
-"<button type='button' onclick='MyPiSerial.wifiQrParse()'>Review QR text</button></details>"
-"<div id='qr-review' hidden><p>Network: <b id='qr-ssid'></b> Security: <b id='qr-security'></b></p>"
-"<label>Password <input id='qr-password' type='password' readonly autocomplete='off'></label>"
-"<p><button type='button' id='qr-fill' onclick='MyPiSerial.wifiQrFill()' disabled>Fill selected STA profile</button> "
-"<button type='button' onclick='MyPiSerial.wifiQrClear()'>Discard</button></p>"
-"<p>Review the selected slot and network settings above, then click Save. Use Connect separately.</p>"
-"</div></fieldset></section>"
+"<button type='button' onclick='MyPiSerial.wifiQrSubmitText()'>Review QR text</button></details>"
+"<div id='qr-review' hidden><table id='qr-info'></table>"
+"<p><button type='button' id='qr-rescan' onclick='MyPiSerial.wifiQrRescan()'>Scan networks again</button></p>"
+"<p><label>Profile slot <select id='qr-slot'></select></label> "
+"<label><input type='checkbox' id='qr-overwrite' style='width:auto'>Replace the network saved in this slot</label></p>"
+"<p><button type='button' id='qr-save' onclick='MyPiSerial.wifiQrCommit(false)'>Add as profile (no connection)</button> "
+"<button type='button' id='qr-connect' onclick='MyPiSerial.wifiQrCommit(true)'>Add and connect</button> "
+"<button type='button' onclick='MyPiSerial.wifiQrDiscard()'>Discard</button></p>"
+"<p><small>Add and connect tries the new network for up to 25 s per attempt; if it fails, the previous connection is "
+"restored automatically. A browser connected through that Wi-Fi uplink may lose this page briefly; reload it to see "
+"the result.</small></p></div>"
+"<p id='qr-progress' role='status'></p>"
+"<p><button type='button' id='qr-cancel' onclick='MyPiSerial.wifiQrCancel()' hidden>Cancel connection attempt</button></p>"
+"</fieldset></section>"
 "<section class='page' data-page='access-point'><h2>Access point (AP profiles)</h2><p id='aps'></p>"
 "<p><button onclick='apStart(-1)'>Start default AP</button> <button onclick='apStop()'>Stop AP</button></p>"
 "<table id='ap'></table><h3 style='font-size:1em'>Connected clients</h3><table id='cl'></table>"
@@ -138,8 +147,8 @@ MYPI_BRAND_HEADER
 "<small>(saved and applied immediately)</small></p>"
 "<h2>Firmware</h2><p class='links'><a href='/update'>P4 firmware update (OTA)</a> <a href='/c5update'>C5 radio firmware update</a> "
 "<button onclick='reboot()'>Reboot</button></p></section>"
-// v0.10.0 Camera page: live preview (one JPEG at a time while the page is visible), shutter, saved
-// photos. Logic in web_ui.js (MyPiSerial.camera*).
+// v0.10.0 Camera page: live preview (one JPEG at a time while the page is visible), shutter,
+// photos (v0.11.0: volatile PSRAM store). Logic in web_ui.js (MyPiSerial.camera*).
 "<section class='page' data-page='camera'><h2>Camera</h2><p id='cam-st'></p>"
 "<div class='cam-view'><img id='cam-img' alt='Camera preview'><p id='cam-err' class='bad' hidden></p></div>"
 "<p><button type='button' id='cam-shutter' onclick='MyPiSerial.cameraCapture()' disabled>Shutter</button> <span id='cam-msg'></span></p>"
@@ -152,13 +161,14 @@ MYPI_BRAND_HEADER
 "<label><input id='cam-live_preview' type='checkbox' style='width:auto' onchange='MyPiSerial.cameraLiveChanged()'>Live preview</label></p>"
 "<p><label>Idle stop (seconds) <input id='cam-idle_stop_s' type='number' min='2' max='600'></label> "
 "<label>Max photos retained <input id='cam-max_photos' type='number' min='1' max='500'></label> "
-"<label>Storage reserve for logs (KB) <input id='cam-reserve_kb' type='number' min='0' max='2048'></label></p>"
+"<label>PSRAM photo budget (KB) <input id='cam-store_kb' type='number' min='256' max='12288'></label></p>"
 "<button type='button' onclick='MyPiSerial.cameraSettingsSave()'>Save and apply</button> "
 "<button type='button' onclick='MyPiSerial.cameraSettingsReset()'>Load defaults</button> "
 "<span id='cam-settings-msg' role='status'></span>"
-"<p><small>Settings persist across reboots. Retention is enforced on the next capture; reserve prevents photos using log space. "
-"Live preview affects this web page only; shutter and the WAN QR helper still work.</small></p></fieldset>"
-"<h3 style='font-size:1em'>Saved photos</h3><p id='cam-store'></p><table id='cam-photos'></table></section>"
+"<p><small>Settings persist across reboots. Photos are kept in PSRAM only (never written to flash): they are lost on "
+"reboot or power loss, so download the ones you want to keep. The oldest photos are removed when the count or the "
+"budget is exceeded. Live preview affects this web page only; shutter and the Wi-Fi QR import still work.</small></p></fieldset>"
+"<h3 style='font-size:1em'>Photos (PSRAM, cleared on reboot)</h3><p id='cam-store'></p><table id='cam-photos'></table></section>"
 // v0.9.3 Optimize page (trimmed): band, one shared STA/AP protocol selector, TX power, STA power save,
 // AP beacon interval, country; v0.9.4 adds the TCP / LwIP / NAT section below; v0.9.5 adds 5 GHz
 // width (HT40/HT20) and the SDIO clock (40/50 MHz, auto-fallback) to the radio grid. Checkboxes and
@@ -243,7 +253,7 @@ MYPI_BRAND_HEADER
 "let SP=[],AP=[],FL=1;"
 "async function ld(){try{"
 "let p=await (await fetch('/api/profiles')).json();SP=p.profiles;"
-"$('sp').innerHTML=tr(['Slot','SSID','IP','Pass',''],1)+SP.filter(x=>x.valid).map(x=>tr([x.slot+(x.slot==p.active?' *':''),esc(x.ssid),"
+"$('sp').innerHTML=tr(['Slot','SSID','IP','Pass',''],1)+SP.filter(x=>x.valid).map(x=>tr([x.slot+(x.slot==p.active?' *':''),esc(x.ssid)+(x.held?' <small>(saved only: not auto-selected)</small>':''),"
 "x.dhcp?'DHCP':esc(x.ip),x.has_pass?'yes':'open',"
 "'<button onclick=edS('+x.slot+')>Edit</button><button onclick=conn('+x.slot+')>Connect</button><button onclick=delS('+x.slot+')>Delete</button>'])).join('');"
 "let a=await (await fetch('/api/approfiles')).json();AP=a.profiles;"
@@ -1143,6 +1153,7 @@ static esp_err_t api_profiles_get(httpd_req_t *req)
     cJSON *j = cJSON_CreateObject();
     cJSON_AddNumberToObject(j, "active", ex.sta_profile);
     cJSON_AddBoolToObject(j, "manual_off", ex.sta_manual_off);
+    uint32_t held = wifi_autoselect_held();
     cJSON *arr = cJSON_AddArrayToObject(j, "profiles");
     for (int i = 0; i < STA_PROFILE_MAX; i++) {
         sta_profile_t p;
@@ -1152,6 +1163,8 @@ static esp_err_t api_profiles_get(httpd_req_t *req)
         cJSON_AddBoolToObject(o, "valid", p.valid);
         cJSON_AddStringToObject(o, "ssid", p.valid ? p.ssid : "");
         cJSON_AddBoolToObject(o, "has_pass", p.valid && p.pass[0]);
+        cJSON_AddNumberToObject(o, "security", p.valid ? p.security : 0);
+        cJSON_AddBoolToObject(o, "held", p.valid && (held & (1u << i)));
         cJSON_AddStringToObject(o, "pass", p.valid ? p.pass : "");
         cJSON_AddBoolToObject(o, "dhcp", !p.valid || p.dhcp);
         cJSON_AddStringToObject(o, "ip", p.valid ? p.ip : "");
@@ -1180,6 +1193,12 @@ static esp_err_t api_profile_save(httpd_req_t *req)
         strlcpy(p.pass, pw, sizeof(p.pass));
     } else if (!jbool(j, "clear_pass", false) && old.valid && strcmp(old.ssid, p.ssid) == 0) {
         strlcpy(p.pass, old.pass, sizeof(p.pass));
+    }
+    // v0.11.0: keep the security level of an unchanged SSID (e.g. WPA3-only from a QR import)
+    // unless the password change makes it inconsistent; then fall back to legacy AUTO.
+    if (old.valid && strcmp(old.ssid, p.ssid) == 0) p.security = old.security;
+    if ((p.security == STA_SEC_OPEN && p.pass[0]) || (p.security > STA_SEC_OPEN && !p.pass[0])) {
+        p.security = STA_SEC_AUTO;
     }
     p.dhcp = jbool(j, "dhcp", true);
     strlcpy(p.ip, jstr(j, "ip"), sizeof(p.ip));
@@ -1827,7 +1846,7 @@ static esp_err_t api_logstore_clear_post(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
-// Camera API (v0.10.0): status, preview frame, capture, saved photos (/store/photos)
+// Camera API (v0.10.0): status, preview frame, capture, photos (v0.11.0: volatile PSRAM store)
 // ---------------------------------------------------------------------------
 
 #define CAMERA_LIST_MAX 500
@@ -1843,7 +1862,7 @@ static void add_camera_settings(cJSON *j, const camera_settings_t *s)
     cJSON_AddBoolToObject(j, "live_preview", s->live_preview);
     cJSON_AddNumberToObject(j, "idle_stop_s", s->idle_stop_s);
     cJSON_AddNumberToObject(j, "max_photos", s->max_photos);
-    cJSON_AddNumberToObject(j, "reserve_kb", s->reserve_kb);
+    cJSON_AddNumberToObject(j, "store_kb", s->store_kb);
 }
 
 static esp_err_t api_camera_settings_get(httpd_req_t *req)
@@ -1908,7 +1927,7 @@ static esp_err_t api_camera_settings_post(httpd_req_t *req)
             camera_json_int(j, "photo_quality", 10, 100, &s.photo_quality) &&
             camera_json_int(j, "idle_stop_s", 2, 600, &s.idle_stop_s) &&
             camera_json_int(j, "max_photos", 1, 500, &s.max_photos) &&
-            camera_json_int(j, "reserve_kb", 0, 2048, &s.reserve_kb) &&
+            camera_json_int(j, "store_kb", CAMERA_STORE_KB_MIN, CAMERA_STORE_KB_MAX, &s.store_kb) &&
             camera_json_bool(j, "hflip", &s.hflip) &&
             camera_json_bool(j, "vflip", &s.vflip) &&
             camera_json_bool(j, "live_preview", &s.live_preview);
@@ -1926,8 +1945,8 @@ static esp_err_t api_camera_status_get(httpd_req_t *req)
     camera_settings_t settings;
     camera_settings_defaults(&settings);
     camera_get_settings(&settings);
-    logstore_info_t li;
-    logstore_get_info(&li);
+    camera_store_info_t si;
+    camera_store_info(&si);
     cJSON *j = cJSON_CreateObject();
     cJSON_AddBoolToObject(j, "enabled", st.state != CAMERA_STATE_DISABLED);
     cJSON_AddStringToObject(j, "state", camera_state_name(st.state));
@@ -1939,10 +1958,18 @@ static esp_err_t api_camera_status_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "error", st.last_error);
     cJSON_AddStringToObject(j, "last_photo", st.last_photo);
     cJSON_AddNumberToObject(j, "max_photos", settings.max_photos);
+    // v0.11.0: photos live in PSRAM only (lost on reboot); nothing is stored on flash.
     cJSON *sto = cJSON_AddObjectToObject(j, "storage");
-    cJSON_AddBoolToObject(sto, "mounted", li.mounted);
-    cJSON_AddNumberToObject(sto, "free_kb", li.free_kb);
-    cJSON_AddNumberToObject(sto, "total_kb", li.total_kb);
+    cJSON_AddStringToObject(sto, "type", "psram");
+    cJSON_AddBoolToObject(sto, "volatile", true);
+    cJSON_AddBoolToObject(sto, "available", si.psram);
+    cJSON_AddNumberToObject(sto, "count", si.count);
+    cJSON_AddNumberToObject(sto, "max_photos", si.max_photos);
+    cJSON_AddNumberToObject(sto, "used_bytes", si.used_bytes);
+    cJSON_AddNumberToObject(sto, "pending_bytes", si.pending_bytes);
+    cJSON_AddNumberToObject(sto, "budget_bytes", si.budget_bytes);
+    cJSON_AddNumberToObject(sto, "psram_free_kb", si.psram_free / 1024);
+    cJSON_AddNumberToObject(sto, "psram_largest_kb", si.psram_largest / 1024);
     cJSON *arr = cJSON_AddArrayToObject(j, "photos");
     camera_photo_t *list = calloc(CAMERA_LIST_MAX, sizeof(camera_photo_t));
     int n = list ? camera_photo_list(list, CAMERA_LIST_MAX) : 0;
@@ -2005,24 +2032,23 @@ static esp_err_t api_camera_capture_post(httpd_req_t *req)
 }
 
 // GET /api/camera/photo?name=IMG00001.JPG  (add &dl=1 to download)
+// Streams from the PSRAM store under a reference: a concurrent delete/prune frees the photo only
+// after this download finished.
 static esp_err_t api_camera_photo_get(httpd_req_t *req)
 {
-    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "", dl[4] = "", path[48];
+    char q[64], name[CAMERA_PHOTO_NAME_LEN] = "", dl[4] = "";
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
         httpd_query_key_value(q, "name", name, sizeof(name));
         httpd_query_key_value(q, "dl", dl, sizeof(dl));
     }
-    if (!camera_photo_path(name, path, sizeof(path))) {
+    if (!camera_photo_name_ok(name)) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "usage: GET /api/camera/photo?name=IMGnnnnn.JPG");
     }
-    if (!logstore_lock(5000)) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "storage busy");
-    }
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        logstore_unlock();
+    camera_photo_ref_t *ref = NULL;
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    if (camera_photo_open(name, &ref, &data, &len) != ESP_OK) {
         httpd_resp_send_404(req);
         return ESP_FAIL;
     }
@@ -2033,16 +2059,12 @@ static esp_err_t api_camera_photo_get(httpd_req_t *req)
         snprintf(disp, sizeof(disp), "attachment; filename=\"mypi-%s\"", name);
         httpd_resp_set_hdr(req, "Content-Disposition", disp);
     }
-    const size_t bs = 4096;
-    char *buf = malloc(bs);
-    esp_err_t err = buf ? ESP_OK : ESP_ERR_NO_MEM;
-    size_t r;
-    while (err == ESP_OK && (r = fread(buf, 1, bs, f)) > 0) {
-        err = httpd_resp_send_chunk(req, buf, r);
+    esp_err_t err = ESP_OK;
+    for (size_t off = 0; err == ESP_OK && off < len; off += 4096) {
+        size_t n = len - off < 4096 ? len - off : 4096;
+        err = httpd_resp_send_chunk(req, (const char *)data + off, n);
     }
-    fclose(f);
-    logstore_unlock();
-    free(buf);
+    camera_photo_close(ref);
     if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
     return err;
 }
@@ -2059,6 +2081,111 @@ static esp_err_t api_camera_delete_post(httpd_req_t *req)
     return send_result(req, err, "deleted", err == ESP_ERR_NOT_FOUND ? "photo not found" : NULL);
 }
 
+// ---------------------------------------------------------------------------
+// v0.11.0 Wi-Fi QR import (wifi_prov.c): jobs run in a worker, the page polls the status.
+// Credentials never appear in URLs or responses; the status reports the password length only.
+// ---------------------------------------------------------------------------
+
+static esp_err_t wifiqr_result(httpd_req_t *req, esp_err_t err, const char *ok_msg)
+{
+    const char *hint = err == ESP_ERR_INVALID_STATE ? "busy: wait for the current step to finish" :
+                       err == ESP_ERR_NOT_FOUND ? "no decoded Wi-Fi code to review: scan first" :
+                       err == ESP_ERR_NO_MEM ? "out of memory" : NULL;
+    if (err == ESP_ERR_INVALID_STATE) httpd_resp_set_status(req, "409 Conflict");
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return send_result(req, err, NULL, hint);
+    }
+    if (err == ESP_OK) return send_result(req, err, ok_msg, NULL);
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "ok", false);
+    cJSON_AddStringToObject(j, "error", hint);
+    return send_json(req, j);
+}
+
+static esp_err_t api_wifiqr_status_get(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json(req, wifi_prov_status_json());
+}
+
+static esp_err_t api_wifiqr_scan_post(httpd_req_t *req)
+{
+    return wifiqr_result(req, wifi_prov_scan_camera(), "scanning");
+}
+
+// POST /api/wifiqr/payload {"payload":"WIFI:..."} - manual text from another trusted reader. The
+// body holds a password: it is wiped after parsing.
+static esp_err_t api_wifiqr_payload_post(httpd_req_t *req)
+{
+    if (req->content_len == 0 || req->content_len > 1024) {
+        return send_result(req, ESP_ERR_INVALID_SIZE, NULL, "body must be JSON {\"payload\":\"WIFI:...\"} (max 1 KB)");
+    }
+    char *buf = malloc(req->content_len + 1);
+    if (!buf) return send_result(req, ESP_ERR_NO_MEM, NULL, NULL);
+    size_t got = 0;
+    while (got < req->content_len) {
+        int r = httpd_req_recv(req, buf + got, req->content_len - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) break;
+        got += r;
+    }
+    buf[got] = 0;
+    cJSON *j = got == req->content_len ? cJSON_Parse(buf) : NULL;
+    memset(buf, 0, req->content_len + 1);
+    free(buf);
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, "payload");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsString(v) && v->valuestring) {
+        size_t len = strlen(v->valuestring);
+        err = wifi_prov_submit_text(v->valuestring, len);
+        memset(v->valuestring, 0, len);
+    }
+    cJSON_Delete(j);
+    if (err == ESP_ERR_INVALID_ARG || err == ESP_ERR_INVALID_SIZE) {
+        return send_result(req, err, NULL, "payload must be WIFI: text of 1-512 bytes");
+    }
+    return wifiqr_result(req, err, "checking");
+}
+
+static esp_err_t api_wifiqr_rescan_post(httpd_req_t *req)
+{
+    return wifiqr_result(req, wifi_prov_rescan(), "scanning networks");
+}
+
+// POST /api/wifiqr/commit {"connect":bool,"slot":-1..9,"overwrite":bool}
+static esp_err_t api_wifiqr_commit_post(httpd_req_t *req)
+{
+    READ_BODY_OR_400(j);
+    const cJSON *c = cJSON_GetObjectItemCaseSensitive(j, "connect");
+    bool valid = cJSON_IsBool(c);
+    bool connect = cJSON_IsTrue(c);
+    int slot = jint(j, "slot", -1);
+    bool overwrite = jbool(j, "overwrite", false);
+    cJSON_Delete(j);
+    if (!valid) return send_result(req, ESP_ERR_INVALID_ARG, NULL, "connect must be true or false");
+    esp_err_t err = wifi_prov_commit(connect, slot, overwrite);
+    if (err == ESP_ERR_INVALID_ARG) return send_result(req, err, NULL, "slot must be -1 (automatic) or 0-9");
+    return wifiqr_result(req, err, connect ? "saving and connecting" : "saving");
+}
+
+static esp_err_t api_wifiqr_cancel_post(httpd_req_t *req)
+{
+    esp_err_t err = wifi_prov_cancel();
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddBoolToObject(j, "ok", false);
+        cJSON_AddStringToObject(j, "error", "this step cannot be cancelled (it finishes by itself)");
+        return send_json(req, j);
+    }
+    return send_result(req, err, "cancel requested", NULL);
+}
+
+static esp_err_t api_wifiqr_discard_post(httpd_req_t *req)
+{
+    return wifiqr_result(req, wifi_prov_discard(), "discarded");
+}
+
 esp_err_t web_start(void)
 {
     // httpd_sock_err() logs a warning BEFORE it inspects errno; the logging path can clobber
@@ -2069,7 +2196,7 @@ esp_err_t web_start(void)
     cfg.stack_size = 10240;
     cfg.recv_wait_timeout = UPLOAD_RECV_TIMEOUT_S;
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 56;
+    cfg.max_uri_handlers = 64;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[FAIL] httpd_start: %s", esp_err_to_name(err));
@@ -2131,6 +2258,13 @@ esp_err_t web_start(void)
         { .uri = "/api/camera/capture", .method = HTTP_POST, .handler = api_camera_capture_post },
         { .uri = "/api/camera/photo",   .method = HTTP_GET,  .handler = api_camera_photo_get },
         { .uri = "/api/camera/delete",  .method = HTTP_POST, .handler = api_camera_delete_post },
+        { .uri = "/api/wifiqr/status",  .method = HTTP_GET,  .handler = api_wifiqr_status_get },
+        { .uri = "/api/wifiqr/scan",    .method = HTTP_POST, .handler = api_wifiqr_scan_post },
+        { .uri = "/api/wifiqr/payload", .method = HTTP_POST, .handler = api_wifiqr_payload_post },
+        { .uri = "/api/wifiqr/rescan",  .method = HTTP_POST, .handler = api_wifiqr_rescan_post },
+        { .uri = "/api/wifiqr/commit",  .method = HTTP_POST, .handler = api_wifiqr_commit_post },
+        { .uri = "/api/wifiqr/cancel",  .method = HTTP_POST, .handler = api_wifiqr_cancel_post },
+        { .uri = "/api/wifiqr/discard", .method = HTTP_POST, .handler = api_wifiqr_discard_post },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);
