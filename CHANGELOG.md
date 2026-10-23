@@ -5,6 +5,24 @@ All notable changes to the MyPi-Hotspot firmware (ESP32-P4 host). Versions match
 board; build and hardware validation status are stated for unreleased changes.
 All versions up to and including 0.7.0 have been run on the hardware.
 
+## 0.10.1 — 2026-10-23 (builds, not hardware-tested)
+
+- Host component `espressif/esp_hosted` 3.0.9 -> 3.0.10 (`main/idf_component.yml`).
+- C5 slave project (`c5_slave/`) also moved to esp_hosted 3.0.10; reported
+  version `CONFIG_APP_PROJECT_VER` = "3.0.10". Buffer and SDIO queue values are
+  unchanged (v0.9.6/v0.9.8 values: 16/64/64, BA 32, SDIO queues 40/40).
+- Compatibility: host and C5 differ only in the patch version if the C5 still
+  runs 3.0.9; the 3.0.10 host logs "patch version differs (compatible)" and
+  continues. New RPC v2 fields in 3.0.10 (Wi-Fi init extras, RF-cert requests)
+  are additions that a 3.0.9 C5 ignores. Recommended: flash the 3.0.10 C5 too.
+- Relevant upstream 3.0.10 fixes: host/sdio card-init retries no longer fail
+  with "can't acquire the channel" on the on-chip LDO; C5 SDIO speed/timing
+  options now take effect (our C5 config uses the defaults); C5 OTA begin no
+  longer erases the whole partition up front (faster `/c5update`, no RPC
+  timeout); C5 heartbeat range checks. No Kconfig renames affect this project.
+- No sdkconfig, buffer or application code changes. ESP-IDF #19238 (C5 TX hang
+  under uplink load) is an ESP-IDF Wi-Fi library issue and is not fixed by this.
+
 ## 0.10.0 — 2026-10-19 (compile-checked with ESP-IDF v6.1, not hardware-tested)
 
 Camera support for the OV5647 module ("P5V04A SUNNY") on the NANO MIPI-CSI connector.

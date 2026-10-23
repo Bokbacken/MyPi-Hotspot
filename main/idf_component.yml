@@ -9,7 +9,7 @@ dependencies:
     rules:
       - if: "target in [esp32p4]"
   espressif/esp_hosted:
-    version: "3.0.9"
+    version: "3.0.10"
     rules:
       - if: "target in [esp32p4]"
   espressif/mdns:
