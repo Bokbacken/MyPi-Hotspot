@@ -1,6 +1,6 @@
-# ESP32-C5 co-processor firmware (ESP-Hosted 3.0.9 slave)
+# ESP32-C5 co-processor firmware (ESP-Hosted 3.0.10 slave)
 
-Based on `examples/wifi/apsta/cp` from esp_hosted 3.0.9, with the partition layout of the
+Based on `examples/wifi/apsta/cp` from esp_hosted 3.0.9 (dependency 3.0.10 since MyPi-Hotspot v0.10.1), with the partition layout of the
 ESP-Hosted 2.x C5 slave (table at 0xC000, OTA slots 0x1E0000) so the image can be installed
 by host-driven OTA from the MyPi-Hotspot web UI (`/c5update`).
 

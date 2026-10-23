@@ -11,6 +11,11 @@ path: the home status viewport is rendered by LVGL with a MyPi font (ASCII, å �
 μ/π), and touch is fed to an LVGL pointer input device. Backend/API, OTA and rescue
 paths are unchanged. See [migration boundaries](docs/ARCHITECTURE.md#lvgl-migration).
 
+**0.10.1** (builds, not hardware-tested): ESP-Hosted host component 3.0.9 -> **3.0.10**; the
+`c5_slave/` project is on 3.0.10 too (same buffer values as v0.9.8). A 3.0.9 C5 still works
+(patch difference only, logged as compatible), but flashing the 3.0.10 C5 is recommended.
+No buffer/sdkconfig changes.
+
 **0.10.0** (compile-checked, not hardware-tested): **camera support** for the OV5647 module
 ("P5V04A SUNNY") on the NANO's MIPI-CSI connector: an LCD **Camera** page (live preview +
 SHUTTER) and a web **Camera** page (preview, shutter, saved photos). See [Camera](#camera-v0100).
@@ -19,7 +24,7 @@ SHUTTER) and a web **Camera** page (preview, shutter, saved photos). See [Camera
 test); restores v0.9.6 host/C5 buffer defaults. C5 buffer tuning is deferred until an official
 ESP-Hosted 3.0.10+ release. Use the "3.0.9 tuned" C5 firmware with this P4 image.
 
-Current firmware release: **0.10.0** (see above and [CHANGELOG.md](CHANGELOG.md)).
+Current firmware release: **0.10.1** (see above and [CHANGELOG.md](CHANGELOG.md)).
 v0.9.6 added 5 GHz channel-width control (HT40 / HT20, Optimize page) and an SDIO clock
 option (40 / 50 MHz); v0.8.7 introduced the reusable LVGL scroll-wheel keyboard; v0.8.1
 introduced the approved MyPi μ/π logo in the LCD and web headers, a new **web theme**, an
@@ -381,7 +386,7 @@ Note: flashing the *merged* image over USB erases NVS (settings) but not the log
 ## Wi-Fi co-processor (ESP32-C5)
 
 Wi-Fi runs on the on-board ESP32-C5, which must run **ESP-Hosted slave firmware** compatible with
-the host component (v3.x since v0.6.0, pinned to 3.0.9; v0.5.x used 2.13). 2.x and 3.x do not
+the host component (v3.x since v0.6.0, pinned to 3.0.10 since v0.10.1, 3.0.9 before; v0.5.x used 2.13). 2.x and 3.x do not
 talk to each other. The log prints both versions at startup and warns on mismatch. If Wi-Fi init
 fails or the version cannot be read, update the C5 firmware (see `c5_slave/`). The display, touch,
 Ethernet and P4 `/update` keep working without Wi-Fi; the board never reboots on a C5 link failure.
@@ -398,6 +403,11 @@ If P4 v0.6.0 is flashed first, flash the C5 over USB (`c5-slave-esp-hosted-v3.0.
 dynamic RX 64, dynamic TX 64, A-MPDU TX/RX with BA window 32, and the C5 SDIO TX/RX queues to 40. This build is
 published as `c5-slave-esp-hosted-v3.0.9-tuned.bin` (OTA via `/c5update`) and `...-tuned-merged.bin` (USB).
 It still reports slave version 3.0.9, so it stays compatible with the 3.0.9 host.
+
+**ESP-Hosted 3.0.10 (v0.10.1).** Host and `c5_slave/` are both on 3.0.10 with the same buffer values
+as above. The C5 image is published as `c5-slave-esp-hosted-v3.0.10.bin` (OTA via `/c5update`) and
+`c5-slave-esp-hosted-v3.0.10-merged.bin` (USB). A C5 still on 3.0.9 keeps working with the 3.0.10
+host (patch version differs only; the host logs "patch version differs (compatible)").
 
 ## Wi-Fi, AP & Ethernet
 
