@@ -472,7 +472,7 @@ static void connect_flow(uint32_t txn, const sta_profile_t *pp, const sta_profil
         break;
     case WQT_RES_FAILED_RESTORE_FAILED:
         snprintf(m, sizeof(m), "Could not connect to \"%s\": %s. Restoring \"%s\" also failed: %s; automatic "
-                 "reconnect continues.%s", p.ssid, fail_text(t.new_fail), snap.profile.ssid,
+                 "reconnect continues.%.100s", p.ssid, fail_text(t.new_fail), snap.profile.ssid,
                  fail_text(t.prior_fail), prof);
         break;
     case WQT_RES_FAILED_NO_PRIOR:
